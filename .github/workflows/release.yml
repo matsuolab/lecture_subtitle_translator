@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: frontend/src-tauri/target/release/subtitle-editor.exe
+            asset: subtitle-editor-windows-x64.exe
+
+          - os: macos-latest
+            artifact: frontend/src-tauri/target/release/subtitle-editor
+            asset: subtitle-editor-macos-arm64
+
+          - os: ubuntu-22.04
+            artifact: frontend/src-tauri/target/release/subtitle-editor
+            asset: subtitle-editor-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './frontend/src-tauri -> target'
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # アイコンをPythonで生成してtauri iconで全サイズ展開
+      - name: Generate icons
+        working-directory: frontend
+        run: |
+          python3 -c "
+          import struct, zlib, os
+          def chunk(t, d):
+              return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t+d)&0xffffffff)
+          def make_png(w, h):
+              raw = b''.join(b'\x00' + bytes([99, 102, 241] * w) for _ in range(h))
+              return (b'\x89PNG\r\n\x1a\n'
+                      + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                      + chunk(b'IDAT', zlib.compress(raw))
+                      + chunk(b'IEND', b''))
+          os.makedirs('src-tauri/icons', exist_ok=True)
+          open('src-tauri/icons/source.png', 'wb').write(make_png(1024, 1024))
+          print('Source icon created (1024x1024 indigo)')
+          "
+          npx @tauri-apps/cli icon src-tauri/icons/source.png
+
+      - name: Build Tauri app (portable)
+        working-directory: frontend
+        run: npx @tauri-apps/cli build --bundles none
+
+      # 配布用にリネームしてリリースにアップロード
+      - name: Prepare artifact
+        shell: bash
+        run: cp "${{ matrix.artifact }}" "${{ matrix.asset }}"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ${{ matrix.asset }}
