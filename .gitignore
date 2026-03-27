@@ -1,0 +1,30 @@
+# Private: meeting logs & internal context
+00_context/
+10_meetings/
+
+# Internal docs (research logs, ideas, drafts)
+docs/research/
+docs/ideas.md
+
+# PoC actual data (real lecture content - do not commit)
+poc/data/
+poc/.env
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Environment
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
