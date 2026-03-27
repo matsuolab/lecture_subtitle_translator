@@ -79,7 +79,7 @@ jobs:
 
       - name: Build Tauri app (portable)
         working-directory: frontend
-        run: npx @tauri-apps/cli build --bundles none
+        run: npx @tauri-apps/cli build
 
       # 配布用にリネームしてリリースにアップロード
       - name: Prepare artifact
