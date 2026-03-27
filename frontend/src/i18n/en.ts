@@ -21,6 +21,9 @@ export const en: LocaleStrings = {
   reSplitAlert: (id) => `Re-splitting block #${id} (calls LLM API in production)`,
   reTranslateAlert: (id) => `Re-translating block #${id} (calls LLM API in production)`,
   importError: 'Failed to load project file',
+  loadSrt: 'Load SRT',
+  loadSrtTitle: 'Load SRT file (1 line: English only / 2 lines: Japanese + English)',
+  importSrtError: 'Failed to load SRT file',
 
   approve: 'Approve',
   approvedBtn: 'Approved ✓',

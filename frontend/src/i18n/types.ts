@@ -21,6 +21,9 @@ export interface LocaleStrings {
   reSplitAlert: (id: number) => string
   reTranslateAlert: (id: number) => string
   importError: string
+  loadSrt: string
+  loadSrtTitle: string
+  importSrtError: string
 
   // SubtitleBlock
   approve: string

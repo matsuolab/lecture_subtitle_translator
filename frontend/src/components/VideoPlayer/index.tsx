@@ -1,11 +1,7 @@
 import { useRef, useCallback, useState } from 'react'
-import { Play, Pause, Volume2 } from 'lucide-react'
+import { Play, Pause, Volume2, Film } from 'lucide-react'
 import { formatTime, type SubtitleBlock } from '@/types/subtitle'
 import { useTheme } from '@/context/ThemeContext'
-
-// Big Buck Bunny (CC BY 3.0) — Blender Foundation
-// 自然の森を舞台にした約9分のアニメ短編。権利クリア。
-const SAMPLE_VIDEO_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
 
 interface SubtitleOverlay {
   text: string
@@ -14,28 +10,59 @@ interface SubtitleOverlay {
 
 interface VideoPlayerProps {
   videoRef: React.RefObject<HTMLVideoElement | null>
+  videoUrl: string | null
   currentTime: number
   isPlaying: boolean
   totalDuration: number
   onTogglePlay: () => void
   onSeek: (seconds: number) => void
+  onLoadVideo: (file: File) => void
   subtitleOverlay: SubtitleOverlay | null
   blocks?: SubtitleBlock[]
+  onTimeUpdate: () => void
+  onPlay: () => void
+  onPause: () => void
+  onLoadedMetadata: () => void
 }
 
 export function VideoPlayer({
   videoRef,
+  videoUrl,
   currentTime,
   isPlaying,
   totalDuration,
   onTogglePlay,
   onSeek,
+  onLoadVideo,
   subtitleOverlay,
   blocks,
+  onTimeUpdate,
+  onPlay,
+  onPause,
+  onLoadedMetadata,
 }: VideoPlayerProps) {
   const { theme } = useTheme()
   const seekBarRef = useRef<HTMLDivElement>(null)
   const [hoverPct, setHoverPct] = useState<number | null>(null)
+  const [isDragOver, setIsDragOver] = useState(false)
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    if (e.dataTransfer.types.includes('Files')) setIsDragOver(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    // 子要素への移動では発火させない
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return
+    setIsDragOver(false)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(false)
+    const file = Array.from(e.dataTransfer.files).find(f => f.type.startsWith('video/'))
+    if (file) onLoadVideo(file)
+  }, [onLoadVideo])
   const progress = totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0
 
   const handleSeekMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -61,19 +88,47 @@ export function VideoPlayer({
     window.addEventListener('mouseup', onUp)
   }, [totalDuration, onSeek])
 
+  // ── DEBUG ──────────────────────────────────────────────────────────────
+  const dbg = videoRef.current
+  const debugInfo = dbg
+    ? `readyState=${dbg.readyState} dom_dur=${dbg.duration?.toFixed(1)} react_dur=${totalDuration.toFixed(1)} src=${dbg.src ? '✓' : '✗'}`
+    : `ref=null react_dur=${totalDuration.toFixed(1)}`
+  // ───────────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
+      {/* DEBUGバー（常時表示） */}
+      <div style={{ fontSize: 9, color: '#0f0', background: '#111', padding: '2px 8px', fontFamily: 'monospace', flexShrink: 0 }}>
+        url={videoUrl ? videoUrl.slice(0, 30) : 'null'} | {debugInfo}
+      </div>
       {/* 動画エリア */}
-      <div className="relative flex-1 min-h-0" style={{ background: '#000', overflow: 'hidden' }}>
-        <video
-          ref={videoRef}
-          className="w-full h-full"
-          style={{ objectFit: 'cover', cursor: 'pointer' }}
-          preload="metadata"
-          onClick={onTogglePlay}
-        >
-          <source src={SAMPLE_VIDEO_URL} type="video/mp4" />
-        </video>
+      <div
+        className="relative flex-1 min-h-0"
+        style={{ background: '#000', overflow: 'hidden' }}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {videoUrl ? (
+          <video
+            ref={videoRef}
+            src={videoUrl ?? undefined}
+            className="w-full h-full"
+            style={{ objectFit: 'contain', cursor: 'pointer' }}
+            preload="metadata"
+            onClick={onTogglePlay}
+            onTimeUpdate={onTimeUpdate}
+            onPlay={onPlay}
+            onPause={onPause}
+            onLoadedMetadata={onLoadedMetadata}
+          />
+        ) : (
+          <div className="w-full h-full flex flex-col items-center justify-center gap-3"
+            style={{ color: '#4a5568' }}>
+            <Film size={40} strokeWidth={1.2} />
+            <span style={{ fontSize: 13 }}>動画ファイルを読み込んでください</span>
+          </div>
+        )}
 
         {/* 字幕オーバーレイ */}
         {subtitleOverlay && (
@@ -106,6 +161,24 @@ export function VideoPlayer({
               borderRadius: '0 0 6px 6px',
               transition: 'width 0.1s linear',
             }} />
+          </div>
+        )}
+
+        {/* ドラッグ中オーバーレイ */}
+        {isDragOver && (
+          <div style={{
+            position: 'absolute', inset: 0,
+            background: 'rgba(74,144,255,0.18)',
+            border: '2px dashed rgba(74,144,255,0.8)',
+            borderRadius: 6,
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            gap: 8, pointerEvents: 'none',
+          }}>
+            <Film size={36} color="rgba(74,144,255,0.9)" strokeWidth={1.2} />
+            <span style={{ color: 'rgba(74,144,255,0.9)', fontSize: 13, fontWeight: 600 }}>
+              ドロップして動画を読み込む
+            </span>
           </div>
         )}
       </div>

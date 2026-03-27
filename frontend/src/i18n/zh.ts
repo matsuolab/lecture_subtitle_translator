@@ -21,6 +21,9 @@ export const zh: LocaleStrings = {
   reSplitAlert: (id) => `重新分割块 #${id}（正式版将调用 LLM API）`,
   reTranslateAlert: (id) => `重新翻译块 #${id}（正式版将调用 LLM API）`,
   importError: '项目文件加载失败',
+  loadSrt: '加载 SRT',
+  loadSrtTitle: '加载 SRT 文件（1行: 仅英语 / 2行: 日语＋英语）',
+  importSrtError: 'SRT 文件加载失败',
 
   approve: '审批',
   approvedBtn: '已审批 ✓',

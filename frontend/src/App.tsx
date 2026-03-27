@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Download, Save, FolderOpen, Settings } from 'lucide-react'
+import { Download, Save, FolderOpen, Settings, Film } from 'lucide-react'
 import { VideoPlayer } from '@/components/VideoPlayer'
 import { SubtitleBlockList } from '@/components/SubtitleBlockList'
 import { GlossaryTab } from '@/components/GlossaryTab'
@@ -8,12 +8,13 @@ import { SettingsTab } from '@/components/SettingsTab'
 import { TimelineBar } from '@/components/TimelineBar'
 import { useVideoSync } from '@/hooks/useVideoSync'
 import { useHistory } from '@/hooks/useHistory'
-import { mockSubtitles, TOTAL_DURATION } from '@/data/mockSubtitles'
+import { mockSubtitles } from '@/data/mockSubtitles'
 import {
   saveToLocalStorage,
   loadFromLocalStorage,
   exportProjectJson,
   importProjectJson,
+  importSrt,
   exportSrt,
 } from '@/api/persistence'
 import type { SubtitleBlock } from '@/types/subtitle'
@@ -36,6 +37,9 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
   const [restoredMsg, setRestoredMsg] = useState(restored !== null)
   const importRef = useRef<HTMLInputElement>(null)
+  const srtImportRef = useRef<HTMLInputElement>(null)
+  const videoFileRef = useRef<HTMLInputElement>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
 
   // パネルリサイズ
   const [leftPct, setLeftPct] = useState(45)
@@ -79,8 +83,22 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }, [])
 
-  const { videoRef, currentTime, isPlaying, activeBlockId, seekTo, togglePlay } =
-    useVideoSync(blocks)
+  const { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata } =
+    useVideoSync(blocks, videoUrl)
+
+  const loadVideoFile = useCallback((file: File) => {
+    setVideoUrl(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return URL.createObjectURL(file)
+    })
+  }, [])
+
+  const handleLoadVideo = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    loadVideoFile(file)
+    e.target.value = ''
+  }, [loadVideoFile])
 
   // I/O ショートカット用: currentTime は毎フレーム変わるため ref で保持
   const currentTimeRef = useRef(currentTime)
@@ -114,6 +132,18 @@ export default function App() {
     }
     e.target.value = ''
   }, [reset])
+
+  const handleImportSrt = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      const imported = await importSrt(file)
+      reset(imported)
+    } catch {
+      alert(t.importSrtError)
+    }
+    e.target.value = ''
+  }, [reset, t.importSrtError])
 
   const handleBlockSelect = useCallback((block: SubtitleBlock) => {
     seekTo(block.startTime)
@@ -429,19 +459,38 @@ export default function App() {
         {/* 左：動画パネル */}
         <section className="flex flex-col overflow-hidden rounded-[10px] shadow-[0_6px_20px_rgba(0,0,0,0.28)]"
           style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}`, position: 'relative', zIndex: 1, width: `${leftPct}%`, flexShrink: 0 }}>
-          <div className="px-[14px] py-[10px] text-[14px] font-semibold shrink-0 tracking-[0.2px]"
+          <div className="px-[14px] py-[10px] text-[14px] font-semibold shrink-0 tracking-[0.2px] flex items-center"
             style={{ borderBottom: `1px solid ${theme.panelBorder}`, background: theme.headerBg, color: theme.textPrimary }}>
             {t.videoPlayer}
+            <input ref={videoFileRef} type="file" accept="video/*" onChange={handleLoadVideo} style={{ display: 'none' }} />
+            <button
+              className="flex items-center gap-1 ml-auto"
+              onClick={() => videoFileRef.current?.click()}
+              style={{
+                fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
+                borderRadius: 5, border: `1px solid ${theme.panelBorder}`,
+                background: theme.btnBg, cursor: 'pointer', fontWeight: 400,
+              }}
+            >
+              <Film size={11} />
+              動画を読み込む
+            </button>
           </div>
           <VideoPlayer
             videoRef={videoRef}
+            videoUrl={videoUrl}
             currentTime={currentTime}
             isPlaying={isPlaying}
-            totalDuration={TOTAL_DURATION}
+            totalDuration={duration}
+            onLoadVideo={loadVideoFile}
             onTogglePlay={togglePlay}
             onSeek={seekTo}
             subtitleOverlay={subtitleOverlay}
             blocks={blocks}
+            onTimeUpdate={onTimeUpdate}
+            onPlay={onPlay}
+            onPause={onPause}
+            onLoadedMetadata={onLoadedMetadata}
           />
           {/* 縦リサイズハンドル (動画 ↕ タイムライン) */}
           <div
@@ -461,7 +510,7 @@ export default function App() {
           <TimelineBar
             blocks={blocks}
             currentTime={currentTime}
-            totalDuration={TOTAL_DURATION}
+            totalDuration={duration}
             activeBlockId={activeBlockId}
             onSeek={seekTo}
             onBlockSelect={handleBlockSelect}
@@ -552,6 +601,23 @@ export default function App() {
 
               {/* 隠しファイル入力（JSON読み込み） */}
               <input ref={importRef} type="file" accept=".json" onChange={handleImportJson} style={{ display: 'none' }} />
+              {/* 隠しファイル入力（SRT読み込み） */}
+              <input ref={srtImportRef} type="file" accept=".srt,.txt" onChange={handleImportSrt} style={{ display: 'none' }} />
+
+              {/* SRT読み込み */}
+              <button
+                className="flex items-center gap-1"
+                onClick={() => srtImportRef.current?.click()}
+                title={t.loadSrtTitle}
+                style={{
+                  fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
+                  borderRadius: 5, border: `1px solid ${theme.panelBorder}`,
+                  background: theme.btnBg, cursor: 'pointer',
+                }}
+              >
+                <FolderOpen size={11} />
+                {t.loadSrt}
+              </button>
 
               {/* プロジェクト読み込み */}
               <button

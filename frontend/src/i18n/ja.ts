@@ -21,6 +21,9 @@ export const ja: LocaleStrings = {
   reSplitAlert: (id) => `ブロック #${id} を再分割します（本番では LLM API を呼び出し）`,
   reTranslateAlert: (id) => `ブロック #${id} を再翻訳します（本番では LLM API を呼び出し）`,
   importError: 'プロジェクトファイルの読み込みに失敗しました',
+  loadSrt: 'SRT読込',
+  loadSrtTitle: 'SRT ファイルを読み込む（1行: 英語のみ / 2行: 日本語＋英語）',
+  importSrtError: 'SRT ファイルの読み込みに失敗しました',
 
   approve: '承認',
   approvedBtn: '承認済 ✓',
