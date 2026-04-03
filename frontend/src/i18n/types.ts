@@ -8,6 +8,7 @@ export interface LocaleStrings {
   tabSubtitles: string
   tabDictionary: string
   tabHelp: string
+  tabReport: string
   saving: string
   saved: string
   loadProject: string
@@ -69,6 +70,26 @@ export interface LocaleStrings {
   shortcutsTitle: string
   aiAskTitle: string
   aiAskDesc: string
+
+
+  // ReportTab
+  reportSummary: string
+  reportRecentRuns: string
+  reportEmpty: string
+  reportTotalRuns: string
+  reportSuccessRate: string
+  reportAvgCost: string
+  reportAvgDuration: string
+  reportColSource: string
+  reportColStatus: string
+  reportColFinishedAt: string
+  reportColCost: string
+  reportColDuration: string
+  reportColQuality: string
+  reportStatusSuccess: string
+  reportStatusError: string
+  reportStatusRunning: string
+  reportStatusIdle: string
 
   // SettingsTab
   settingsColorTheme: string

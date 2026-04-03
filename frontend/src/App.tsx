@@ -7,6 +7,7 @@ import { VideoPlayer } from '@/components/VideoPlayer'
 import { SubtitleBlockList } from '@/components/SubtitleBlockList'
 import { GlossaryTab } from '@/components/GlossaryTab'
 import { HelpTab } from '@/components/HelpTab'
+import { ReportTab } from '@/components/ReportTab'
 import { SettingsTab } from '@/components/SettingsTab'
 import { TimelineBar } from '@/components/TimelineBar'
 import { useVideoSync } from '@/hooks/useVideoSync'
@@ -20,12 +21,13 @@ import {
   exportSrt,
 } from '@/api/persistence'
 import type { SubtitleBlock } from '@/types/subtitle'
+import type { PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
 import { applyGlossaryToText } from '@/utils/glossaryApply'
 
-type Tab = 'subtitles' | 'dictionary' | 'help' | 'settings'
+type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
 
 export default function App() {
@@ -44,6 +46,12 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [isDragOverRight, setIsDragOverRight] = useState(false)
   const lastHtmlDropRef = useRef(0)
+  const [pipelineRun, setPipelineRun] = useState<PipelineRunResult>({
+    status: 'idle',
+    step: 'idle',
+    message: '動画をドロップするとパイプラインを開始します',
+  })
+  const [pipelineHistory, setPipelineHistory] = useState<PipelineRunResult[]>([])
 
   // パネルリサイズ
   const [leftPct, setLeftPct] = useState(45)
@@ -117,6 +125,137 @@ export default function App() {
     return new File([data], name)
   }, [])
 
+
+  const sleep = useCallback((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)), [])
+
+
+  const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
+    const totalBlocks = Math.max(1, generated.length)
+    const cpsViolationCount = generated.filter(b => b.cps > 15).length
+    const overLengthCount = generated.filter(b => b.target.split('\n').some(line => line.length > 42)).length
+    const flaggedCount = generated.filter(b => b.status === 'flagged').length
+
+    const sourceChars = generated.reduce((sum, b) => sum + b.source.length, 0)
+    const targetChars = generated.reduce((sum, b) => sum + b.target.length, 0)
+    const inputTokens = Math.max(1, Math.round(sourceChars / 4))
+    const outputTokens = Math.max(1, Math.round(targetChars / 4))
+
+    const estimatedUsd =
+      (inputTokens / 1_000_000) * 0.30 +
+      (outputTokens / 1_000_000) * 2.50
+
+    return {
+      quality: {
+        totalBlocks,
+        cpsViolationRate: cpsViolationCount / totalBlocks,
+        overLengthRate: overLengthCount / totalBlocks,
+        flaggedCount,
+      },
+      cost: {
+        inputTokens,
+        outputTokens,
+        estimatedUsd,
+        durationMs: Math.max(0, finishedAt - startedAt),
+      },
+    }
+  }, [])
+
+  const appendPipelineHistory = useCallback((result: PipelineRunResult) => {
+    setPipelineHistory(prev => [result, ...prev].slice(0, 20))
+  }, [])
+
+  const buildPipelineStubBlocks = useCallback((videoName: string): SubtitleBlock[] => {
+    const rows: Array<{ start: number; end: number; source: string; target: string }> = [
+      {
+        start: 0,
+        end: 3.2,
+        source: '本動画を自動で文字起こしし、英語字幕を生成します。',
+        target: `This file (${videoName}) was transcribed and translated automatically.`,
+      },
+      {
+        start: 3.2,
+        end: 7.1,
+        source: '現在は開発途中のため、ここにはスタブ結果を表示しています。',
+        target: 'This is a development-stage pipeline preview result.',
+      },
+      {
+        start: 7.1,
+        end: 11.4,
+        source: '次のステップで WhisperX と翻訳APIの実処理をこの導線に接続します。',
+        target: 'WhisperX and real translation APIs will be connected in this same flow.',
+      },
+    ]
+
+    return rows.map((row, idx) => {
+      const charCount = row.target.length
+      const durationSec = Math.max(0.1, row.end - row.start)
+      return {
+        id: idx + 1,
+        startTime: row.start,
+        endTime: row.end,
+        source: row.source,
+        target: row.target,
+        cps: Math.round((charCount / durationSec) * 10) / 10,
+        charCount,
+        status: 'pending',
+        glossaryTerms: [],
+      }
+    })
+  }, [])
+
+  const runDropPipeline = useCallback(async (sourceName: string) => {
+    const startedAt = Date.now()
+    setActiveTab('subtitles')
+    try {
+      setPipelineRun({ status: 'running', step: 'transcribe', message: '文字起こしを実行中...', sourceName, startedAt })
+      await sleep(350)
+      setPipelineRun({ status: 'running', step: 'correct', message: '日本語テキストを補正中...', sourceName, startedAt })
+      await sleep(300)
+      setPipelineRun({ status: 'running', step: 'translate', message: '英訳を生成中...', sourceName, startedAt })
+      await sleep(350)
+      setPipelineRun({ status: 'running', step: 'subtitle', message: '字幕ブロックを生成中...', sourceName, startedAt })
+      await sleep(260)
+
+      const generated = buildPipelineStubBlocks(sourceName)
+      reset(generated)
+
+      const finishedAt = Date.now()
+      const result: PipelineRunResult = {
+        status: 'success',
+        step: 'done',
+        message: `パイプライン完了（${generated.length}ブロック）`,
+        sourceName,
+        startedAt,
+        finishedAt,
+        metrics: calcPipelineMetrics(generated, startedAt, finishedAt),
+      }
+      setPipelineRun(result)
+      appendPipelineHistory(result)
+    } catch (err) {
+      const result: PipelineRunResult = {
+        status: 'error',
+        step: 'done',
+        message: `パイプライン失敗: ${err instanceof Error ? err.message : '不明なエラー'}`,
+        sourceName,
+        startedAt,
+        finishedAt: Date.now(),
+      }
+      setPipelineRun(result)
+      appendPipelineHistory(result)
+    }
+  }, [appendPipelineHistory, buildPipelineStubBlocks, calcPipelineMetrics, reset, sleep])
+
+  const handleVideoInput = useCallback((file: File) => {
+    loadVideoFile(file)
+    void runDropPipeline(file.name)
+  }, [loadVideoFile, runDropPipeline])
+
+  const handleVideoPathInput = useCallback((path: string) => {
+    loadVideoPath(path)
+    const sourceName = path.split(/[\\/]/).pop() ?? path
+    void runDropPipeline(sourceName)
+  }, [loadVideoPath, runDropPipeline])
+
   const handleRightDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     if (e.dataTransfer.types.includes('Files')) setIsDragOverRight(true)
@@ -182,7 +321,7 @@ export default function App() {
       const name = path.toLowerCase()
       try {
         if (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.mkv') || name.endsWith('.webm')) {
-          loadVideoPath(path)
+          handleVideoPathInput(path)
           return
         }
         if (name.endsWith('.srt') || name.endsWith('.txt')) {
@@ -216,14 +355,14 @@ export default function App() {
       }
     }).then(fn => { unlisten = fn })
     return () => { if (unlisten) unlisten() }
-  }, [reset, importEntries, loadVideoPath, readTextFileAsFile, readBinaryFileAsFile])
+  }, [reset, importEntries, handleVideoPathInput, readTextFileAsFile, readBinaryFileAsFile])
 
   const handleLoadVideo = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-    loadVideoFile(file)
+    handleVideoInput(file)
     e.target.value = ''
-  }, [loadVideoFile])
+  }, [handleVideoInput])
 
   // I/O ショートカット用: currentTime は毎フレーム変わるため ref で保持
   const currentTimeRef = useRef(currentTime)
@@ -630,7 +769,7 @@ export default function App() {
             currentTime={currentTime}
             isPlaying={isPlaying}
             totalDuration={duration}
-            onLoadVideo={loadVideoFile}
+            onLoadVideo={handleVideoInput}
             onTogglePlay={togglePlay}
             onSeek={seekTo}
             subtitleOverlay={subtitleOverlay}
@@ -711,7 +850,7 @@ export default function App() {
 
           {/* タブ + アンドゥ/リドゥ + SRT出力 */}
           <div className="flex items-center shrink-0" style={{ borderBottom: `1px solid ${theme.panelBorder}`, background: theme.headerBg }}>
-            {(['subtitles', 'dictionary', 'help'] as Tab[]).map(tab => (
+            {(['subtitles', 'dictionary', 'help', 'report'] as Tab[]).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -729,7 +868,13 @@ export default function App() {
                   marginBottom: -1,
                 }}
               >
-                {tab === 'subtitles' ? t.tabSubtitles : tab === 'dictionary' ? t.tabDictionary : t.tabHelp}
+                {tab === 'subtitles'
+                  ? t.tabSubtitles
+                  : tab === 'dictionary'
+                    ? t.tabDictionary
+                    : tab === 'help'
+                      ? t.tabHelp
+                      : t.tabReport}
               </button>
             ))}
             <div className="ml-auto flex items-center gap-1.5 pr-3">
@@ -859,6 +1004,94 @@ export default function App() {
             </button>
           </div>
 
+
+          {activeTab === 'subtitles' && (
+            <div
+              className="shrink-0"
+              style={{
+                borderBottom: `1px solid ${theme.panelBorder}`,
+                background: theme.cardBg,
+                padding: '8px 10px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+                <span
+                  style={{
+                    display: 'inline-block',
+                    width: 8,
+                    height: 8,
+                    borderRadius: 999,
+                    background:
+                      pipelineRun.status === 'running'
+                        ? '#f59e0b'
+                        : pipelineRun.status === 'success'
+                          ? '#22c55e'
+                          : pipelineRun.status === 'error'
+                            ? '#ef4444'
+                            : theme.textMuted,
+                  }}
+                />
+                <span style={{ color: theme.textSecondary, fontWeight: 600 }}>
+                  Pipeline: {pipelineRun.status === 'running' ? '実行中' : pipelineRun.status === 'success' ? '完了' : pipelineRun.status === 'error' ? '失敗' : '待機中'}
+                </span>
+                {pipelineRun.sourceName && (
+                  <span style={{ color: theme.textMuted }}>
+                    {pipelineRun.sourceName}
+                  </span>
+                )}
+                {pipelineRun.step !== 'idle' && pipelineRun.step !== 'done' && (
+                  <span style={{ marginLeft: 'auto', color: theme.textMuted }}>
+                    step: {pipelineRun.step}
+                  </span>
+                )}
+              </div>
+
+              <div style={{ marginTop: 4, fontSize: 11, color: theme.textMuted }}>
+                {pipelineRun.message}
+              </div>
+              {pipelineRun.metrics && (
+                <div style={{
+                  marginTop: 6,
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: 10,
+                  fontSize: 10,
+                  color: theme.textSecondary,
+                }}>
+                  <span>
+                    CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%
+                  </span>
+                  <span>
+                    42文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%
+                  </span>
+                  <span>
+                    要確認: {pipelineRun.metrics.quality.flaggedCount}件
+                  </span>
+                  <span>
+                    Tokens(in/out): {pipelineRun.metrics.cost.inputTokens} / {pipelineRun.metrics.cost.outputTokens}
+                  </span>
+                  <span>
+                    推定コスト: ${pipelineRun.metrics.cost.estimatedUsd.toFixed(6)}
+                  </span>
+                  <span>
+                    処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s
+                  </span>
+                </div>
+              )}
+              {pipelineHistory.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 10, color: theme.textMuted }}>
+                  最近の実行履歴:
+                  {pipelineHistory.slice(0, 3).map((run, idx) => (
+                    <div key={`${run.startedAt ?? 0}-${idx}`} style={{ marginTop: 2 }}>
+                      - {run.sourceName ?? 'unknown'} / {run.status === 'success' ? '完了' : run.status === 'error' ? '失敗' : run.status}
+                      {run.metrics ? ` / $${run.metrics.cost.estimatedUsd.toFixed(6)} / ${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* タブコンテンツ */}
           <div className="flex-1 overflow-hidden min-h-0">
             {activeTab === 'subtitles' && (
@@ -885,6 +1118,7 @@ export default function App() {
             )}
             {activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}
             {activeTab === 'help' && <HelpTab />}
+            {activeTab === 'report' && <ReportTab runs={pipelineHistory} />}
             {activeTab === 'settings' && <SettingsTab />}
           </div>
         </section>
