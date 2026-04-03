@@ -1,10 +1,10 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback, useDeferredValue } from 'react'
 import { getCpsLevel, formatTime, parseTime, type SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
 import { TermHighlight } from './TermHighlight'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
-import { findMissingTranslations } from '@/utils/glossaryApply'
+import { findMissingTranslations, findMatchedGlossaryEntries, toSourceTerms, toTargetTerms, findTypoCandidates } from '@/utils/glossaryApply'
 import type { Theme } from '@/themes'
 
 interface SubtitleBlockProps {
@@ -16,6 +16,7 @@ interface SubtitleBlockProps {
   playProgress: number // 0-100
   onSelect: () => void
   onApprove: (id: number) => void
+  onFlag: (id: number) => void
   onReSplit: (id: number) => void
   onReTranslate: (id: number) => void
   onUpdateSource: (id: number, text: string) => void
@@ -25,11 +26,126 @@ interface SubtitleBlockProps {
   onSplitFromTarget: (id: number, targetBefore: string, targetAfter: string) => void
   onSplitAtPlayhead: (id: number) => void
   onEqualSplit: (id: number) => void
+  onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDragStart: (id: number) => void
   onDragEnd: () => void
   onDragOver: (id: number) => void
   onDrop: (id: number) => void
 }
+
+// ─── 警告バッジ共通コンポーネント ───────────────────────────────────────────
+
+interface WarningBadgeProps {
+  activeCount: number
+  ignoredCount: number
+  label: string
+  accentColor: string
+  textColor: string
+  show: boolean
+  onToggle: (e: React.MouseEvent) => void
+  cardBg: string
+  textSecondary: string
+  textMuted: string
+  children: React.ReactNode
+}
+
+function WarningBadge({
+  activeCount, ignoredCount, label, accentColor, textColor,
+  show, onToggle, cardBg, textSecondary: _textSecondary, textMuted, children,
+}: WarningBadgeProps) {
+  const allIgnored = activeCount === 0 && ignoredCount > 0
+  const badgeBg = allIgnored ? 'rgba(128,128,128,0.25)' : accentColor
+  const badgeColor = allIgnored ? textMuted : textColor
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+      <span
+        onClick={onToggle}
+        style={{
+          fontSize: 10,
+          padding: '2px 7px',
+          borderRadius: 999,
+          background: badgeBg,
+          color: badgeColor,
+          fontWeight: 700,
+          cursor: 'pointer',
+          userSelect: 'none',
+          opacity: allIgnored ? 0.7 : 1,
+          transition: 'background 0.15s, opacity 0.15s',
+        }}
+        title="クリックで詳細表示"
+      >
+        {label} {activeCount}
+        {ignoredCount > 0 && (
+          <span style={{ fontWeight: 400, opacity: 0.7, marginLeft: 3 }}>
+            (+{ignoredCount})
+          </span>
+        )}
+      </span>
+      {show && (
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            zIndex: 20,
+            marginTop: 4,
+            background: cardBg,
+            border: `1px solid ${allIgnored ? 'rgba(128,128,128,0.4)' : accentColor}`,
+            borderRadius: 6,
+            padding: '6px 8px',
+            minWidth: 220,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 3,
+          }}
+        >
+          <div style={{ fontSize: 10, color: textMuted, marginBottom: 2 }}>
+            × で無視 / ↩ で復帰
+          </div>
+          {children}
+        </div>
+      )}
+    </span>
+  )
+}
+
+interface WarningItemProps {
+  label: string
+  ignored: boolean
+  onToggle: (e: React.MouseEvent) => void
+  textSecondary: string
+  textMuted: string
+}
+
+function WarningItem({ label, ignored, onToggle, textSecondary, textMuted }: WarningItemProps) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6, fontSize: 11,
+      opacity: ignored ? 0.45 : 1,
+      transition: 'opacity 0.15s',
+    }}>
+      <span style={{ flex: 1, color: textSecondary, textDecoration: ignored ? 'line-through' : undefined }}>
+        {label}
+      </span>
+      <button
+        onClick={onToggle}
+        style={{
+          border: 'none', background: 'transparent',
+          color: textMuted, cursor: 'pointer',
+          fontSize: ignored ? 12 : 13, lineHeight: 1, padding: '0 2px',
+          borderRadius: 3,
+        }}
+        title={ignored ? '復帰する' : '無視する（誤検出）'}
+      >
+        {ignored ? '↩' : '×'}
+      </button>
+    </div>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 
 function cpsBadgeStyle(level: 'ok' | 'warn' | 'error', theme: Theme) {
   if (level === 'ok')   return { background: theme.cpsBadgeOk[0], color: theme.cpsBadgeOk[1] }
@@ -46,6 +162,7 @@ export function SubtitleBlock({
   playProgress,
   onSelect,
   onApprove,
+  onFlag,
   onReSplit,
   onReTranslate,
   onUpdateSource,
@@ -55,6 +172,7 @@ export function SubtitleBlock({
   onSplitFromTarget,
   onSplitAtPlayhead,
   onEqualSplit,
+  onIgnoreWarning,
   onDragStart,
   onDragEnd,
   onDragOver,
@@ -63,9 +181,68 @@ export function SubtitleBlock({
   const { theme } = useTheme()
   const { strings: t } = useLocale()
   const { glossary } = useGlossary()
-  const missingTerms = findMissingTranslations(block.target, block.source, glossary)
+  const deferredGlossary = useDeferredValue(glossary)
+
+  // ライブ用語集からマッチエントリを色付きで取得（色は日英共通）
+  const matchedWithColors = useMemo(
+    () => findMatchedGlossaryEntries(block.source, block.target, deferredGlossary),
+    [block.source, block.target, deferredGlossary],
+  )
+  const matchedTermsEn = useMemo(() => toSourceTerms(matchedWithColors), [matchedWithColors])
+  const matchedTermsJa = useMemo(() => toTargetTerms(matchedWithColors), [matchedWithColors])
+  const shouldEvaluateMissing = isActive || (block.ignoredMissing?.length ?? 0) > 0
+  const allMissingTerms = useMemo(
+    () => shouldEvaluateMissing
+      ? findMissingTranslations(block.target, block.source, deferredGlossary)
+      : [],
+    [shouldEvaluateMissing, block.target, block.source, deferredGlossary],
+  )
+  const missingTerms = useMemo(
+    () => allMissingTerms.filter(m => !(block.ignoredMissing ?? []).includes(m.entry.id)),
+    [allMissingTerms, block.ignoredMissing],
+  )
+  const ignoredMissingTerms = useMemo(
+    () => allMissingTerms.filter(m => (block.ignoredMissing ?? []).includes(m.entry.id)),
+    [allMissingTerms, block.ignoredMissing],
+  )
+  const allTypoCandidates = useMemo(
+    () => isActive ? findTypoCandidates(block.source, deferredGlossary) : [],
+    [isActive, block.source, deferredGlossary],
+  )
+  const typoCandidates = useMemo(
+    () => allTypoCandidates.filter(c => !(block.ignoredTypos ?? []).includes(`${c.found}::${c.entry.en}`)),
+    [allTypoCandidates, block.ignoredTypos],
+  )
+  const ignoredTypoCandidates = useMemo(
+    () => allTypoCandidates.filter(c => (block.ignoredTypos ?? []).includes(`${c.found}::${c.entry.en}`)),
+    [allTypoCandidates, block.ignoredTypos],
+  )
+  // タイポ候補を GlossaryTerm[] に変換（bgColor で背景ハイライト）
+  const typoTerms = useMemo(
+    () => typoCandidates.map(c => ({
+      word: c.found,
+      expectedTranslation: c.entry.en,
+      actualTranslation: c.found,
+      isDeviated: true,
+      bgColor: '#ef4444',  // red-500
+    })),
+    [typoCandidates],
+  )
+  // 英語ソース表示用: 辞書マッチ + タイポ候補を合成（タイポを後ろに追加して重複排除）
+  const sourceTerms = useMemo(() => {
+    const typoWords = new Set(typoCandidates.map(c => c.found.toLowerCase()))
+    const filtered = matchedTermsEn.filter(t => !typoWords.has(t.word.toLowerCase()))
+    return [...filtered, ...typoTerms]
+  }, [matchedTermsEn, typoTerms, typoCandidates])
+  const [showTypoList, setShowTypoList] = useState(false)
+  const [showMissingList, setShowMissingList] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState(block.source)
+  // 編集中のタイポ候補（editText に対してライブ計算）
+  const editTypoCandidates = useMemo(
+    () => isEditing ? findTypoCandidates(editText, deferredGlossary) : [],
+    [isEditing, editText, deferredGlossary],
+  )
   const [isEditingTarget, setIsEditingTarget] = useState(false)
   const [editTargetText, setEditTargetText] = useState(block.target)
   const [isEditingTime, setIsEditingTime] = useState(false)
@@ -163,6 +340,18 @@ export function SubtitleBlock({
   }
 
   const isApproved = block.status === 'approved'
+  const isFlagged = block.status === 'flagged'
+
+  const handleIgnoreTypo = useCallback((key: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    onIgnoreWarning(block.id, 'typo', key)
+  }, [block.id, onIgnoreWarning])
+
+  const handleIgnoreMissing = useCallback((key: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    onIgnoreWarning(block.id, 'missing', key)
+  }, [block.id, onIgnoreWarning])
+
   const sourceLines = block.source.split('\n')
   const isOver = sourceLines.some(l => l.length > 42)
   // 再生位置がこのブロック内にあるときだけ「再生位置で分割」を有効化
@@ -179,7 +368,9 @@ export function SubtitleBlock({
         ? theme.cardBorderActive
         : isApproved
           ? theme.cardBorderApproved
-          : theme.cardBorder,
+          : isFlagged
+            ? theme.cardBorderFlagged
+            : theme.cardBorder,
     borderRadius: 8,
     padding: 10,
     background: isDragOver
@@ -188,7 +379,9 @@ export function SubtitleBlock({
         ? theme.cardBgActive
         : isApproved
           ? theme.cardBgApproved
-          : theme.cardBg,
+          : isFlagged
+            ? theme.cardBgFlagged
+            : theme.cardBg,
     cursor: isApproved ? 'default' : 'pointer',
     opacity: isDragging ? 0.4 : 1,
     boxShadow: isDragOver
@@ -268,7 +461,10 @@ export function SubtitleBlock({
           }}
           title={isApproved ? undefined : 'クリックで訳文を編集'}
         >
-          {block.target || <span style={{ color: theme.textDisabled, fontStyle: 'italic' }}>（訳文なし）</span>}
+          {block.target
+            ? <TermHighlight text={block.target} terms={matchedTermsJa} />
+            : <span style={{ color: theme.textDisabled, fontStyle: 'italic' }}>（訳文なし）</span>
+          }
         </div>
       )}
 
@@ -297,13 +493,33 @@ export function SubtitleBlock({
               fontFamily: 'inherit',
             }}
           />
+          {editTypoCandidates.length > 0 && (
+            <div style={{
+              marginTop: 4,
+              padding: '5px 8px',
+              borderRadius: 5,
+              background: '#ef444418',
+              border: '1px solid #ef444466',
+              fontSize: 11,
+              color: '#ef4444',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '4px 10px',
+            }}>
+              {editTypoCandidates.map(c => (
+                <span key={`${c.found}::${c.entry.en}`}>
+                  ⚠ <b>"{c.found}"</b> → "{c.entry.en}" ?
+                </span>
+              ))}
+            </div>
+          )}
           <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 3 }}>
             {t.editHint}
           </div>
         </>
       ) : (
         <div
-          onClick={e => { if (isApproved) return; e.stopPropagation(); setIsEditing(true) }}
+          onClick={e => { if (isApproved) return; e.stopPropagation(); setEditText(block.source); setIsEditing(true) }}
           style={{
             fontSize: 15,
             lineHeight: 1.45,
@@ -316,7 +532,7 @@ export function SubtitleBlock({
             color: theme.inputText,
           }}
         >
-          <TermHighlight text={block.source} terms={block.glossaryTerms} />
+          <TermHighlight text={block.source} terms={sourceTerms} />
         </div>
       )}
 
@@ -435,21 +651,91 @@ export function SubtitleBlock({
         <span style={{ color: isOver ? theme.overCountColor : undefined, fontWeight: isOver ? 700 : undefined }}>
           {t.charCount(sourceLines.map(l => l.length), isOver)}
         </span>
-        {missingTerms.length > 0 && (
-          <span
-            title={`訳語漏れの可能性: ${missingTerms.map(m => `${m.entry.ja} → ${m.entry.en}`).join(', ')}`}
-            style={{
-              fontSize: 10,
-              padding: '2px 7px',
-              borderRadius: 999,
-              background: theme.cpsBadgeWarn[0],
-              color: theme.cpsBadgeWarn[1],
-              fontWeight: 700,
-              cursor: 'default',
-            }}
+        {(missingTerms.length > 0 || ignoredMissingTerms.length > 0) && (
+          <WarningBadge
+            activeCount={missingTerms.length}
+            ignoredCount={ignoredMissingTerms.length}
+            label="用語漏れ"
+            accentColor={theme.cpsBadgeWarn[0]}
+            textColor={theme.cpsBadgeWarn[1]}
+            show={showMissingList}
+            onToggle={e => { e.stopPropagation(); setShowMissingList(v => !v) }}
+            cardBg={theme.cardBg}
+            textSecondary={theme.textSecondary}
+            textMuted={theme.textMuted}
           >
-            用語漏れ {missingTerms.length}
-          </span>
+            {missingTerms.map(m => (
+              <WarningItem
+                key={m.entry.id}
+                label={`${m.entry.ja} → ${m.entry.en}`}
+                ignored={false}
+                onToggle={e => handleIgnoreMissing(m.entry.id, e)}
+                textSecondary={theme.textSecondary}
+                textMuted={theme.textMuted}
+              />
+            ))}
+            {ignoredMissingTerms.length > 0 && (
+              <>
+                <div style={{ borderTop: `1px solid ${theme.panelBorder}`, margin: '4px 0' }} />
+                {ignoredMissingTerms.map(m => (
+                  <WarningItem
+                    key={m.entry.id}
+                    label={`${m.entry.ja} → ${m.entry.en}`}
+                    ignored={true}
+                    onToggle={e => handleIgnoreMissing(m.entry.id, e)}
+                    textSecondary={theme.textSecondary}
+                    textMuted={theme.textMuted}
+                  />
+                ))}
+              </>
+            )}
+          </WarningBadge>
+        )}
+        {(typoCandidates.length > 0 || ignoredTypoCandidates.length > 0) && (
+          <WarningBadge
+            activeCount={typoCandidates.length}
+            ignoredCount={ignoredTypoCandidates.length}
+            label="タイポ?"
+            accentColor={theme.cpsBadgeError[0]}
+            textColor={theme.cpsBadgeError[1]}
+            show={showTypoList}
+            onToggle={e => { e.stopPropagation(); setShowTypoList(v => !v) }}
+            cardBg={theme.cardBg}
+            textSecondary={theme.textSecondary}
+            textMuted={theme.textMuted}
+          >
+            {typoCandidates.map(c => {
+              const key = `${c.found}::${c.entry.en}`
+              return (
+                <WarningItem
+                  key={key}
+                  label={`"${c.found}" → "${c.entry.en}" ?`}
+                  ignored={false}
+                  onToggle={e => handleIgnoreTypo(key, e)}
+                  textSecondary={theme.textSecondary}
+                  textMuted={theme.textMuted}
+                />
+              )
+            })}
+            {ignoredTypoCandidates.length > 0 && (
+              <>
+                <div style={{ borderTop: `1px solid ${theme.panelBorder}`, margin: '4px 0' }} />
+                {ignoredTypoCandidates.map(c => {
+                  const key = `${c.found}::${c.entry.en}`
+                  return (
+                    <WarningItem
+                      key={key}
+                      label={`"${c.found}" → "${c.entry.en}" ?`}
+                      ignored={true}
+                      onToggle={e => handleIgnoreTypo(key, e)}
+                      textSecondary={theme.textSecondary}
+                      textMuted={theme.textMuted}
+                    />
+                  )
+                })}
+              </>
+            )}
+          </WarningBadge>
         )}
       </div>
 
@@ -471,6 +757,24 @@ export function SubtitleBlock({
         >
           {isApproved ? t.approvedBtn : t.approve}
         </button>
+        {!isApproved && (
+          <button
+            onClick={e => { e.stopPropagation(); onFlag(block.id) }}
+            style={{
+              border: '1px solid',
+              borderColor: isFlagged ? theme.btnBorderFlagged : theme.btnBorder,
+              background: isFlagged ? theme.btnBgFlagged : theme.btnBg,
+              color: isFlagged ? theme.btnTextFlagged : theme.btnText,
+              borderRadius: 6,
+              padding: '5px 9px',
+              fontSize: 12,
+              cursor: 'pointer',
+              fontWeight: isFlagged ? 700 : undefined,
+            }}
+          >
+            {isFlagged ? t.flaggedBtn : t.flag}
+          </button>
+        )}
         {!isApproved && (
           <>
             {/* 再生位置で分割: 再生ヘッドがこのブロック内にあるときのみ有効 */}

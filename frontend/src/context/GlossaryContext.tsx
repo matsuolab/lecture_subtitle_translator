@@ -1,11 +1,17 @@
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext, useState, useCallback, useRef } from 'react'
 
 export interface GlossaryEntry {
-  en: string
+  id: string
   ja: string
-  desc: string
-  source: string
-  sourceUrl: string | null
+  en: string
+  abbr?: string
+  domain?: string
+  note?: string
+  /** 詳細説明（手動入力・初期データ用） */
+  desc?: string
+  /** 出典（論文・スライド等の参照情報） */
+  source?: string
+  sourceUrl?: string | null
   confirmed: boolean
 }
 
@@ -16,25 +22,39 @@ export interface ExtractedTerm {
   sourceUrl: string | null
 }
 
-const initialGlossary: GlossaryEntry[] = [
-  { en: 'Transformer', ja: 'トランスフォーマー', desc: '自然言語処理の基盤となるニューラルネットワークアーキテクチャ。Self-attentionを中核とする。', source: 'Attention Is All You Need (Vaswani et al., 2017)', sourceUrl: 'https://arxiv.org/abs/1706.03762', confirmed: true },
-  { en: 'attention', ja: '注意機構', desc: '入力の重要部分に重みを割り当てる機構。Transformerの中核をなす。', source: 'Attention Is All You Need (Vaswani et al., 2017)', sourceUrl: 'https://arxiv.org/abs/1706.03762', confirmed: true },
-  { en: 'gradient descent', ja: '勾配降下法', desc: '損失関数の勾配方向にパラメータを更新する最適化アルゴリズム。', source: 'Deep Learning (Goodfellow et al., 2016)', sourceUrl: 'https://www.deeplearningbook.org/', confirmed: false },
-  { en: 'overfitting', ja: '過学習', desc: '訓練データへの過剰適合により汎化性能が低下する現象。正則化で対処。', source: 'スライド第3回 p.12より抽出', sourceUrl: null, confirmed: false },
-  { en: 'learning rate', ja: '学習率', desc: '勾配降下法でのパラメータ更新幅を制御するハイパーパラメータ。', source: 'Deep Learning (Goodfellow et al., 2016)', sourceUrl: 'https://www.deeplearningbook.org/', confirmed: false },
-]
+const STORAGE_KEY = 'glossary_v1'
 
-const initialExtracted: ExtractedTerm[] = [
-  { en: 'backpropagation', ja: '誤差逆伝播法', source: 'Deep Learning (Goodfellow et al., 2016)', sourceUrl: 'https://www.deeplearningbook.org/' },
-  { en: 'batch normalization', ja: 'バッチ正規化', source: 'スライド第4回 p.7より抽出', sourceUrl: null },
-  { en: 'softmax', ja: 'ソフトマックス関数', source: 'スライド第2回 p.15より抽出', sourceUrl: null },
-]
+function loadFromStorage(): GlossaryEntry[] | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as GlossaryEntry[]
+  } catch {
+    return null
+  }
+}
+
+function saveToStorage(entries: GlossaryEntry[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
+  } catch {
+    // localStorage が使えない環境では無視
+  }
+}
+
+const initialGlossary: GlossaryEntry[] = []
+
+const initialExtracted: ExtractedTerm[] = []
 
 interface GlossaryContextValue {
   glossary: GlossaryEntry[]
   extracted: ExtractedTerm[]
   setGlossary: React.Dispatch<React.SetStateAction<GlossaryEntry[]>>
   setExtracted: React.Dispatch<React.SetStateAction<ExtractedTerm[]>>
+  /** エントリを追加・上書きインポートする（ja+enが重複する場合は既存を置換） */
+  importEntries: (entries: GlossaryEntry[]) => { added: number; updated: number }
+  /** 用語辞書をクリアする */
+  clearGlossary: () => void
 }
 
 const GlossaryContext = createContext<GlossaryContextValue>({
@@ -42,14 +62,67 @@ const GlossaryContext = createContext<GlossaryContextValue>({
   extracted: initialExtracted,
   setGlossary: () => {},
   setExtracted: () => {},
+  importEntries: () => ({ added: 0, updated: 0 }),
+  clearGlossary: () => {},
 })
 
 export function GlossaryProvider({ children }: { children: React.ReactNode }) {
-  const [glossary, setGlossary] = useState<GlossaryEntry[]>(initialGlossary)
+  const [glossary, setGlossaryRaw] = useState<GlossaryEntry[]>(
+    () => loadFromStorage() ?? initialGlossary
+  )
+  const glossaryRef = useRef(glossary)
+  glossaryRef.current = glossary
+
   const [extracted, setExtracted] = useState<ExtractedTerm[]>(initialExtracted)
 
+  const setGlossary: React.Dispatch<React.SetStateAction<GlossaryEntry[]>> = useCallback(
+    (action) => {
+      setGlossaryRaw(prev => {
+        const next = typeof action === 'function' ? action(prev) : action
+        saveToStorage(next)
+        return next
+      })
+    },
+    []
+  )
+
+  const importEntries = useCallback((incoming: GlossaryEntry[]) => {
+    // O(n*m) を避けるため、ja+en の複合キーでインデックスを作る
+    const prev = glossaryRef.current
+    const result = [...prev]
+    const indexByKey = new Map<string, number>()
+    let added = 0
+    let updated = 0
+
+    for (let i = 0; i < result.length; i++) {
+      const e = result[i]
+      indexByKey.set(`${e.ja}\u0000${e.en}`, i)
+    }
+
+    for (const entry of incoming) {
+      const key = `${entry.ja}\u0000${entry.en}`
+      const existingIdx = indexByKey.get(key)
+      if (existingIdx !== undefined) {
+        // 既存エントリを更新（confirmed状態は保持）
+        result[existingIdx] = { ...entry, confirmed: result[existingIdx].confirmed }
+        updated++
+      } else {
+        indexByKey.set(key, result.length)
+        result.push(entry)
+        added++
+      }
+    }
+
+    setGlossary(result)
+    return { added, updated }
+  }, [setGlossary])
+
+  const clearGlossary = useCallback(() => {
+    setGlossary([])
+  }, [setGlossary])
+
   return (
-    <GlossaryContext.Provider value={{ glossary, extracted, setGlossary, setExtracted }}>
+    <GlossaryContext.Provider value={{ glossary, extracted, setGlossary, setExtracted, importEntries, clearGlossary }}>
       {children}
     </GlossaryContext.Provider>
   )

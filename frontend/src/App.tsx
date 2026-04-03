@@ -1,4 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
+import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { Download, Save, FolderOpen, Settings, Film } from 'lucide-react'
 import { VideoPlayer } from '@/components/VideoPlayer'
 import { SubtitleBlockList } from '@/components/SubtitleBlockList'
@@ -8,7 +11,6 @@ import { SettingsTab } from '@/components/SettingsTab'
 import { TimelineBar } from '@/components/TimelineBar'
 import { useVideoSync } from '@/hooks/useVideoSync'
 import { useHistory } from '@/hooks/useHistory'
-import { mockSubtitles } from '@/data/mockSubtitles'
 import {
   saveToLocalStorage,
   loadFromLocalStorage,
@@ -29,10 +31,10 @@ type SaveStatus = 'saved' | 'saving'
 export default function App() {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
-  const { glossary } = useGlossary()
+  const { glossary, importEntries } = useGlossary()
   const restored = loadFromLocalStorage()
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
-    useHistory<SubtitleBlock[]>(restored ?? mockSubtitles)
+    useHistory<SubtitleBlock[]>(restored ?? [])
   const [activeTab, setActiveTab] = useState<Tab>('subtitles')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
   const [restoredMsg, setRestoredMsg] = useState(restored !== null)
@@ -40,6 +42,8 @@ export default function App() {
   const srtImportRef = useRef<HTMLInputElement>(null)
   const videoFileRef = useRef<HTMLInputElement>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [isDragOverRight, setIsDragOverRight] = useState(false)
+  const lastHtmlDropRef = useRef(0)
 
   // パネルリサイズ
   const [leftPct, setLeftPct] = useState(45)
@@ -83,15 +87,136 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }, [])
 
-  const { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata } =
+  const { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata, onError: onVideoError } =
     useVideoSync(blocks, videoUrl)
 
   const loadVideoFile = useCallback((file: File) => {
+    lastHtmlDropRef.current = Date.now()
     setVideoUrl(prev => {
-      if (prev) URL.revokeObjectURL(prev)
+      if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return URL.createObjectURL(file)
     })
   }, [])
+
+  const loadVideoPath = useCallback((path: string) => {
+    setVideoUrl(prev => {
+      if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return convertFileSrc(path)
+    })
+  }, [])
+
+  const readTextFileAsFile = useCallback(async (path: string) => {
+    const text = await readTextFile(path)
+    const name = path.split(/[\\/]/).pop() ?? 'file'
+    return new File([text], name, { type: 'text/plain' })
+  }, [])
+
+  const readBinaryFileAsFile = useCallback(async (path: string) => {
+    const data = await readFile(path)
+    const name = path.split(/[\\/]/).pop() ?? 'file'
+    return new File([data], name)
+  }, [])
+
+  const handleRightDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    if (e.dataTransfer.types.includes('Files')) setIsDragOverRight(true)
+  }, [])
+
+  const handleRightDragLeave = useCallback((e: React.DragEvent) => {
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return
+    setIsDragOverRight(false)
+  }, [])
+
+  const handleRightDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOverRight(false)
+    lastHtmlDropRef.current = Date.now()
+    const file = e.dataTransfer.files[0]
+    if (!file) return
+    const name = file.name.toLowerCase()
+    if (name.endsWith('.srt') || name.endsWith('.txt')) {
+      try {
+        const imported = await importSrt(file)
+        reset(imported)
+      } catch {
+        alert(t.importSrtError)
+      }
+    } else if (name.endsWith('.json')) {
+      try {
+        const imported = await importProjectJson(file)
+        reset(imported)
+      } catch {
+        alert(t.importError)
+      }
+    } else if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
+      // 用語辞書タブへ自動切り替えしてインポート
+      setActiveTab('dictionary')
+      try {
+        let entries
+        if (name.endsWith('.csv')) {
+          const { parseGlossaryCsv } = await import('@/lib/glossary/csvParser')
+          entries = parseGlossaryCsv(await file.text())
+        } else {
+          const { convertMatsuoLabXlsx } = await import('@/lib/glossary/xlsxConverter')
+          entries = await convertMatsuoLabXlsx(file)
+        }
+        importEntries(entries)
+      } catch (err) {
+        alert(`用語辞書の読み込みに失敗しました: ${err instanceof Error ? err.message : '不明なエラー'}`)
+      }
+    } else {
+      alert(`非対応のファイル形式です: ${file.name}\n対応形式: .srt, .txt, .json, .csv, .xlsx`)
+    }
+  }, [reset, t.importSrtError, t.importError, importEntries])
+
+  // Tauri: ネイティブDrag&Dropのフォールバック（WindowsビルドでHTML5 D&Dが効かない対策）
+  useEffect(() => {
+    if (!isTauri()) return
+    let unlisten: (() => void) | null = null
+    getCurrentWebview().onDragDropEvent(async (event) => {
+      if (event.payload.type !== 'drop') return
+      if (Date.now() - lastHtmlDropRef.current < 500) return
+      const paths = event.payload.paths
+      if (!paths || paths.length === 0) return
+      const path = paths[0]
+      const name = path.toLowerCase()
+      try {
+        if (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.mkv') || name.endsWith('.webm')) {
+          loadVideoPath(path)
+          return
+        }
+        if (name.endsWith('.srt') || name.endsWith('.txt')) {
+          const imported = await importSrt(await readTextFileAsFile(path))
+          reset(imported)
+          return
+        }
+        if (name.endsWith('.json')) {
+          const imported = await importProjectJson(await readTextFileAsFile(path))
+          reset(imported)
+          return
+        }
+        if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
+          setActiveTab('dictionary')
+          let entries
+          if (name.endsWith('.csv')) {
+            const { parseGlossaryCsv } = await import('@/lib/glossary/csvParser')
+            const file = await readTextFileAsFile(path)
+            entries = parseGlossaryCsv(await file.text())
+          } else {
+            const { convertMatsuoLabXlsx } = await import('@/lib/glossary/xlsxConverter')
+            entries = await convertMatsuoLabXlsx(await readBinaryFileAsFile(path))
+          }
+          importEntries(entries)
+          return
+        }
+        alert(`非対応のファイル形式です: ${path}
+対応形式: .srt, .txt, .json, .csv, .xlsx, .mp4`)
+      } catch (err) {
+        alert(`読み込みに失敗しました: ${err instanceof Error ? err.message : '不明なエラー'}`)
+      }
+    }).then(fn => { unlisten = fn })
+    return () => { if (unlisten) unlisten() }
+  }, [reset, importEntries, loadVideoPath, readTextFileAsFile, readBinaryFileAsFile])
 
   const handleLoadVideo = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -153,6 +278,14 @@ export default function App() {
     push(blocks.map(b => {
       if (b.id !== id) return b
       return { ...b, status: b.status === 'approved' ? 'pending' as const : 'approved' as const }
+    }))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks])
+
+  const handleFlag = useCallback((id: number) => {
+    push(blocks.map(b => {
+      if (b.id !== id) return b
+      return { ...b, status: b.status === 'flagged' ? 'pending' as const : 'flagged' as const }
     }))
   }, [blocks, push])
 
@@ -401,6 +534,21 @@ export default function App() {
     }))
   }, [blocks, push])
 
+  const handleIgnoreWarning = useCallback((id: number, type: 'typo' | 'missing', key: string) => {
+    push(blocks.map(b => {
+      if (b.id !== id) return b
+      if (type === 'typo') {
+        const cur = b.ignoredTypos ?? []
+        const next = cur.includes(key) ? cur.filter(k => k !== key) : [...cur, key]
+        return { ...b, ignoredTypos: next }
+      } else {
+        const cur = b.ignoredMissing ?? []
+        const next = cur.includes(key) ? cur.filter(k => k !== key) : [...cur, key]
+        return { ...b, ignoredMissing: next }
+      }
+    }))
+  }, [blocks, push])
+
   const handleApplyGlossary = useCallback(() => {
     const confirmed = glossary.filter(g => g.confirmed)
     let totalReplacements = 0
@@ -491,6 +639,7 @@ export default function App() {
             onPlay={onPlay}
             onPause={onPause}
             onLoadedMetadata={onLoadedMetadata}
+            onError={onVideoError}
           />
           {/* 縦リサイズハンドル (動画 ↕ タイムライン) */}
           <div
@@ -537,7 +686,28 @@ export default function App() {
 
         {/* 右：タブパネル */}
         <section className="flex flex-col overflow-hidden rounded-[10px] shadow-[0_6px_20px_rgba(0,0,0,0.28)]"
-          style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}`, position: 'relative', zIndex: 2, flex: 1, minWidth: 0 }}>
+          style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}`, position: 'relative', zIndex: 2, flex: 1, minWidth: 0 }}
+          onDragOver={handleRightDragOver}
+          onDragLeave={handleRightDragLeave}
+          onDrop={handleRightDrop}
+        >
+          {/* SRT/JSONドロップオーバーレイ */}
+          {isDragOverRight && (
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 100,
+              background: 'rgba(99,102,241,0.13)',
+              border: '2px dashed rgba(99,102,241,0.7)',
+              borderRadius: 10,
+              display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center',
+              gap: 8, pointerEvents: 'none',
+            }}>
+              <span style={{ fontSize: 32 }}>📄</span>
+              <span style={{ color: 'rgba(99,102,241,0.9)', fontSize: 13, fontWeight: 600 }}>
+                SRT / JSON をドロップして読み込む
+              </span>
+            </div>
+          )}
 
           {/* タブ + アンドゥ/リドゥ + SRT出力 */}
           <div className="flex items-center shrink-0" style={{ borderBottom: `1px solid ${theme.panelBorder}`, background: theme.headerBg }}>
@@ -698,6 +868,7 @@ export default function App() {
                 currentTime={currentTime}
                 onBlockSelect={handleBlockSelect}
                 onApprove={handleApprove}
+                onFlag={handleFlag}
                 onReSplit={handleReSplit}
                 onReTranslate={handleReTranslate}
                 onUpdateSource={handleUpdateSource}
@@ -709,6 +880,7 @@ export default function App() {
                 onMerge={handleMerge}
                 onAdjustBoundary={handleAdjustBoundary}
                 onUpdateTimes={handleUpdateTimes}
+                onIgnoreWarning={handleIgnoreWarning}
               />
             )}
             {activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}

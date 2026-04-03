@@ -59,6 +59,22 @@ npm install
 npm run dev
 ```
 
+### Desktopアプリ（Tauri）
+
+```bash
+cd frontend
+npm run tauri:dev
+```
+
+EXEビルド:
+
+```bash
+cd frontend
+npm run tauri:build
+```
+
+詳細な操作ガイドは `frontend/README.md` を参照してください。
+
 ### ビルド
 
 ```bash

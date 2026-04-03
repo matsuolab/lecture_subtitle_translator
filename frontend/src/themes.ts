@@ -21,10 +21,12 @@ export interface Theme {
   cardBg: string
   cardBgActive: string
   cardBgApproved: string
+  cardBgFlagged: string
   cardBgDragOver: string
   cardBorder: string
   cardBorderActive: string
   cardBorderApproved: string
+  cardBorderFlagged: string
   cardBorderDragOver: string
   cardShadowActive: string
   cardShadowDragOver: string
@@ -40,6 +42,9 @@ export interface Theme {
   btnBgApproved: string
   btnBorderApproved: string
   btnTextApproved: string
+  btnBgFlagged: string
+  btnBorderFlagged: string
+  btnTextFlagged: string
   // Progress bar
   progressBg: string
   progressCompleteBg: string
@@ -110,10 +115,12 @@ export const pocTheme: Theme = {
   cardBg: 'rgba(255,255,255,0.02)',
   cardBgActive: 'rgba(74,144,255,0.10)',
   cardBgApproved: 'rgba(46,204,113,0.06)',
+  cardBgFlagged: 'rgba(230,126,34,0.10)',
   cardBgDragOver: 'rgba(241,196,15,0.10)',
   cardBorder: '#2a3550',
   cardBorderActive: '#4a90ff',
   cardBorderApproved: '#2d8a52',
+  cardBorderFlagged: '#e67e22',
   cardBorderDragOver: '#f1c40f',
   cardShadowActive: 'inset 0 0 0 1px rgba(74,144,255,0.35)',
   cardShadowDragOver: '0 0 0 2px rgba(241,196,15,0.5)',
@@ -127,6 +134,9 @@ export const pocTheme: Theme = {
   btnBgApproved: '#2ecc71',
   btnBorderApproved: '#27ae60',
   btnTextApproved: '#08131f',
+  btnBgFlagged: '#e67e22',
+  btnBorderFlagged: '#ca6f1e',
+  btnTextFlagged: '#08131f',
   progressBg: 'rgba(94,164,255,0.10)',
   progressCompleteBg: 'rgba(46,204,113,0.07)',
   cpsBadgeOk: ['#2ecc71', '#08131f'],
@@ -190,10 +200,12 @@ export const matsuoTheme: Theme = {
   cardBg: '#f8f9fc',
   cardBgActive: 'rgba(0,63,136,0.06)',
   cardBgApproved: 'rgba(0,80,50,0.05)',
+  cardBgFlagged: 'rgba(200,80,0,0.07)',
   cardBgDragOver: 'rgba(160,120,0,0.08)',
   cardBorder: '#d8dce6',
   cardBorderActive: '#003f88',
   cardBorderApproved: '#1a7a50',
+  cardBorderFlagged: '#c85000',
   cardBorderDragOver: '#b89000',
   cardShadowActive: 'inset 0 0 0 1px rgba(0,63,136,0.15)',
   cardShadowDragOver: '0 0 0 2px rgba(184,144,0,0.35)',
@@ -207,6 +219,9 @@ export const matsuoTheme: Theme = {
   btnBgApproved: '#003f88',
   btnBorderApproved: '#002d66',
   btnTextApproved: '#ffffff',
+  btnBgFlagged: '#c85000',
+  btnBorderFlagged: '#a04000',
+  btnTextFlagged: '#ffffff',
   progressBg: 'rgba(0,63,136,0.07)',
   progressCompleteBg: 'rgba(0,100,60,0.06)',
   cpsBadgeOk: ['#27ae60', '#fff'],

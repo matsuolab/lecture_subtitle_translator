@@ -7,6 +7,10 @@ export interface GlossaryTerm {
   isDeviated: boolean
   /** スライドPDF等から取得した一言説明 */
   insight?: string
+  /** 日英対応を色で示すためのカラーコード（アンダーライン用） */
+  color?: string
+  /** 背景ハイライト色。セットされている場合はアンダーラインでなく背景色で強調表示する */
+  bgColor?: string
 }
 
 export interface SubtitleBlock {
@@ -19,6 +23,10 @@ export interface SubtitleBlock {
   charCount: number
   status: BlockStatus
   glossaryTerms: GlossaryTerm[]
+  /** 無視するタイポ候補のキー: "${found}::${entry.en}" */
+  ignoredTypos?: string[]
+  /** 無視する用語漏れ候補のキー: entry.id */
+  ignoredMissing?: string[]
 }
 
 export type CpsLevel = 'ok' | 'warn' | 'error'

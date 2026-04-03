@@ -27,6 +27,8 @@ export const en: LocaleStrings = {
 
   approve: 'Approve',
   approvedBtn: 'Approved ✓',
+  flag: 'Flag',
+  flaggedBtn: 'Flagged 🚩',
   reSplit: 'Re-split',
   reTranslate: 'Re-translate',
   editHint: 'Enter to newline ／ Shift+Enter to split ／ Ctrl+Enter to save ／ Esc to cancel',
@@ -90,8 +92,8 @@ export const en: LocaleStrings = {
     {
       title: 'Using the Glossary',
       paragraphs: [
-        'The Glossary tab centralizes translations for technical terms. Confirmed terms are automatically highlighted inside subtitle blocks.',
-        'Unregistered terms detected from reference materials are shown as orange warnings. Use the "Create Issue" button to open a review request Issue (planned feature).',
+        'In the Glossary tab, CSV/XLSX files can be imported by button or drag-and-drop. Drop video, SRT/JSON, and glossary files into their corresponding target areas.',
+        'During import, the UI shows "Loading..." to prevent duplicate actions. Subtitle blocks show glossary highlights plus missing-term/typo candidates, and false positives can be ignored/restored (× / ↩).',
       ],
     },
   ],

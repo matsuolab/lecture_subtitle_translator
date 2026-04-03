@@ -28,6 +28,8 @@ export interface LocaleStrings {
   // SubtitleBlock
   approve: string
   approvedBtn: string
+  flag: string
+  flaggedBtn: string
   reSplit: string
   reTranslate: string
   editHint: string

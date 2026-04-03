@@ -13,6 +13,7 @@ interface UseVideoSyncReturn {
   onPlay: () => void
   onPause: () => void
   onLoadedMetadata: () => void
+  onError: () => void
 }
 
 export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): UseVideoSyncReturn {
@@ -57,10 +58,16 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
     if (videoRef.current) setDuration(videoRef.current.duration)
   }, [])
 
+  const onError = useCallback(() => {
+    setDuration(0)
+    setCurrentTime(0)
+    setIsPlaying(false)
+  }, [])
+
   useEffect(() => {
     const active = blocks.find(b => currentTime >= b.startTime && currentTime < b.endTime)
     setActiveBlockId(active?.id ?? null)
   }, [currentTime, blocks])
 
-  return { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata }
+  return { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata, onError }
 }

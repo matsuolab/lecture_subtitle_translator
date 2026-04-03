@@ -11,6 +11,7 @@ interface SubtitleBlockListProps {
   currentTime: number
   onBlockSelect: (block: SubtitleBlockType) => void
   onApprove: (id: number) => void
+  onFlag: (id: number) => void
   onReSplit: (id: number) => void
   onReTranslate: (id: number) => void
   onUpdateSource: (id: number, text: string) => void
@@ -22,6 +23,7 @@ interface SubtitleBlockListProps {
   onMerge: (dragId: number, dropId: number) => void
   onAdjustBoundary: (id1: number, id2: number, newTime: number) => void
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
+  onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
 }
 
 interface BoundaryDrag {
@@ -157,6 +159,7 @@ export function SubtitleBlockList({
   currentTime,
   onBlockSelect,
   onApprove,
+  onFlag,
   onReSplit,
   onReTranslate,
   onUpdateSource,
@@ -168,6 +171,7 @@ export function SubtitleBlockList({
   onMerge,
   onAdjustBoundary,
   onUpdateTimes,
+  onIgnoreWarning,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -396,6 +400,7 @@ export function SubtitleBlockList({
               isDragOver={dragOverId === block.id && draggingId !== block.id}
               onSelect={() => onBlockSelect(block)}
               onApprove={onApprove}
+              onFlag={onFlag}
               onReSplit={onReSplit}
               onReTranslate={onReTranslate}
               onUpdateSource={onUpdateSource}
@@ -405,6 +410,7 @@ export function SubtitleBlockList({
               onSplitAtPlayhead={onSplitAtPlayhead}
               onEqualSplit={onEqualSplit}
               onUpdateTimes={onUpdateTimes}
+              onIgnoreWarning={onIgnoreWarning}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
               onDragOver={handleDragOver}

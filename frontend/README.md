@@ -1,73 +1,47 @@
-# React + TypeScript + Vite
+# Subtitle Editor (Frontend)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite + Tauri v2 で実装した字幕編集アプリです。
 
-Currently, two official plugins are available:
+## 主な機能
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- SRT 読み込み・編集・書き出し
+- 字幕ブロックの承認 / 要確認 / 分割 / 合体
+- CPS（文字/秒）と1行文字数（42文字目安）の可視化
+- 用語集（CSV / XLSX）インポート、用語ハイライト、用語漏れ・タイポ候補表示
+- 動画・SRT/JSON・用語集のドラッグ＆ドロップ入力
 
-## React Compiler
+## 実行方法（Web）
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 実行方法（Desktop / Tauri）
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run tauri:dev
 ```
+
+## ビルド（EXE）
+
+```bash
+npm run tauri:build
+```
+
+出力先:
+
+- `src-tauri/target/release/subtitle-editor.exe`
+
+## 使い方メモ
+
+- 動画ファイル: 左の動画領域へドロップ
+- SRT / プロジェクトJSON: 右パネル（字幕タブ）へドロップ
+- 用語集CSV/XLSX: 用語辞書タブへドロップ（または「インポート」ボタン）
+- 用語集読み込み中はボタンが `読み込み中...` 表示になり、重複操作を防止
+
+## 開発メモ
+
+- Tauriビルド版でローカル動画を再生するため、`src-tauri/tauri.conf.json` で `assetProtocol` を有効化
+- Windows EXE でHTML5 D&Dが取りこぼされるケースに備えて、`onDragDropEvent` のフォールバックを実装
+- 用語集インポートは `GlossaryContext.importEntries` で map インデックス化し、大量エントリ時の更新コストを削減

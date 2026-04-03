@@ -33,11 +33,21 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
 
   // テキスト中の用語にマークを付ける
   const markedPositions: boolean[] = new Array(text.length).fill(false)
+  // どの位置がどの term に対応するかを記録する（長い用語が短い用語を上書き）
+  const posToTerm: (GlossaryTerm | undefined)[] = new Array(text.length).fill(undefined)
   const textLower = text.toLowerCase()
   for (const term of terms) {
-    const idx = textLower.indexOf(term.word.toLowerCase())
-    if (idx !== -1) {
-      for (let i = idx; i < idx + term.word.length; i++) markedPositions[i] = true
+    const wordLower = term.word.toLowerCase()
+    let idx = textLower.indexOf(wordLower)
+    while (idx !== -1) {
+      for (let i = idx; i < idx + term.word.length; i++) {
+        // 既にマークされている位置は長い方の用語を優先
+        if (!markedPositions[i] || (posToTerm[i] && posToTerm[i]!.word.length < term.word.length)) {
+          posToTerm[i] = term
+        }
+        markedPositions[i] = true
+      }
+      idx = textLower.indexOf(wordLower, idx + 1)
     }
   }
 
@@ -53,7 +63,8 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
       const start = cursor
       while (cursor < text.length && markedPositions[cursor]) cursor++
       const word = text.slice(start, cursor)
-      const matchedTerm = terms.find(t => t.word.toLowerCase() === word.toLowerCase())
+      // スパン先頭位置の term を使用（長い用語優先で posToTerm に記録済み）
+      const matchedTerm = posToTerm[start]
       parts.push({ text: word, term: matchedTerm })
     }
   }
@@ -68,17 +79,33 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
             onMouseEnter={() => setHoveredWord(part.term!.word)}
             onMouseLeave={() => setHoveredWord(null)}
           >
-            <span
-              style={{
-                textDecoration: 'underline',
-                textDecorationColor: theme.textAccentLink,
-                textUnderlineOffset: 2,
-                textDecorationThickness: 2,
-                cursor: 'help',
-              }}
-            >
-              {part.text}
-            </span>
+            {part.term.bgColor ? (
+              // 背景ハイライト（タイポ候補など）
+              <span
+                style={{
+                  background: part.term.bgColor + '40',
+                  outline: `1.5px solid ${part.term.bgColor}`,
+                  borderRadius: 3,
+                  padding: '0 2px',
+                  cursor: 'help',
+                }}
+              >
+                {part.text}
+              </span>
+            ) : (
+              // アンダーライン（辞書用語マッチ）
+              <span
+                style={{
+                  textDecoration: 'underline',
+                  textDecorationColor: part.term.color ?? theme.textAccentLink,
+                  textUnderlineOffset: 2,
+                  textDecorationThickness: 2,
+                  cursor: 'help',
+                }}
+              >
+                {part.text}
+              </span>
+            )}
             {hoveredWord === part.term.word && (
               <span
                 style={{
@@ -87,7 +114,7 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
                   top: 'calc(100% + 6px)',
                   left: 0,
                   background: theme.balloonBg,
-                  border: `1px solid ${theme.balloonBorder}`,
+                  border: `1px solid ${part.term.bgColor ?? theme.balloonBorder}`,
                   borderRadius: 8,
                   padding: '8px 12px',
                   fontSize: 12,
@@ -100,17 +127,33 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
                   pointerEvents: 'none',
                 }}
               >
-                {/* 対訳ペア: ja → en */}
-                <span style={{ fontWeight: 700, color: theme.balloonText, display: 'block', marginBottom: 4 }}>
-                  {part.term.expectedTranslation}
-                  <span style={{ color: theme.balloonTextSecondary, margin: '0 4px' }}>→</span>
-                  {part.term.word}
-                </span>
-                {/* 説明 */}
-                {part.term.insight && (
-                  <span style={{ display: 'block', color: theme.balloonTextSecondary, fontWeight: 400, lineHeight: 1.5 }}>
-                    {part.term.insight}
-                  </span>
+                {part.term.bgColor ? (
+                  // タイポ候補バルーン
+                  <>
+                    <span style={{ fontWeight: 700, color: part.term.bgColor, display: 'block', marginBottom: 4 }}>
+                      タイポの可能性
+                    </span>
+                    <span style={{ color: theme.balloonText, display: 'block' }}>
+                      {part.text}
+                      <span style={{ color: theme.balloonTextSecondary, margin: '0 6px' }}>→</span>
+                      <span style={{ fontWeight: 700 }}>{part.term.expectedTranslation}</span>
+                      <span style={{ color: theme.balloonTextSecondary }}> ?</span>
+                    </span>
+                  </>
+                ) : (
+                  // 辞書用語バルーン
+                  <>
+                    <span style={{ fontWeight: 700, color: theme.balloonText, display: 'block', marginBottom: 4 }}>
+                      {part.term.expectedTranslation}
+                      <span style={{ color: theme.balloonTextSecondary, margin: '0 4px' }}>→</span>
+                      {part.term.word}
+                    </span>
+                    {part.term.insight && (
+                      <span style={{ display: 'block', color: theme.balloonTextSecondary, fontWeight: 400, lineHeight: 1.5 }}>
+                        {part.term.insight}
+                      </span>
+                    )}
+                  </>
                 )}
                 {/* バルーンの矢印 */}
                 <span style={{
@@ -121,7 +164,7 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
                   height: 0,
                   borderLeft: '6px solid transparent',
                   borderRight: '6px solid transparent',
-                  borderBottom: `6px solid ${theme.balloonBorder}`,
+                  borderBottom: `6px solid ${part.term.bgColor ?? theme.balloonBorder}`,
                 }} />
               </span>
             )}

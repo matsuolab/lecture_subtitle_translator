@@ -27,6 +27,8 @@ export const zh: LocaleStrings = {
 
   approve: '审批',
   approvedBtn: '已审批 ✓',
+  flag: '标记',
+  flaggedBtn: '已标记 🚩',
   reSplit: '重新分割',
   reTranslate: '重新翻译',
   editHint: 'Enter 换行 ／ Shift+Enter 分割 ／ Ctrl+Enter 保存 ／ Esc 取消',
@@ -90,8 +92,8 @@ export const zh: LocaleStrings = {
     {
       title: '词汇表的使用',
       paragraphs: [
-        '词汇表标签页集中管理专业术语的译名。已确认的术语会在字幕块中自动高亮显示。',
-        '从参考资料中检测到的未注册术语会显示橙色警告。可使用"请求确认"按钮核实翻译准确性。',
+        '在词汇表标签页中，可通过按钮或拖放导入 CSV/XLSX。视频、SRT/JSON、词汇表文件需要分别拖到对应区域。',
+        '导入时会显示“读取中...”以避免重复操作。字幕块除了高亮术语外，还会显示术语漏译/拼写候选，误报可用 × 忽略、↩ 恢复。'
       ],
     },
   ],

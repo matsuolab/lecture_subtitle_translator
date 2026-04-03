@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from 'react'
+import { useRef, useCallback, useState, useEffect } from 'react'
 import { Play, Pause, Volume2, Film } from 'lucide-react'
 import { formatTime, type SubtitleBlock } from '@/types/subtitle'
 import { useTheme } from '@/context/ThemeContext'
@@ -23,6 +23,7 @@ interface VideoPlayerProps {
   onPlay: () => void
   onPause: () => void
   onLoadedMetadata: () => void
+  onError: () => void
 }
 
 export function VideoPlayer({
@@ -40,11 +41,20 @@ export function VideoPlayer({
   onPlay,
   onPause,
   onLoadedMetadata,
+  onError,
 }: VideoPlayerProps) {
   const { theme } = useTheme()
   const seekBarRef = useRef<HTMLDivElement>(null)
   const [hoverPct, setHoverPct] = useState<number | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
+  const [dropError, setDropError] = useState<string | null>(null)
+
+  // エラーメッセージを3秒後に消す
+  useEffect(() => {
+    if (!dropError) return
+    const t = setTimeout(() => setDropError(null), 3000)
+    return () => clearTimeout(t)
+  }, [dropError])
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -52,7 +62,6 @@ export function VideoPlayer({
   }, [])
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
-    // 子要素への移動では発火させない
     if (e.currentTarget.contains(e.relatedTarget as Node)) return
     setIsDragOver(false)
   }, [])
@@ -60,7 +69,7 @@ export function VideoPlayer({
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
-    const file = Array.from(e.dataTransfer.files).find(f => f.type.startsWith('video/'))
+    const file = e.dataTransfer.files[0]
     if (file) onLoadVideo(file)
   }, [onLoadVideo])
   const progress = totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0
@@ -88,19 +97,8 @@ export function VideoPlayer({
     window.addEventListener('mouseup', onUp)
   }, [totalDuration, onSeek])
 
-  // ── DEBUG ──────────────────────────────────────────────────────────────
-  const dbg = videoRef.current
-  const debugInfo = dbg
-    ? `readyState=${dbg.readyState} dom_dur=${dbg.duration?.toFixed(1)} react_dur=${totalDuration.toFixed(1)} src=${dbg.src ? '✓' : '✗'}`
-    : `ref=null react_dur=${totalDuration.toFixed(1)}`
-  // ───────────────────────────────────────────────────────────────────────
-
   return (
     <div className="flex flex-col flex-1 min-h-0">
-      {/* DEBUGバー（常時表示） */}
-      <div style={{ fontSize: 9, color: '#0f0', background: '#111', padding: '2px 8px', fontFamily: 'monospace', flexShrink: 0 }}>
-        url={videoUrl ? videoUrl.slice(0, 30) : 'null'} | {debugInfo}
-      </div>
       {/* 動画エリア */}
       <div
         className="relative flex-1 min-h-0"
@@ -121,6 +119,7 @@ export function VideoPlayer({
             onPlay={onPlay}
             onPause={onPause}
             onLoadedMetadata={onLoadedMetadata}
+            onError={() => { onError(); setDropError('この形式は再生できませんでした') }}
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center gap-3"
@@ -161,6 +160,19 @@ export function VideoPlayer({
               borderRadius: '0 0 6px 6px',
               transition: 'width 0.1s linear',
             }} />
+          </div>
+        )}
+
+        {/* ドロップエラー通知 */}
+        {dropError && (
+          <div style={{
+            position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(239,68,68,0.92)', color: '#fff',
+            fontSize: 12, fontWeight: 600, padding: '8px 16px', borderRadius: 8,
+            whiteSpace: 'pre-wrap', textAlign: 'center', pointerEvents: 'none',
+            zIndex: 20, maxWidth: '90%',
+          }}>
+            {dropError}
           </div>
         )}
 
