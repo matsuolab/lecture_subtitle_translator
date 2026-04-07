@@ -1,0 +1,40 @@
+# ============================================================
+# 字幕制約・品質閾値 設定ファイル
+# コードを変更せずにここで値を調整できます。
+# ============================================================
+
+subtitle:
+  # フォールバック（言語未指定時）
+  _default:
+    max_chars: 40       # 1ブロックの最大文字数
+    max_cps: 15.0       # 最大 Characters Per Second
+    max_retry: 3        # CPS違反時の再プロンプト最大試行回数
+
+  # 英語字幕（出力言語）
+  en:
+    max_chars: 42       # BBC/Netflix標準: 42文字
+    max_cps: 17.0       # Netflix英語標準: 17 CPS
+    max_retry: 3
+
+  # 日本語（元言語 or 日本語字幕として出力する場合）
+  ja:
+    max_chars: 20       # 日本語は1文字が広いため少なめ
+    max_cps: 8.0        # 日本語の読み速度
+    max_retry: 3
+
+  # 中国語
+  zh:
+    max_chars: 16
+    max_cps: 7.0
+    max_retry: 3
+
+  # 韓国語
+  ko:
+    max_chars: 20
+    max_cps: 8.0
+    max_retry: 3
+
+quality:
+  # Embedding コサイン距離の閾値（0.0=完全一致, 1.0=完全に異なる）
+  correction: 0.15      # 日本語補正: これ以上変わったら要確認
+  translation: 0.25     # 英訳: 言語間距離があるため高めに設定

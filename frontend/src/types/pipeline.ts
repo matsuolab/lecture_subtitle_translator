@@ -21,6 +21,35 @@ export interface PipelineRunMetrics {
   cost: PipelineCostMetrics
 }
 
+export type PipelineReviewPriority = 'must_review' | 'should_review' | 'auto_pass'
+
+export interface PipelineReviewItem {
+  id: string
+  nodeId: string
+  reason: string
+  priority: PipelineReviewPriority
+  score: number
+  blockId?: number
+}
+
+export interface PipelineNodeTrace {
+  nodeId: string
+  status: 'success' | 'failure'
+  attempt: number
+  durationMs: number
+  provider: string
+  model: string
+  summary?: string
+}
+
+export interface PipelineAuditReport {
+  mustReviewCount: number
+  shouldReviewCount: number
+  autoPassCount: number
+  reviewItems: PipelineReviewItem[]
+  nodeTraces: PipelineNodeTrace[]
+}
+
 export interface PipelineRunResult {
   status: PipelineStatus
   step: PipelineStep
@@ -29,4 +58,5 @@ export interface PipelineRunResult {
   startedAt?: number
   finishedAt?: number
   metrics?: PipelineRunMetrics
+  audit?: PipelineAuditReport
 }

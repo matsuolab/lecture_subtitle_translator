@@ -175,6 +175,9 @@ export const en: LocaleStrings = {
   aiAskDesc: 'In a future version you will be able to ask AI questions about the tool or prompt tuning directly from this panel.',
 
 
+  reportReviewQueue: 'Review Priority Queue (Latest Run)',
+  reportReviewQueueEmpty: 'No audit data',
+  reportNodeTraceCount: (n) => `Trace: ${n} nodes`,
   reportSummary: 'Run Summary',
   reportRecentRuns: 'Recent Runs',
   reportEmpty: 'No pipeline runs yet. Drop a video to start.',
@@ -195,6 +198,26 @@ export const en: LocaleStrings = {
 
   settingsColorTheme: 'Color Theme',
   settingsLanguage: 'Language',
+
+  settingsAdminTitle: 'Admin Settings',
+  settingsPipelineApiUrl: 'Pipeline API URL',
+  settingsPipelineApiUrlPlaceholder: 'http://127.0.0.1:8765',
+  settingsHfToken: 'HuggingFace Token',
+  settingsHfTokenPlaceholder: 'hf_...',
+  settingsTranslatorProvider: 'Translation provider',
+  settingsTranslatorProviderOpenAi: 'OpenAI',
+  settingsTranslatorProviderGemini: 'Gemini',
+  settingsTranslatorProviderDeepL: 'DeepL',
+  settingsTranslatorProviderLocal: 'Local / OpenAI-compatible',
+  settingsOpenAiApiKey: 'OpenAI API key',
+  settingsGeminiApiKey: 'Gemini API key',
+  settingsDeepLApiKey: 'DeepL API key',
+  settingsOpenAiBaseUrl: 'OpenAI-compatible base URL',
+  settingsOpenAiBaseUrlPlaceholder: 'http://127.0.0.1:8000/v1',
+  settingsStorageNotice: 'API keys and connection settings are stored in this device\'s localStorage. Be careful on shared machines.',
+  settingsResetAdmin: 'Reset admin settings',
   pocThemeDesc: 'Dark blue (development default)',
   matsuoThemeDesc: 'White × Gray × Deep blue',
 }
+
+

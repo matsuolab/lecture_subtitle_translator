@@ -1,4 +1,4 @@
-import type { PipelineRunResult } from '@/types/pipeline'
+import type { PipelineReviewItem, PipelineRunResult } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 
@@ -9,6 +9,12 @@ interface ReportTabProps {
 function formatFinishedAt(ts?: number): string {
   if (!ts) return '-'
   return new Date(ts).toLocaleString()
+}
+
+function priorityBadge(priority: PipelineReviewItem['priority']): string {
+  if (priority === 'must_review') return 'MUST'
+  if (priority === 'should_review') return 'SHOULD'
+  return 'AUTO'
 }
 
 export function ReportTab({ runs }: ReportTabProps) {
@@ -26,6 +32,16 @@ export function ReportTab({ runs }: ReportTabProps) {
   const avgDurationSec = measuredRuns.length > 0
     ? measuredRuns.reduce((sum, r) => sum + (r.metrics?.cost.durationMs ?? 0), 0) / measuredRuns.length / 1000
     : 0
+
+  const latestAudit = runs.find(r => r.audit)?.audit
+  const topReviewItems = latestAudit
+    ? [...latestAudit.reviewItems]
+      .sort((a, b) => {
+        const weight = (p: PipelineReviewItem['priority']) => (p === 'must_review' ? 3 : p === 'should_review' ? 2 : 1)
+        return weight(b.priority) - weight(a.priority)
+      })
+      .slice(0, 8)
+    : []
 
   const statusLabel = (status: PipelineRunResult['status']) => {
     if (status === 'success') return t.reportStatusSuccess
@@ -52,6 +68,57 @@ export function ReportTab({ runs }: ReportTabProps) {
           <span>{t.reportAvgCost}: ${avgCost.toFixed(6)}</span>
           <span>{t.reportAvgDuration}: {avgDurationSec.toFixed(2)}s</span>
         </div>
+      </div>
+
+      <div style={{
+        border: `1px solid ${theme.panelBorder}`,
+        borderRadius: 8,
+        background: theme.cardBg,
+        padding: '10px 12px',
+        marginBottom: 10,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
+          {t.reportReviewQueue}
+        </div>
+
+        {!latestAudit ? (
+          <div style={{ fontSize: 12, color: theme.textMuted }}>{t.reportReviewQueueEmpty}</div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8, fontSize: 11, color: theme.textSecondary }}>
+              <span>MUST: {latestAudit.mustReviewCount}</span>
+              <span>SHOULD: {latestAudit.shouldReviewCount}</span>
+              <span>AUTO: {latestAudit.autoPassCount}</span>
+              <span>{t.reportNodeTraceCount(latestAudit.nodeTraces.length)}</span>
+            </div>
+
+            <div style={{ display: 'grid', gap: 6 }}>
+              {topReviewItems.map(item => (
+                <div
+                  key={item.id}
+                  style={{
+                    border: `1px solid ${theme.panelBorder}`,
+                    borderRadius: 6,
+                    padding: '6px 8px',
+                    background: theme.panelBg,
+                    fontSize: 11,
+                    color: theme.textSecondary,
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 2 }}>
+                    <span style={{ fontWeight: 700, color: item.priority === 'must_review' ? '#ef4444' : item.priority === 'should_review' ? '#f59e0b' : '#22c55e' }}>
+                      {priorityBadge(item.priority)}
+                    </span>
+                    <span style={{ color: theme.textPrimary }}>{item.nodeId}</span>
+                    <span style={{ color: theme.textMuted }}>score: {item.score.toFixed(2)}</span>
+                    {item.blockId !== undefined && <span style={{ color: theme.textMuted }}>block: {item.blockId}</span>}
+                  </div>
+                  <div>{item.reason}</div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       <div style={{

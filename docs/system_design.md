@@ -461,3 +461,111 @@ DSPy統合（プロンプト自動最適化）:
 3. **Issue Labelの定義合意**（CPS違反・意味乖離・専門用語疑義）
 4. **SRTファイルのリポジトリ構造合意**（上記案の確認）
 5. **「Todoリスト自動作成」の具体的定義**（GitHub Projects 案の可否）
+
+---
+
+## DAG + Agent SDK 設計方針（2026-04-04 追記）
+
+### 背景
+
+翻訳品質チェック（意味近似・用語漏れ）や、書き起こしダブルチェック（複数ASR比較）を将来追加する前提では、
+直列固定のパイプラインよりも「状態付きDAG」で工程管理する方が拡張コストが低い。
+
+### 採用方針
+
+- 全体オーケストレーションは **DAG実行エンジン** で管理する。
+- 各ノード内の「生成→検証→再生成」は **Agent SDK** で実行する。
+- 判定ロジック（CPS/文字数/用語漏れ/閾値比較）はツール関数で決定論にする。
+- LLMは翻訳・言い換え・修正案生成に集中させる。
+
+### ノード設計の基本単位
+
+各ノードは以下を必須で持つ。
+
+- 入力スキーマ
+- 出力スキーマ
+- 実行Provider情報（model/provider/version）
+- 品質メトリクス
+- 再試行条件（Policy）
+
+`RunState` は全ノードの入出力・試行回数・エラー・コストを保存し、Reportタブへ連携する。
+
+### 初期DAG（最小）
+
+```
+transcribe_primary
+  -> ja_correct
+  -> translate
+  -> subtitle_format
+  -> done
+```
+
+### 拡張DAG（段階追加）
+
+```
+transcribe_primary
+  -> transcribe_checker
+  -> asr_consensus_check
+  -> ja_correct
+  -> translate
+  -> semantic_check
+  -> terminology_check
+  -> subtitle_format
+  -> cps_guard
+  -> done
+```
+
+### 再実行ポリシー（例）
+
+- semantic_check スコア < 0.85: `translate` に戻す（最大3回）
+- terminology_check NG: `translate` に戻す（最大2回）
+- cps_guard NG: `subtitle_format` に戻す（最大3回）
+- asr_consensus_check NG: `human_review_flag` を付与して先へ進む（停止はしない）
+
+### 実装ロードマップ（DAG前提）
+
+1. PoC資産（`poc/step2_pipeline`）をノード単位で再配置
+2. DAG Runner / RunState / Policy Engine をバックエンドに実装
+3. 直列4工程をDAG上で再現（挙動互換）
+4. semantic_check / terminology_check / cps_guard を順次追加
+5. transcribe_checker + consensus_check を追加
+6. Reportタブにノード別結果（スコア・再試行回数・provider）を表示
+
+### 補足
+
+初心者向け学習ドキュメントは `docs/dag_agent_pipeline_learning.md` に保存した。
+
+### ノード改良容易性を要件化（REQ-ARCH, 2026-04-04）
+
+- `REQ-ARCH-01` ノード差し替え可能性: すべてのノードは共通 `NodeContract`（入力/出力スキーマ）に準拠し、同一IDのノードを別実装へ差し替えてもDAG全体が動作すること。
+- `REQ-ARCH-02` 後方互換性: ノード入出力は `schema_version` を持ち、互換性を壊す変更を検知できること。
+- `REQ-ARCH-03` 単体テスト可能性: ノードはDAGランナーと分離して単体テストできること。結合前にノード単位で品質検証を行うこと。
+- `REQ-ARCH-04` 観測可能性: `RunState` にノードごとの provider/model/tokens/duration/retry/error を保存し、UIレポートから参照できること。
+
+---
+
+## 第四回MTG反映（2026-04-04）
+
+> 参照: `10_meetings/20260402_第四回MTG_定例第一回.md`
+
+### 追加設計方針
+
+1. 品質ゲートを「全件確認」から「要確認箇所の優先確認」へ移行する。
+- semantic_check / terminology_check / cps_guard の各ノードでスコアリングし、レビュー優先度を付ける。
+
+2. 翻訳者の修正判断を学習資産として蓄積する。
+- ラベル（意訳、文字制約、訳間違いなど）付きの修正ログを評価データ化し、DSPy最適化と検知閾値調整に再利用する。
+
+3. スライド文脈を標準入力として扱う。
+- 補正・翻訳ステップにPDF抽出テキストを投入し、専門用語と講義文脈の整合を上げる。
+
+4. ROI計測を設計要件に含める。
+- 導入前後で工程別作業時間（書き起こし、補正、翻訳、CPS調整、レビュー）を記録し、費用対効果を継続算出する。
+
+5. セキュリティレビューをリリースゲート化する。
+- 開発側がデータフロー図と対策案（アクセス制御、秘密情報管理、改ざん防止）を提示し、合意後に運用へ移行する。
+
+### 運用モデル補足
+
+- APIキー登録・更新は運用管理者のみ実施する。
+- 翻訳担当者には秘密情報を配布せず、UI経由の業務操作に限定する。

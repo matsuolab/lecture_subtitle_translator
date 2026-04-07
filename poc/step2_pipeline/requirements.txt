@@ -1,0 +1,20 @@
+# 書き起こし
+whisperx
+
+# LLM / Embedding
+openai>=1.30.0
+google-generativeai>=0.8.0
+
+# PDF 抽出
+pymupdf>=1.24.0          # fitz
+
+# SRT 出力
+pysubs2>=1.7.0
+
+# 音声処理（WhisperX 依存）
+torch>=2.1.0
+torchaudio>=2.1.0
+ffmpeg-python>=0.2.0
+
+# 環境変数
+python-dotenv>=1.0.0

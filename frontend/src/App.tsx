@@ -20,8 +20,11 @@ import {
   importSrt,
   exportSrt,
 } from '@/api/persistence'
+import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
+import { hasPipelineApi, runPipelineViaApi } from '@/api/pipelineClient'
 import type { SubtitleBlock } from '@/types/subtitle'
-import type { PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
+import type { AdminSettings } from '@/types/adminSettings'
+import type { PipelineAuditReport, PipelineNodeTrace, PipelineReviewItem, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
@@ -52,6 +55,7 @@ export default function App() {
     message: '動画をドロップするとパイプラインを開始します',
   })
   const [pipelineHistory, setPipelineHistory] = useState<PipelineRunResult[]>([])
+  const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
 
   // パネルリサイズ
   const [leftPct, setLeftPct] = useState(45)
@@ -128,6 +132,17 @@ export default function App() {
 
   const sleep = useCallback((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)), [])
 
+  useEffect(() => {
+    saveAdminSettings(adminSettings)
+  }, [adminSettings])
+
+  const updateAdminSettings = useCallback((patch: Partial<AdminSettings>) => {
+    setAdminSettings(prev => ({ ...prev, ...patch }))
+  }, [])
+
+  const resetAdminSettings = useCallback(() => {
+    setAdminSettings(getDefaultAdminSettings())
+  }, [])
 
   const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
     const totalBlocks = Math.max(1, generated.length)
@@ -157,6 +172,64 @@ export default function App() {
         estimatedUsd,
         durationMs: Math.max(0, finishedAt - startedAt),
       },
+    }
+  }, [])
+
+  const buildAuditReport = useCallback((generated: SubtitleBlock[], traces: PipelineNodeTrace[]): PipelineAuditReport => {
+    const items: PipelineReviewItem[] = []
+
+    generated.forEach(block => {
+      if (block.cps > 15) {
+        items.push({
+          id: `cps-${block.id}`,
+          nodeId: 'cps_guard',
+          reason: `CPS超過 (${block.cps.toFixed(1)} > 15.0)`,
+          priority: 'must_review',
+          score: Math.min(1, (block.cps - 15) / 10),
+          blockId: block.id,
+        })
+      }
+      const overLen = block.target.split('\n').some(line => line.length > 42)
+      if (overLen) {
+        items.push({
+          id: `len-${block.id}`,
+          nodeId: 'subtitle_format',
+          reason: '42文字超過行あり',
+          priority: 'should_review',
+          score: 0.6,
+          blockId: block.id,
+        })
+      }
+    })
+
+    // Stub: 意味近似スコアは実API接続後にバックエンドから取得する
+    items.push({
+      id: 'semantic-global',
+      nodeId: 'semantic_check',
+      reason: 'スタブ実行 - 実API接続後に実測値を表示',
+      priority: 'auto_pass' as const,
+      score: 1.0,
+    })
+
+    // Stub: 用語チェックは実API接続後にバックエンドから取得する
+    items.push({
+      id: 'term-global',
+      nodeId: 'terminology_check',
+      reason: 'スタブ実行 - 実API接続後に用語漏れを検出',
+      priority: 'auto_pass' as const,
+      score: 1.0,
+    })
+
+    const mustReviewCount = items.filter(i => i.priority === 'must_review').length
+    const shouldReviewCount = items.filter(i => i.priority === 'should_review').length
+    const autoPassCount = items.filter(i => i.priority === 'auto_pass').length
+
+    return {
+      mustReviewCount,
+      shouldReviewCount,
+      autoPassCount,
+      reviewItems: items,
+      nodeTraces: traces,
     }
   }, [])
 
@@ -203,23 +276,110 @@ export default function App() {
     })
   }, [])
 
-  const runDropPipeline = useCallback(async (sourceName: string) => {
+  const runDropPipeline = useCallback(async (sourceName: string, sourcePath?: string) => {
     const startedAt = Date.now()
+    const traces: PipelineNodeTrace[] = []
+
+    const runStep = async (
+      nodeId: string,
+      step: PipelineRunResult['step'],
+      message: string,
+      waitMs: number,
+      summary: string,
+      provider = 'stub',
+      model = 'stub-v1',
+    ) => {
+      setPipelineRun({ status: 'running', step, message, sourceName, startedAt })
+      const t0 = Date.now()
+      await sleep(waitMs)
+      const t1 = Date.now()
+      traces.push({
+        nodeId,
+        status: 'success',
+        attempt: 1,
+        durationMs: Math.max(1, t1 - t0),
+        provider,
+        model,
+        summary,
+      })
+    }
+
     setActiveTab('subtitles')
     try {
-      setPipelineRun({ status: 'running', step: 'transcribe', message: '文字起こしを実行中...', sourceName, startedAt })
-      await sleep(350)
-      setPipelineRun({ status: 'running', step: 'correct', message: '日本語テキストを補正中...', sourceName, startedAt })
-      await sleep(300)
-      setPipelineRun({ status: 'running', step: 'translate', message: '英訳を生成中...', sourceName, startedAt })
-      await sleep(350)
-      setPipelineRun({ status: 'running', step: 'subtitle', message: '字幕ブロックを生成中...', sourceName, startedAt })
-      await sleep(260)
+      let generated: SubtitleBlock[] = []
+      let audit: PipelineAuditReport | undefined
 
-      const generated = buildPipelineStubBlocks(sourceName)
+      if (hasPipelineApi(adminSettings)) {
+        setPipelineRun({ status: 'running', step: 'transcribe', message: 'パイプライン開始中...', sourceName, startedAt })
+        const apiResult = await runPipelineViaApi(sourceName, adminSettings, sourcePath, (progress) => {
+          const nodeLabel: Record<string, string> = {
+            extract_audio: '音声抽出',
+            transcribe: '書き起こし（WhisperX）',
+            correct: '日本語補正',
+            translate: '英語翻訳',
+            subtitle: '字幕ブロック化',
+            semantic_check: '意味チェック',
+            terminology_check: '用語チェック',
+            cps_guard: 'CPS検証',
+          }
+          const node = progress.currentNode ?? ''
+          const label = nodeLabel[node] ?? node
+          const elapsed = progress.nodeElapsedSec !== null ? ` (${progress.nodeElapsedSec}s)` : ''
+          const stepKey = (node || 'transcribe') as PipelineRunResult['step']
+          setPipelineRun({
+            status: 'running',
+            step: stepKey,
+            message: `${label}${elapsed}`,
+            sourceName,
+            startedAt,
+          })
+        })
+        generated = apiResult.blocks
+        audit = apiResult.audit
+      } else {
+        await runStep('transcribe', 'transcribe', '文字起こしを実行中...', 350, 'WhisperXでセグメント生成')
+        await runStep('correct', 'correct', '日本語テキストを補正中...', 300, 'LLMで補正と正規化')
+        await runStep('translate', 'translate', '英訳を生成中...', 350, 'LLMで字幕翻訳')
+        await runStep('subtitle_format', 'subtitle', '字幕ブロックを生成中...', 260, '字幕ブロック整形とCPS計算')
+
+        traces.push(
+          {
+            nodeId: 'semantic_check',
+            status: 'success',
+            attempt: 1,
+            durationMs: 22,
+            provider: 'embedding',
+            model: 'text-embedding-3-small',
+            summary: '意味近似スコアを算出',
+          },
+          {
+            nodeId: 'terminology_check',
+            status: 'success',
+            attempt: 1,
+            durationMs: 9,
+            provider: 'rule-based',
+            model: 'glossary-v1',
+            summary: '用語漏れ検出',
+          },
+          {
+            nodeId: 'cps_guard',
+            status: 'success',
+            attempt: 1,
+            durationMs: 5,
+            provider: 'rule-based',
+            model: 'cps-v1',
+            summary: 'CPSと42文字制約チェック',
+          },
+        )
+
+        generated = buildPipelineStubBlocks(sourceName)
+        audit = buildAuditReport(generated, traces)
+      }
+
       reset(generated)
 
       const finishedAt = Date.now()
+      const metrics = calcPipelineMetrics(generated, startedAt, finishedAt)
       const result: PipelineRunResult = {
         status: 'success',
         step: 'done',
@@ -227,7 +387,8 @@ export default function App() {
         sourceName,
         startedAt,
         finishedAt,
-        metrics: calcPipelineMetrics(generated, startedAt, finishedAt),
+        metrics,
+        audit,
       }
       setPipelineRun(result)
       appendPipelineHistory(result)
@@ -239,11 +400,26 @@ export default function App() {
         sourceName,
         startedAt,
         finishedAt: Date.now(),
+        audit: {
+          mustReviewCount: 1,
+          shouldReviewCount: 0,
+          autoPassCount: 0,
+          reviewItems: [
+            {
+              id: 'pipeline-error',
+              nodeId: 'pipeline',
+              reason: err instanceof Error ? err.message : '不明なエラー',
+              priority: 'must_review',
+              score: 0,
+            },
+          ],
+          nodeTraces: traces,
+        },
       }
       setPipelineRun(result)
       appendPipelineHistory(result)
     }
-  }, [appendPipelineHistory, buildPipelineStubBlocks, calcPipelineMetrics, reset, sleep])
+  }, [adminSettings, appendPipelineHistory, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, reset, sleep])
 
   const handleVideoInput = useCallback((file: File) => {
     loadVideoFile(file)
@@ -253,7 +429,7 @@ export default function App() {
   const handleVideoPathInput = useCallback((path: string) => {
     loadVideoPath(path)
     const sourceName = path.split(/[\\/]/).pop() ?? path
-    void runDropPipeline(sourceName)
+    void runDropPipeline(sourceName, path)
   }, [loadVideoPath, runDropPipeline])
 
   const handleRightDragOver = useCallback((e: React.DragEvent) => {
@@ -311,8 +487,10 @@ export default function App() {
   // Tauri: ネイティブDrag&Dropのフォールバック（WindowsビルドでHTML5 D&Dが効かない対策）
   useEffect(() => {
     if (!isTauri()) return
+    let cancelled = false
     let unlisten: (() => void) | null = null
     getCurrentWebview().onDragDropEvent(async (event) => {
+      if (cancelled) return
       if (event.payload.type !== 'drop') return
       if (Date.now() - lastHtmlDropRef.current < 500) return
       const paths = event.payload.paths
@@ -353,8 +531,14 @@ export default function App() {
       } catch (err) {
         alert(`読み込みに失敗しました: ${err instanceof Error ? err.message : '不明なエラー'}`)
       }
-    }).then(fn => { unlisten = fn })
-    return () => { if (unlisten) unlisten() }
+    }).then(fn => {
+      if (cancelled) fn()  // すでにアンマウント済みなら即解除
+      else unlisten = fn
+    })
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
   }, [reset, importEntries, handleVideoPathInput, readTextFileAsFile, readBinaryFileAsFile])
 
   const handleLoadVideo = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -371,11 +555,11 @@ export default function App() {
   // 変更のたびに debounce 自動保存（1秒後）
   useEffect(() => {
     setSaveStatus('saving')
-    const t = setTimeout(() => {
+    const timerId = setTimeout(() => {
       saveToLocalStorage(blocks)
       setSaveStatus('saved')
     }, 1000)
-    return () => clearTimeout(t)
+    return () => clearTimeout(timerId)
   }, [blocks])
 
   // 復元メッセージを3秒後に消す
@@ -1119,7 +1303,13 @@ export default function App() {
             {activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}
             {activeTab === 'help' && <HelpTab />}
             {activeTab === 'report' && <ReportTab runs={pipelineHistory} />}
-            {activeTab === 'settings' && <SettingsTab />}
+            {activeTab === 'settings' && (
+              <SettingsTab
+                adminSettings={adminSettings}
+                onAdminSettingsChange={updateAdminSettings}
+                onAdminSettingsReset={resetAdminSettings}
+              />
+            )}
           </div>
         </section>
 
@@ -1127,3 +1317,5 @@ export default function App() {
     </div>
   )
 }
+
+

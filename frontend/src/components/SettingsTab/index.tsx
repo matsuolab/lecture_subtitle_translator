@@ -3,15 +3,24 @@ import { themes } from '@/themes'
 import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
+import type { AdminSettings, TranslationProvider } from '@/types/adminSettings'
 
-export function SettingsTab() {
+type SettingsTabProps = {
+  adminSettings: AdminSettings
+  onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
+  onAdminSettingsReset: () => void
+}
+
+export function SettingsTab({
+  adminSettings,
+  onAdminSettingsChange,
+  onAdminSettingsReset,
+}: SettingsTabProps) {
   const { theme, setThemeId } = useTheme()
   const { strings: t, setLocaleId } = useLocale()
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
-
-      {/* カラーテーマ */}
       <Section title={t.settingsColorTheme} theme={theme}>
         {themes.map(th => (
           <OptionCard
@@ -38,7 +47,6 @@ export function SettingsTab() {
         ))}
       </Section>
 
-      {/* 言語 */}
       <Section title={t.settingsLanguage} theme={theme}>
         {locales.map(locale => (
           <OptionCard
@@ -57,6 +65,93 @@ export function SettingsTab() {
         ))}
       </Section>
 
+      <Section title={t.settingsAdminTitle} theme={theme}>
+        <FieldCard theme={theme}>
+          <Field
+            theme={theme}
+            label={t.settingsPipelineApiUrl}
+            value={adminSettings.pipelineApiUrl}
+            placeholder={t.settingsPipelineApiUrlPlaceholder}
+            onChange={(value) => onAdminSettingsChange({ pipelineApiUrl: value })}
+          />
+          <Field
+            theme={theme}
+            label={t.settingsHfToken}
+            value={adminSettings.hfToken}
+            placeholder={t.settingsHfTokenPlaceholder}
+            type="password"
+            onChange={(value) => onAdminSettingsChange({ hfToken: value })}
+          />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <SelectField
+            theme={theme}
+            label={t.settingsTranslatorProvider}
+            value={adminSettings.translationProvider}
+            onChange={(value) => onAdminSettingsChange({ translationProvider: value })}
+            options={[
+              { value: 'openai', label: t.settingsTranslatorProviderOpenAi },
+              { value: 'gemini', label: t.settingsTranslatorProviderGemini },
+              { value: 'deepl', label: t.settingsTranslatorProviderDeepL },
+              { value: 'local', label: t.settingsTranslatorProviderLocal },
+            ]}
+          />
+          <Field
+            theme={theme}
+            label={t.settingsOpenAiBaseUrl}
+            value={adminSettings.openaiCompatibleBaseUrl}
+            placeholder={t.settingsOpenAiBaseUrlPlaceholder}
+            onChange={(value) => onAdminSettingsChange({ openaiCompatibleBaseUrl: value })}
+          />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <Field
+            theme={theme}
+            label={t.settingsOpenAiApiKey}
+            value={adminSettings.openaiApiKey}
+            placeholder="sk-..."
+            type="password"
+            onChange={(value) => onAdminSettingsChange({ openaiApiKey: value })}
+          />
+          <Field
+            theme={theme}
+            label={t.settingsGeminiApiKey}
+            value={adminSettings.geminiApiKey}
+            placeholder="AIza..."
+            type="password"
+            onChange={(value) => onAdminSettingsChange({ geminiApiKey: value })}
+          />
+          <Field
+            theme={theme}
+            label={t.settingsDeepLApiKey}
+            value={adminSettings.deeplApiKey}
+            placeholder="DeepL key"
+            type="password"
+            onChange={(value) => onAdminSettingsChange({ deeplApiKey: value })}
+          />
+        </FieldCard>
+
+        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+          {t.settingsStorageNotice}
+        </div>
+
+        <button
+          onClick={onAdminSettingsReset}
+          style={{
+            marginTop: 10,
+            padding: '8px 12px',
+            borderRadius: 8,
+            border: `1px solid ${theme.panelBorder}`,
+            background: theme.cardBg,
+            color: theme.textPrimary,
+            cursor: 'pointer',
+          }}
+        >
+          {t.settingsResetAdmin}
+        </button>
+      </Section>
     </div>
   )
 }
@@ -100,5 +195,95 @@ function OptionCard({ isActive, onClick, theme, children }: {
         <div style={{ marginLeft: 'auto', fontSize: 12, color: theme.accent, fontWeight: 700 }}>✓</div>
       )}
     </button>
+  )
+}
+
+function FieldCard({ theme, children }: { theme: Theme; children: React.ReactNode }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      padding: 14,
+      borderRadius: 8,
+      border: `1px solid ${theme.panelBorder}`,
+      background: theme.cardBg,
+    }}>
+      {children}
+    </div>
+  )
+}
+
+function Field({
+  theme,
+  label,
+  value,
+  placeholder,
+  onChange,
+  type = 'text',
+}: {
+  theme: Theme
+  label: string
+  value: string
+  placeholder?: string
+  onChange: (value: string) => void
+  type?: 'text' | 'password'
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <input
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+        }}
+      />
+    </label>
+  )
+}
+
+function SelectField({
+  theme,
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  theme: Theme
+  label: string
+  value: TranslationProvider
+  onChange: (value: TranslationProvider) => void
+  options: Array<{ value: TranslationProvider; label: string }>
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as TranslationProvider)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+        }}
+      >
+        {options.map(option => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
   )
 }

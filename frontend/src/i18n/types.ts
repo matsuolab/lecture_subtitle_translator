@@ -1,9 +1,7 @@
 export interface LocaleStrings {
-  // メタ
   id: string
-  label: string  // 表示名（日本語, English, ...）
+  label: string
 
-  // アプリシェル
   videoPlayer: string
   tabSubtitles: string
   tabDictionary: string
@@ -26,7 +24,6 @@ export interface LocaleStrings {
   loadSrtTitle: string
   importSrtError: string
 
-  // SubtitleBlock
   approve: string
   approvedBtn: string
   flag: string
@@ -40,13 +37,11 @@ export interface LocaleStrings {
   timeErrorOrder: string
   timeEditTitle: string
 
-  // SubtitleBlockList
   gapLabel: (seconds: number) => string
   gapDragHint: string
   boundaryDragging: string
   boundaryHover: string
 
-  // GlossaryTab
   registeredTerms: (n: number) => string
   unregisteredTerms: (n: number) => string
   confirmed: string
@@ -58,7 +53,6 @@ export interface LocaleStrings {
   addToDictionary: string
   noDesc: string
 
-  // HelpTab
   guide: Array<{
     title: string
     paragraphs: string[]
@@ -71,8 +65,9 @@ export interface LocaleStrings {
   aiAskTitle: string
   aiAskDesc: string
 
-
-  // ReportTab
+  reportReviewQueue: string
+  reportReviewQueueEmpty: string
+  reportNodeTraceCount: (n: number) => string
   reportSummary: string
   reportRecentRuns: string
   reportEmpty: string
@@ -91,9 +86,25 @@ export interface LocaleStrings {
   reportStatusRunning: string
   reportStatusIdle: string
 
-  // SettingsTab
   settingsColorTheme: string
   settingsLanguage: string
+  settingsAdminTitle: string
+  settingsPipelineApiUrl: string
+  settingsPipelineApiUrlPlaceholder: string
+  settingsHfToken: string
+  settingsHfTokenPlaceholder: string
+  settingsTranslatorProvider: string
+  settingsTranslatorProviderOpenAi: string
+  settingsTranslatorProviderGemini: string
+  settingsTranslatorProviderDeepL: string
+  settingsTranslatorProviderLocal: string
+  settingsOpenAiApiKey: string
+  settingsGeminiApiKey: string
+  settingsDeepLApiKey: string
+  settingsOpenAiBaseUrl: string
+  settingsOpenAiBaseUrlPlaceholder: string
+  settingsStorageNotice: string
+  settingsResetAdmin: string
   pocThemeDesc: string
   matsuoThemeDesc: string
 }

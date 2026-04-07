@@ -175,6 +175,9 @@ export const zh: LocaleStrings = {
   aiAskDesc: '未来版本将支持在此面板直接向 AI 询问工具使用方法或提示词调整问题。',
 
 
+  reportReviewQueue: '审阅优先队列（最新执行）',
+  reportReviewQueueEmpty: '无审计数据',
+  reportNodeTraceCount: (n) => `追踪: ${n} 节点`,
   reportSummary: '运行摘要',
   reportRecentRuns: '最近运行记录',
   reportEmpty: '暂无运行记录。请拖放视频开始。',
@@ -195,6 +198,24 @@ export const zh: LocaleStrings = {
 
   settingsColorTheme: '颜色主题',
   settingsLanguage: '语言',
+
+  settingsAdminTitle: '管理员设置',
+  settingsPipelineApiUrl: 'Pipeline API URL',
+  settingsPipelineApiUrlPlaceholder: 'http://127.0.0.1:8765',
+  settingsHfToken: 'HuggingFace Token',
+  settingsHfTokenPlaceholder: 'hf_...',
+  settingsTranslatorProvider: '翻译提供方',
+  settingsTranslatorProviderOpenAi: 'OpenAI',
+  settingsTranslatorProviderGemini: 'Gemini',
+  settingsTranslatorProviderDeepL: 'DeepL',
+  settingsTranslatorProviderLocal: '本地 / OpenAI兼容',
+  settingsOpenAiApiKey: 'OpenAI API Key',
+  settingsGeminiApiKey: 'Gemini API Key',
+  settingsDeepLApiKey: 'DeepL API Key',
+  settingsOpenAiBaseUrl: 'OpenAI兼容 Base URL',
+  settingsOpenAiBaseUrlPlaceholder: 'http://127.0.0.1:8000/v1',
+  settingsStorageNotice: 'API Key 与连接设置会保存在本机 localStorage。共用电脑时请注意。',
+  settingsResetAdmin: '重置管理员设置',
   pocThemeDesc: '深蓝色系（开发默认）',
   matsuoThemeDesc: '白色 × 灰色 × 深蓝',
 }

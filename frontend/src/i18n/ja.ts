@@ -176,6 +176,9 @@ export const ja: LocaleStrings = {
   aiAskDesc: '将来的にはこの画面でツールの使い方やプロンプト調整の疑問を AI に直接聞けるようにする予定です。',
 
 
+  reportReviewQueue: 'レビュー優先キュー（最新実行）',
+  reportReviewQueueEmpty: '監査データなし',
+  reportNodeTraceCount: (n) => `トレース: ${n} ノード`,
   reportSummary: '実行サマリー',
   reportRecentRuns: '最近の実行',
   reportEmpty: 'まだ実行履歴がありません。動画をドロップして開始してください。',
@@ -196,6 +199,24 @@ export const ja: LocaleStrings = {
 
   settingsColorTheme: 'カラーテーマ',
   settingsLanguage: '言語',
+
+  settingsAdminTitle: '管理者設定',
+  settingsPipelineApiUrl: 'パイプラインAPI URL',
+  settingsPipelineApiUrlPlaceholder: 'http://127.0.0.1:8765',
+  settingsHfToken: 'HuggingFace Token',
+  settingsHfTokenPlaceholder: 'hf_...',
+  settingsTranslatorProvider: '翻訳プロバイダ',
+  settingsTranslatorProviderOpenAi: 'OpenAI',
+  settingsTranslatorProviderGemini: 'Gemini',
+  settingsTranslatorProviderDeepL: 'DeepL',
+  settingsTranslatorProviderLocal: 'ローカル / OpenAI互換',
+  settingsOpenAiApiKey: 'OpenAI APIキー',
+  settingsGeminiApiKey: 'Gemini APIキー',
+  settingsDeepLApiKey: 'DeepL APIキー',
+  settingsOpenAiBaseUrl: 'OpenAI互換 Base URL',
+  settingsOpenAiBaseUrlPlaceholder: 'http://127.0.0.1:8000/v1',
+  settingsStorageNotice: 'APIキーと接続設定はこの端末の localStorage に保存されます。共有PCでは注意してください。',
+  settingsResetAdmin: '管理者設定を初期値に戻す',
   pocThemeDesc: 'ダークブルー系（開発用デフォルト）',
   matsuoThemeDesc: 'ホワイト×グレー×東大ブルー',
 }
