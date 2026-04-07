@@ -9,6 +9,15 @@ docs/ideas.md
 # PoC actual data (real lecture content - do not commit)
 poc/data/
 poc/.env
+poc/results/
+poc/step2_pipeline/output/
+poc/step2_pipeline/.env
+
+# Audio/video files
+*.wav
+*.mp4
+*.mp3
+*.m4a
 
 # Frontend
 frontend/node_modules/
