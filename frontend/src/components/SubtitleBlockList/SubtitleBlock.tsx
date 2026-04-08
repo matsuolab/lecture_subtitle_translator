@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback, useDeferredValue } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback, useDeferredValue, memo } from 'react'
 import { getCpsLevel, formatTime, parseTime, type SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
 import { TermHighlight } from './TermHighlight'
 import { useTheme } from '@/context/ThemeContext'
@@ -10,11 +10,11 @@ import type { Theme } from '@/themes'
 interface SubtitleBlockProps {
   block: SubtitleBlockType
   isActive: boolean
-  currentTime: number
+  isCurrentlyPlaying: boolean
   isDragging: boolean
   isDragOver: boolean
   playProgress: number // 0-100
-  onSelect: () => void
+  onSelect: (id: number) => void
   onApprove: (id: number) => void
   onFlag: (id: number) => void
   onReSplit: (id: number) => void
@@ -27,6 +27,7 @@ interface SubtitleBlockProps {
   onSplitAtPlayhead: (id: number) => void
   onEqualSplit: (id: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
+  onDraftChange: (id: number, text: string | null) => void
   onDragStart: (id: number) => void
   onDragEnd: () => void
   onDragOver: (id: number) => void
@@ -153,10 +154,17 @@ function cpsBadgeStyle(level: 'ok' | 'warn' | 'error', theme: Theme) {
   return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
 }
 
-export function SubtitleBlock({
+function getCharLevel(lineLengths: number[]): 'ok' | 'warn' | 'error' {
+  const max = Math.max(...lineLengths, 0)
+  if (max > 42) return 'error'
+  if (max > 36) return 'warn'
+  return 'ok'
+}
+
+function SubtitleBlockInner({
   block,
   isActive,
-  currentTime,
+  isCurrentlyPlaying,
   isDragging,
   isDragOver,
   playProgress,
@@ -173,6 +181,7 @@ export function SubtitleBlock({
   onSplitAtPlayhead,
   onEqualSplit,
   onIgnoreWarning,
+  onDraftChange,
   onDragStart,
   onDragEnd,
   onDragOver,
@@ -252,7 +261,11 @@ export function SubtitleBlock({
   const startInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const targetTextareaRef = useRef<HTMLTextAreaElement>(null)
-  const cpsLevel = getCpsLevel(block.cps)
+  // 編集中はeditTextベースでCPS・文字数をライブ計算する
+  const liveCps = isEditing
+    ? Math.round((editText.length / Math.max(0.01, block.endTime - block.startTime)) * 10) / 10
+    : block.cps
+  const cpsLevel = getCpsLevel(liveCps)
 
   // 時間編集開始時にフォーカス
   useEffect(() => {
@@ -321,11 +334,12 @@ export function SubtitleBlock({
 
   const handleEditSave = () => {
     onUpdateSource(block.id, editText)
+    onDraftChange(block.id, null)
     setIsEditing(false)
   }
 
   const handleEditKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Escape') { setEditText(block.source); setIsEditing(false) }
+    if (e.key === 'Escape') { setEditText(block.source); onDraftChange(block.id, null); setIsEditing(false) }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleEditSave()
     if (e.key === 'Enter' && e.shiftKey) {
       e.preventDefault()
@@ -334,6 +348,7 @@ export function SubtitleBlock({
       const after = editText.slice(cursor).trimStart()
       if (before && after) {
         onManualSplit(block.id, before, after)
+        onDraftChange(block.id, null)
         setIsEditing(false)
       }
     }
@@ -353,11 +368,10 @@ export function SubtitleBlock({
   }, [block.id, onIgnoreWarning])
 
   const sourceLines = block.source.split('\n')
-  const isOver = sourceLines.some(l => l.length > 42)
+  const liveLines = isEditing ? editText.split('\n') : sourceLines
+  const charLevel = getCharLevel(liveLines.map(l => l.length))
   // 再生位置がこのブロック内にあるときだけ「再生位置で分割」を有効化
-  const canSplitAtPlayhead = !isApproved
-    && currentTime > block.startTime
-    && currentTime < block.endTime
+  const canSplitAtPlayhead = !isApproved && isCurrentlyPlaying
 
   const blockStyle: React.CSSProperties = {
     position: 'relative',
@@ -395,7 +409,7 @@ export function SubtitleBlock({
   return (
     <div
       style={blockStyle}
-      onClick={onSelect}
+      onClick={() => onSelect(block.id)}
       draggable={!isApproved}
       onDragStart={e => { if (isApproved) { e.preventDefault(); return }; e.dataTransfer.effectAllowed = 'move'; onDragStart(block.id) }}
       onDragEnd={onDragEnd}
@@ -424,8 +438,8 @@ export function SubtitleBlock({
             onChange={e => setEditTargetText(e.target.value)}
             onKeyDown={handleTargetKeyDown}
             onBlur={handleTargetSave}
-            onClick={e => e.stopPropagation()}
-            rows={2}
+            onClick={e => { e.stopPropagation(); onSelect(block.id) }}
+            rows={Math.max(2, editTargetText.split('\n').length)}
             style={{
               width: '100%',
               background: theme.inputBg,
@@ -441,13 +455,25 @@ export function SubtitleBlock({
               marginBottom: 4,
             }}
           />
+          {/* 行ごとのリアルタイム文字数プレビュー */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 2, flexWrap: 'wrap' }}>
+            {editTargetText.split('\n').map((line, i) => (
+              <span key={i} style={{
+                fontSize: 10,
+                fontFamily: 'monospace',
+                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+              }}>
+                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+              </span>
+            ))}
+          </div>
           <div style={{ fontSize: 10, color: theme.textMuted, marginBottom: 4 }}>
             Enter: 改行 / Ctrl+Enter: 保存 / Shift+Enter: ここで分割 / Esc: キャンセル
           </div>
         </>
       ) : (
         <div
-          onClick={e => { if (isApproved) return; e.stopPropagation(); setEditTargetText(block.target); setIsEditingTarget(true) }}
+          onClick={e => { if (isApproved) return; e.stopPropagation(); onSelect(block.id); setEditTargetText(block.target); setIsEditingTarget(true) }}
           style={{
             color: theme.textJapanese,
             fontSize: 12,
@@ -474,11 +500,11 @@ export function SubtitleBlock({
           <textarea
             ref={textareaRef}
             value={editText}
-            onChange={e => setEditText(e.target.value)}
+            onChange={e => { setEditText(e.target.value); onDraftChange(block.id, e.target.value) }}
             onKeyDown={handleEditKeyDown}
             onBlur={() => handleEditSave()}
-            onClick={e => e.stopPropagation()}
-            rows={2}
+            onClick={e => { e.stopPropagation(); onSelect(block.id) }}
+            rows={Math.max(2, editText.split('\n').length)}
             style={{
               width: '100%',
               background: theme.inputBg,
@@ -493,6 +519,18 @@ export function SubtitleBlock({
               fontFamily: 'inherit',
             }}
           />
+          {/* 行ごとのリアルタイム文字数プレビュー */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 2, flexWrap: 'wrap' }}>
+            {editText.split('\n').map((line, i) => (
+              <span key={i} style={{
+                fontSize: 10,
+                fontFamily: 'monospace',
+                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+              }}>
+                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+              </span>
+            ))}
+          </div>
           {editTypoCandidates.length > 0 && (
             <div style={{
               marginTop: 4,
@@ -519,7 +557,7 @@ export function SubtitleBlock({
         </>
       ) : (
         <div
-          onClick={e => { if (isApproved) return; e.stopPropagation(); setEditText(block.source); setIsEditing(true) }}
+          onClick={e => { if (isApproved) return; e.stopPropagation(); onSelect(block.id); setEditText(block.source); setIsEditing(true) }}
           style={{
             fontSize: 15,
             lineHeight: 1.45,
@@ -646,10 +684,16 @@ export function SubtitleBlock({
           fontWeight: 700,
           fontSize: 11,
         }}>
-          CPS: {block.cps.toFixed(1)}
+          CPS: {liveCps.toFixed(1)}
         </span>
-        <span style={{ color: isOver ? theme.overCountColor : undefined, fontWeight: isOver ? 700 : undefined }}>
-          {t.charCount(sourceLines.map(l => l.length), isOver)}
+        <span style={{
+          ...cpsBadgeStyle(charLevel, theme),
+          padding: '2px 8px',
+          borderRadius: 999,
+          fontWeight: 700,
+          fontSize: 11,
+        }}>
+          {liveLines.map(l => l.length).join(' / ')}字
         </span>
         {(missingTerms.length > 0 || ignoredMissingTerms.length > 0) && (
           <WarningBadge
@@ -782,7 +826,7 @@ export function SubtitleBlock({
               onClick={e => { e.stopPropagation(); onSplitAtPlayhead(block.id) }}
               disabled={!canSplitAtPlayhead}
               title={canSplitAtPlayhead
-                ? `再生位置 (${block.startTime < currentTime && currentTime < block.endTime ? currentTime.toFixed(2) + 's' : '—'}) でカット`
+                ? '再生位置でカット'
                 : 'ブロック内で再生中のときに有効になります'}
               style={{
                 border: `1px solid ${canSplitAtPlayhead ? theme.accent : theme.btnBorder}`,
@@ -831,3 +875,5 @@ export function SubtitleBlock({
     </div>
   )
 }
+
+export const SubtitleBlock = memo(SubtitleBlockInner)

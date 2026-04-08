@@ -16,6 +16,10 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true, // Tauri の devUrl と一致させるため
+    watch: {
+      // node_modules・Rust成果物・gitを監視対象から除外（EMFILE対策）
+      ignored: ['**/node_modules/**', '**/src-tauri/target/**', '**/.git/**'],
+    },
   },
   build: {
     // Tauri ビルド時は環境変数でターゲットブラウザを指定

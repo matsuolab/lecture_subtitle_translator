@@ -10,7 +10,7 @@ interface TimelineBarProps {
   totalDuration: number
   activeBlockId: number | null
   onSeek: (seconds: number) => void
-  onBlockSelect: (block: SubtitleBlock) => void
+  onBlockSelect: (id: number) => void
   onAdjustBoundary: (id1: number, id2: number, newTime: number) => void
   trackHeight?: number
 }
@@ -385,21 +385,28 @@ export function TimelineBar({
           }}
           onMouseLeave={() => setHoverX(null)}
         >
-          {containerWidth > 0 && displayBlocks.map(block => (
-            <TimelineBlock
-              key={block.id}
-              block={block}
-              viewStart={viewStart}
-              visibleDuration={visibleDuration > 0 ? visibleDuration : totalDuration}
-              containerWidth={containerWidth}
-              currentTime={currentTime}
-              isActive={block.id === activeBlockId}
-              onClick={(e?: React.MouseEvent) => {
-                e?.stopPropagation()
-                onBlockSelect(block)
-              }}
-            />
-          ))}
+          {containerWidth > 0 && displayBlocks.map(block => {
+            const isActive = block.id === activeBlockId
+            const blockDuration = block.endTime - block.startTime
+            const fillProgress = isActive && blockDuration > 0
+              ? Math.min(((currentTime - block.startTime) / blockDuration) * 100, 100)
+              : 0
+            return (
+              <TimelineBlock
+                key={block.id}
+                block={block}
+                viewStart={viewStart}
+                visibleDuration={visibleDuration > 0 ? visibleDuration : totalDuration}
+                containerWidth={containerWidth}
+                fillProgress={fillProgress}
+                isActive={isActive}
+                onClick={(e?: React.MouseEvent) => {
+                  e?.stopPropagation()
+                  onBlockSelect(block.id)
+                }}
+              />
+            )
+          })}
 
           {/* Ctrl+ホバー中の境界ハイライト */}
           {hoveredBoundaryX !== null && (

@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { cn } from '@/lib/utils'
 import { getCpsLevel, type SubtitleBlock } from '@/types/subtitle'
 
@@ -6,7 +7,7 @@ interface TimelineBlockProps {
   viewStart: number
   visibleDuration: number
   containerWidth: number
-  currentTime: number
+  fillProgress: number  // 0-100、非アクティブは常に0
   isActive: boolean
   onClick: (e?: React.MouseEvent) => void
 }
@@ -29,12 +30,12 @@ const cpsTrackColors = {
   },
 }
 
-export function TimelineBlock({
+function TimelineBlockInner({
   block,
   viewStart,
   visibleDuration,
   containerWidth,
-  currentTime,
+  fillProgress,
   isActive,
   onClick,
 }: TimelineBlockProps) {
@@ -46,11 +47,6 @@ export function TimelineBlock({
     : 0
   const width = visibleDuration > 0
     ? Math.max(((block.endTime - block.startTime) / visibleDuration) * containerWidth, 2)
-    : 0
-
-  const blockDuration = block.endTime - block.startTime
-  const fillProgress = isActive && blockDuration > 0
-    ? Math.min(((currentTime - block.startTime) / blockDuration) * 100, 100)
     : 0
 
   return (
@@ -80,3 +76,5 @@ export function TimelineBlock({
     </div>
   )
 }
+
+export const TimelineBlock = memo(TimelineBlockInner)

@@ -1,8 +1,8 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useTransition } from 'react'
 import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
-import { Download, Save, FolderOpen, Settings, Film } from 'lucide-react'
+import { Download, Save, FolderOpen, Settings, Film, Pin, PinOff } from 'lucide-react'
 import { VideoPlayer } from '@/components/VideoPlayer'
 import { SubtitleBlockList } from '@/components/SubtitleBlockList'
 import { GlossaryTab } from '@/components/GlossaryTab'
@@ -47,15 +47,45 @@ export default function App() {
   const srtImportRef = useRef<HTMLInputElement>(null)
   const videoFileRef = useRef<HTMLInputElement>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [videoSource, setVideoSource] = useState<{ name: string; path?: string } | null>(null)
   const [isDragOverRight, setIsDragOverRight] = useState(false)
   const lastHtmlDropRef = useRef(0)
   const [pipelineRun, setPipelineRun] = useState<PipelineRunResult>({
     status: 'idle',
     step: 'idle',
-    message: '動画をドロップするとパイプラインを開始します',
+    message: 'レポートタブからパイプラインを開始できます',
   })
   const [pipelineHistory, setPipelineHistory] = useState<PipelineRunResult[]>([])
+  const [pipelineStatusPinned, setPipelineStatusPinned] = useState(false)
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
+
+  // 編集中のドラフトテキスト（字幕オーバーレイのリアルタイム更新用）
+  // useTransition でオーバーレイ更新を低優先度にしてエディタ入力を軽くする
+  const [, startDraftTransition] = useTransition()
+  const [draftSource, setDraftSource] = useState<{ id: number; text: string } | null>(null)
+  const handleDraftChange = useCallback((id: number, text: string | null) => {
+    startDraftTransition(() => {
+      setDraftSource(text !== null ? { id, text } : null)
+    })
+  }, [])
+
+  // ウィンドウリサイズ中は重いコンポーネントの描画を中断する
+  // OSのリサイズハンドルはmouseupが取れないためデバウンスで対応
+  const [isResizing, setIsResizing] = useState(false)
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsResizing(true)
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+      resizeTimerRef.current = setTimeout(() => setIsResizing(false), 500)
+    }
+    window.addEventListener('resize', handleResize)
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+    }
+  }, [])
 
   // パネルリサイズ
   const [leftPct, setLeftPct] = useState(45)
@@ -67,6 +97,7 @@ export default function App() {
   const handleHResizeMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return
     e.preventDefault()
+    setIsResizing(true)
     const onMove = (mv: MouseEvent) => {
       const el = mainRef.current
       if (!el) return
@@ -75,6 +106,7 @@ export default function App() {
       setLeftPct(Math.max(25, Math.min(72, pct)))
     }
     const onUp = () => {
+      setIsResizing(false)
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
@@ -85,6 +117,7 @@ export default function App() {
   const handleVResizeMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return
     e.preventDefault()
+    setIsResizing(true)
     const startY = e.clientY
     const startH = timelineHRef.current
     const onMove = (mv: MouseEvent) => {
@@ -92,6 +125,7 @@ export default function App() {
       setTimelineH(Math.max(30, Math.min(200, startH + dy)))
     }
     const onUp = () => {
+      setIsResizing(false)
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
@@ -104,6 +138,7 @@ export default function App() {
 
   const loadVideoFile = useCallback((file: File) => {
     lastHtmlDropRef.current = Date.now()
+    setVideoSource({ name: file.name })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return URL.createObjectURL(file)
@@ -111,6 +146,8 @@ export default function App() {
   }, [])
 
   const loadVideoPath = useCallback((path: string) => {
+    const name = path.split(/[\\/]/).pop() ?? path
+    setVideoSource({ name, path })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return convertFileSrc(path)
@@ -421,16 +458,27 @@ export default function App() {
     }
   }, [adminSettings, appendPipelineHistory, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, reset, sleep])
 
+  const confirmAndLoadVideo = useCallback((doLoad: () => void) => {
+    if (blocks.length > 0) {
+      const ok = window.confirm('新しい動画を読み込むと現在の字幕がリセットされます。続けますか？')
+      if (!ok) return
+      reset([])
+    }
+    doLoad()
+  }, [blocks.length, reset])
+
   const handleVideoInput = useCallback((file: File) => {
-    loadVideoFile(file)
-    void runDropPipeline(file.name)
-  }, [loadVideoFile, runDropPipeline])
+    confirmAndLoadVideo(() => loadVideoFile(file))
+  }, [confirmAndLoadVideo, loadVideoFile])
 
   const handleVideoPathInput = useCallback((path: string) => {
-    loadVideoPath(path)
-    const sourceName = path.split(/[\\/]/).pop() ?? path
-    void runDropPipeline(sourceName, path)
-  }, [loadVideoPath, runDropPipeline])
+    confirmAndLoadVideo(() => loadVideoPath(path))
+  }, [confirmAndLoadVideo, loadVideoPath])
+
+  const handleRunPipelineFromReport = useCallback(() => {
+    if (!videoSource) return
+    void runDropPipeline(videoSource.name, videoSource.path)
+  }, [videoSource, runDropPipeline])
 
   const handleRightDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -593,9 +641,10 @@ export default function App() {
     e.target.value = ''
   }, [reset, t.importSrtError])
 
-  const handleBlockSelect = useCallback((block: SubtitleBlock) => {
-    seekTo(block.startTime)
-  }, [seekTo])
+  const handleBlockSelect = useCallback((id: number) => {
+    const block = blocks.find(b => b.id === id)
+    if (block) seekTo(block.startTime)
+  }, [blocks, seekTo])
 
   const handleApprove = useCallback((id: number) => {
     push(blocks.map(b => {
@@ -894,10 +943,10 @@ export default function App() {
     return { blocksUpdated, replacements: totalReplacements }
   }, [blocks, glossary, push])
 
-  const currentBlock = blocks.find(b => currentTime >= b.startTime && currentTime <= b.endTime)
+  const currentBlock = blocks.find(b => currentTime >= b.startTime && currentTime < b.endTime)
   const subtitleOverlay = currentBlock
     ? {
-        text: currentBlock.source,
+        text: draftSource?.id === currentBlock.id ? draftSource.text : currentBlock.source,
         progress: ((currentTime - currentBlock.startTime) / Math.max(0.01, currentBlock.endTime - currentBlock.startTime)) * 100,
       }
     : null
@@ -1032,16 +1081,18 @@ export default function App() {
             </div>
           )}
 
-          {/* タブ + アンドゥ/リドゥ + SRT出力 */}
+          {/* タブ行 */}
           <div className="flex items-center shrink-0" style={{ borderBottom: `1px solid ${theme.panelBorder}`, background: theme.headerBg }}>
             {(['subtitles', 'dictionary', 'help', 'report'] as Tab[]).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 style={{
-                  padding: '10px 16px',
-                  fontSize: 13,
+                  padding: '10px 12px',
+                  fontSize: 12,
                   fontWeight: 600,
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
                   color: activeTab === tab ? theme.accent : theme.textSecondary,
                   background: 'none',
                   border: 'none',
@@ -1061,135 +1112,59 @@ export default function App() {
                       : t.tabReport}
               </button>
             ))}
-            <div className="ml-auto flex items-center gap-1.5 pr-3">
-              <button
-                onClick={undo}
-                disabled={!canUndo}
-                title="元に戻す (Ctrl+Z)"
-                style={{
-                  fontSize: 11, padding: '3px 7px', borderRadius: 5,
-                  border: `1px solid ${theme.panelBorder}`, background: theme.btnBg,
-                  color: canUndo ? theme.textSecondary : theme.textDisabled,
-                  cursor: canUndo ? 'pointer' : 'not-allowed',
-                }}
-              >↩</button>
-              <button
-                onClick={redo}
-                disabled={!canRedo}
-                title="やり直し (Ctrl+Shift+Z)"
-                style={{
-                  fontSize: 11, padding: '3px 7px', borderRadius: 5,
-                  border: `1px solid ${theme.panelBorder}`, background: theme.btnBg,
-                  color: canRedo ? theme.textSecondary : theme.textDisabled,
-                  cursor: canRedo ? 'pointer' : 'not-allowed',
-                }}
-              >↪</button>
-              <span style={{ fontSize: 11, color: theme.textSecondary, marginLeft: 4 }}>
-                {t.approvedCount(approvedCount, blocks.length)}
-              </span>
 
-              {/* 自動保存インジケーター */}
-              <span style={{
-                fontSize: 10,
-                color: saveStatus === 'saving' ? theme.savingColor : theme.savedColor,
-                marginLeft: 2,
-                transition: 'color 0.3s',
-              }}>
+            <div className="ml-auto flex items-center gap-1 pr-1 shrink-0">
+              <button onClick={undo} disabled={!canUndo} title="元に戻す (Ctrl+Z)"
+                style={{ fontSize: 13, padding: '2px 6px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, color: canUndo ? theme.textSecondary : theme.textDisabled, cursor: canUndo ? 'pointer' : 'not-allowed', lineHeight: 1 }}>↩</button>
+              <button onClick={redo} disabled={!canRedo} title="やり直し (Ctrl+Shift+Z)"
+                style={{ fontSize: 13, padding: '2px 6px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, color: canRedo ? theme.textSecondary : theme.textDisabled, cursor: canRedo ? 'pointer' : 'not-allowed', lineHeight: 1 }}>↪</button>
+              <span style={{ fontSize: 10, color: saveStatus === 'saving' ? theme.savingColor : theme.savedColor, transition: 'color 0.3s', whiteSpace: 'nowrap', padding: '0 4px' }}>
                 {saveStatus === 'saving' ? t.saving : t.saved}
               </span>
-
-              {/* 隠しファイル入力（JSON読み込み） */}
-              <input ref={importRef} type="file" accept=".json" onChange={handleImportJson} style={{ display: 'none' }} />
-              {/* 隠しファイル入力（SRT読み込み） */}
-              <input ref={srtImportRef} type="file" accept=".srt,.txt" onChange={handleImportSrt} style={{ display: 'none' }} />
-
-              {/* SRT読み込み */}
-              <button
-                className="flex items-center gap-1"
-                onClick={() => srtImportRef.current?.click()}
-                title={t.loadSrtTitle}
-                style={{
-                  fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
-                  borderRadius: 5, border: `1px solid ${theme.panelBorder}`,
-                  background: theme.btnBg, cursor: 'pointer',
-                }}
-              >
-                <FolderOpen size={11} />
-                {t.loadSrt}
+              <button onClick={() => setActiveTab('settings')} title="設定"
+                style={{ padding: '8px 10px', background: 'none', border: 'none', borderBottom: `2px solid ${activeTab === 'settings' ? theme.accent : 'transparent'}`, color: activeTab === 'settings' ? theme.accent : theme.textSecondary, cursor: 'pointer', marginBottom: -1, display: 'flex', alignItems: 'center' }}>
+                <Settings size={15} />
               </button>
-
-              {/* プロジェクト読み込み */}
-              <button
-                className="flex items-center gap-1"
-                onClick={() => importRef.current?.click()}
-                title={t.loadProjectTitle}
-                style={{
-                  fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
-                  borderRadius: 5, border: `1px solid ${theme.panelBorder}`,
-                  background: theme.btnBg, cursor: 'pointer',
-                }}
-              >
-                <FolderOpen size={11} />
-                {t.loadProject}
-              </button>
-
-              {/* プロジェクト保存（JSON） */}
-              <button
-                className="flex items-center gap-1"
-                onClick={() => exportProjectJson(blocks)}
-                title={t.saveProjectTitle}
-                style={{
-                  fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
-                  borderRadius: 5, border: `1px solid ${theme.panelBorder}`,
-                  background: theme.btnBg, cursor: 'pointer',
-                }}
-              >
-                <Save size={11} />
-                {t.saveProject}
-              </button>
-
-              {/* SRT出力 */}
-              <button
-                className="flex items-center gap-1.5"
-                onClick={() => exportSrt(blocks)}
-                title={t.exportSrtTitle}
-                style={{
-                  fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
-                  borderRadius: 5, border: `1px solid ${theme.panelBorder}`,
-                  background: theme.btnBg, cursor: 'pointer',
-                }}
-              >
-                <Download size={11} />
-                {t.exportSrt}
-              </button>
-
             </div>
+          </div>
 
-            {/* 設定タブ（歯車・右端固定） */}
-            <button
-              onClick={() => setActiveTab('settings')}
-              title="設定"
-              style={{
-                marginLeft: 'auto',
-                padding: '10px 14px',
-                background: 'none',
-                border: 'none',
-                borderBottomWidth: 2,
-                borderBottomStyle: 'solid',
-                borderBottomColor: activeTab === 'settings' ? theme.accent : 'transparent',
-                color: activeTab === 'settings' ? theme.accent : theme.textSecondary,
-                cursor: 'pointer',
-                marginBottom: -1,
-                display: 'flex',
-                alignItems: 'center',
-              }}
-            >
-              <Settings size={15} />
-            </button>
+          {/* タブ別アクションバー */}
+          <div className="flex items-center shrink-0" style={{ borderBottom: `1px solid ${theme.panelBorder}`, background: theme.headerBg, padding: '4px 8px', gap: 6, minHeight: 32 }}>
+            {/* 隠しファイル入力 */}
+            <input ref={importRef} type="file" accept=".json" onChange={handleImportJson} style={{ display: 'none' }} />
+            <input ref={srtImportRef} type="file" accept=".srt,.txt" onChange={handleImportSrt} style={{ display: 'none' }} />
+
+            {activeTab === 'subtitles' && (<>
+              <button onClick={() => srtImportRef.current?.click()} title={t.loadSrtTitle}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
+                <FolderOpen size={11} />SRT読込
+              </button>
+              <button onClick={() => exportSrt(blocks)} title={t.exportSrtTitle}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
+                <Download size={11} />SRT出力
+              </button>
+              <div style={{ width: 1, background: theme.panelBorder, alignSelf: 'stretch', margin: '2px 2px' }} />
+              <button onClick={() => importRef.current?.click()} title={t.loadProjectTitle}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
+                <FolderOpen size={11} />JSON読込
+              </button>
+              <button onClick={() => exportProjectJson(blocks)} title={t.saveProjectTitle}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
+                <Save size={11} />JSON保存
+              </button>
+              {blocks.length > 0 && (
+                <span style={{ marginLeft: 6, fontSize: 11, color: theme.textMuted, whiteSpace: 'nowrap' }}>
+                  <span style={{ color: approvedCount === blocks.length ? '#22c55e' : theme.textSecondary, fontWeight: 600 }}>
+                    {approvedCount}
+                  </span>
+                  <span style={{ color: theme.textMuted }}>/{blocks.length}件承認</span>
+                </span>
+              )}
+            </>)}
           </div>
 
 
-          {activeTab === 'subtitles' && (
+          {activeTab === 'subtitles' && (pipelineRun.status !== 'idle' || pipelineStatusPinned) && (
             <div
               className="shrink-0"
               style={{
@@ -1224,10 +1199,27 @@ export default function App() {
                   </span>
                 )}
                 {pipelineRun.step !== 'idle' && pipelineRun.step !== 'done' && (
-                  <span style={{ marginLeft: 'auto', color: theme.textMuted }}>
+                  <span style={{ color: theme.textMuted }}>
                     step: {pipelineRun.step}
                   </span>
                 )}
+                <button
+                  onClick={() => setPipelineStatusPinned(v => !v)}
+                  title={pipelineStatusPinned ? 'ピン解除（完了後に自動非表示）' : 'ピン留め（常時表示）'}
+                  style={{
+                    marginLeft: 'auto',
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: '2px 4px',
+                    borderRadius: 4,
+                    color: pipelineStatusPinned ? theme.textPrimary : theme.textMuted,
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                >
+                  {pipelineStatusPinned ? <Pin size={12} /> : <PinOff size={12} />}
+                </button>
               </div>
 
               <div style={{ marginTop: 4, fontSize: 11, color: theme.textMuted }}>
@@ -1278,7 +1270,12 @@ export default function App() {
 
           {/* タブコンテンツ */}
           <div className="flex-1 overflow-hidden min-h-0">
-            {activeTab === 'subtitles' && (
+            {isResizing && (
+              <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <span style={{ fontSize: 12, color: theme.textMuted }}>...</span>
+              </div>
+            )}
+            {!isResizing && activeTab === 'subtitles' && (
               <SubtitleBlockList
                 blocks={blocks}
                 activeBlockId={activeBlockId}
@@ -1298,12 +1295,20 @@ export default function App() {
                 onAdjustBoundary={handleAdjustBoundary}
                 onUpdateTimes={handleUpdateTimes}
                 onIgnoreWarning={handleIgnoreWarning}
+                onDraftChange={handleDraftChange}
               />
             )}
-            {activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}
-            {activeTab === 'help' && <HelpTab />}
-            {activeTab === 'report' && <ReportTab runs={pipelineHistory} />}
-            {activeTab === 'settings' && (
+            {!isResizing && activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}
+            {!isResizing && activeTab === 'help' && <HelpTab />}
+            {!isResizing && activeTab === 'report' && (
+              <ReportTab
+                runs={pipelineHistory}
+                pipelineRun={pipelineRun}
+                videoSourceName={videoSource?.name ?? null}
+                onRunPipeline={handleRunPipelineFromReport}
+              />
+            )}
+            {!isResizing && activeTab === 'settings' && (
               <SettingsTab
                 adminSettings={adminSettings}
                 onAdminSettingsChange={updateAdminSettings}

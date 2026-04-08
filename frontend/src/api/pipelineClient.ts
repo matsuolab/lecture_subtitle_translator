@@ -3,14 +3,6 @@ import type { PipelineAuditReport, PipelineNodeTrace } from '@/types/pipeline'
 import type { SubtitleBlock } from '@/types/subtitle'
 
 // バックエンドAPIレスポンスの型定義
-interface BackendWordTimestamp {
-  word?: string
-  char?: string
-  start?: number
-  end?: number
-  score?: number
-}
-
 interface BackendTranslatedSegment {
   id?: number
   start?: number
@@ -139,9 +131,11 @@ function toAudit(result: BackendPipelineResult): PipelineAuditReport {
     id: String(item.id),
     nodeId: String(item.node_id),
     reason: String(item.reason),
-    priority: item.priority === 'must_review' || item.priority === 'should_review' || item.priority === 'auto_pass'
-      ? item.priority
-      : 'should_review',
+    priority: (
+      item.priority === 'must_review' || item.priority === 'should_review' || item.priority === 'auto_pass'
+        ? item.priority
+        : 'should_review'
+    ) as 'must_review' | 'should_review' | 'auto_pass',
     score: Number(item.score ?? 0),
     blockId: item.block_id !== undefined ? Number(item.block_id) : undefined,
   }))

@@ -1,9 +1,13 @@
+import { Play } from 'lucide-react'
 import type { PipelineReviewItem, PipelineRunResult } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 
 interface ReportTabProps {
   runs: PipelineRunResult[]
+  pipelineRun: PipelineRunResult
+  videoSourceName: string | null
+  onRunPipeline: () => void
 }
 
 function formatFinishedAt(ts?: number): string {
@@ -17,9 +21,10 @@ function priorityBadge(priority: PipelineReviewItem['priority']): string {
   return 'AUTO'
 }
 
-export function ReportTab({ runs }: ReportTabProps) {
+export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }: ReportTabProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
+  const isRunning = pipelineRun.status === 'running'
 
   const successRuns = runs.filter(r => r.status === 'success')
   const measuredRuns = runs.filter(r => r.metrics)
@@ -52,6 +57,77 @@ export function ReportTab({ runs }: ReportTabProps) {
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 10 }}>
+      {/* パイプライン実行パネル */}
+      <div style={{
+        border: `1px solid ${theme.panelBorder}`,
+        borderRadius: 8,
+        background: theme.cardBg,
+        padding: '10px 12px',
+        marginBottom: 10,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
+          パイプライン実行
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            onClick={onRunPipeline}
+            disabled={isRunning || !videoSourceName}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              padding: '6px 14px',
+              borderRadius: 6,
+              border: 'none',
+              background: isRunning || !videoSourceName ? theme.textDisabled : theme.accent,
+              color: '#fff',
+              cursor: isRunning || !videoSourceName ? 'not-allowed' : 'pointer',
+              opacity: isRunning || !videoSourceName ? 0.6 : 1,
+            }}
+          >
+            <Play size={11} />
+            {isRunning ? '実行中...' : 'パイプラインを実行'}
+          </button>
+          <span style={{ fontSize: 11, color: theme.textSecondary }}>
+            {videoSourceName ? `対象: ${videoSourceName}` : '動画プレイヤーに動画を読み込んでください'}
+          </span>
+        </div>
+
+        {/* 現在の実行状態 */}
+        {pipelineRun.status !== 'idle' && (
+          <div style={{ marginTop: 8, fontSize: 11 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{
+                display: 'inline-block',
+                width: 7,
+                height: 7,
+                borderRadius: 999,
+                background:
+                  pipelineRun.status === 'running' ? '#f59e0b'
+                  : pipelineRun.status === 'success' ? '#22c55e'
+                  : '#ef4444',
+              }} />
+              <span style={{ color: theme.textSecondary, fontWeight: 600 }}>
+                {pipelineRun.status === 'running' ? '実行中'
+                  : pipelineRun.status === 'success' ? '完了'
+                  : '失敗'}
+              </span>
+              <span style={{ color: theme.textMuted }}>{pipelineRun.message}</span>
+            </div>
+            {pipelineRun.metrics && (
+              <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 10, color: theme.textSecondary }}>
+                <span>CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%</span>
+                <span>42文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%</span>
+                <span>推定コスト: ${pipelineRun.metrics.cost.estimatedUsd.toFixed(6)}</span>
+                <span>処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div style={{
         border: `1px solid ${theme.panelBorder}`,
         borderRadius: 8,

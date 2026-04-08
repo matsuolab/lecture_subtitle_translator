@@ -9,7 +9,7 @@ interface SubtitleBlockListProps {
   blocks: SubtitleBlockType[]
   activeBlockId: number | null
   currentTime: number
-  onBlockSelect: (block: SubtitleBlockType) => void
+  onBlockSelect: (id: number) => void
   onApprove: (id: number) => void
   onFlag: (id: number) => void
   onReSplit: (id: number) => void
@@ -24,6 +24,7 @@ interface SubtitleBlockListProps {
   onAdjustBoundary: (id1: number, id2: number, newTime: number) => void
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
+  onDraftChange: (id: number, text: string | null) => void
 }
 
 interface BoundaryDrag {
@@ -172,6 +173,7 @@ export function SubtitleBlockList({
   onAdjustBoundary,
   onUpdateTimes,
   onIgnoreWarning,
+  onDraftChange,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -272,7 +274,7 @@ export function SubtitleBlockList({
     scrollToIndex(Math.round(ratio * (displayBlocks.length - 1)))
   }, [displayBlocks, scrollToIndex])
 
-  // アクティブブロックへの自動スクロール
+  // アクティブブロックへの自動スクロール（再生中に位置がずれたとき）
   useEffect(() => {
     if (activeRef.current && containerRef.current) {
       const container = containerRef.current
@@ -286,6 +288,17 @@ export function SubtitleBlockList({
       }
     }
   }, [activeBlockId])
+
+  // タブ切り替えで戻った時（マウント時）にアクティブブロックを先頭へ
+  useEffect(() => {
+    if (!activeBlockId || !containerRef.current) return
+    const container = containerRef.current
+    const el = container.querySelector(`[data-block-id="${activeBlockId}"]`) as HTMLElement | null
+    if (!el) return
+    const containerRect = container.getBoundingClientRect()
+    const elRect = el.getBoundingClientRect()
+    container.scrollTop = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 6)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 境界ドラッグ中のカーソル変更
   useEffect(() => {
@@ -336,17 +349,45 @@ export function SubtitleBlockList({
     }
   }, [boundaryDrag, blocks, onAdjustBoundary])
 
-  const handleDragStart = (id: number) => setDraggingId(id)
-  const handleDragEnd = () => { setDraggingId(null); setDragOverId(null) }
-  const handleDragOver = (id: number) => setDragOverId(id)
+  const handleApprove = useCallback((id: number) => {
+    // 承認解除（approved → pending）の場合はスクロールしない
+    const isUnapproving = displayBlocks.find(b => b.id === id)?.status === 'approved'
+    onApprove(id)
+    if (isUnapproving) return
+    // 承認したブロックがリスト先頭なら次のブロックを先頭にスライド
+    requestAnimationFrame(() => {
+      const idx = displayBlocks.findIndex(b => b.id === id)
+      if (idx < 0 || idx >= displayBlocks.length - 1) return
+      const container = containerRef.current
+      const approvedEl = container?.querySelector(`[data-block-id="${id}"]`) as HTMLElement | null
+      if (!container || !approvedEl) return
+      // getBoundingClientRect でコンテナからの相対位置を正確に取得
+      const containerRect = container.getBoundingClientRect()
+      const approvedRect = approvedEl.getBoundingClientRect()
+      const relativeTop = approvedRect.top - containerRect.top
+      if (relativeTop >= -10 && relativeTop < approvedEl.clientHeight) {
+        const nextEl = container.querySelector(`[data-block-id="${displayBlocks[idx + 1].id}"]`) as HTMLElement | null
+        if (nextEl) {
+          const nextRect = nextEl.getBoundingClientRect()
+          const targetScrollTop = container.scrollTop + (nextRect.top - containerRect.top) - 6
+          container.scrollTo({ top: targetScrollTop, behavior: 'smooth' })
+          onBlockSelect(displayBlocks[idx + 1].id)
+        }
+      }
+    })
+  }, [onApprove, onBlockSelect, displayBlocks])
 
-  const handleDrop = (dropId: number) => {
-    if (draggingId !== null && draggingId !== dropId) {
-      onMerge(draggingId, dropId)
-    }
-    setDraggingId(null)
+  const handleDragStart = useCallback((id: number) => setDraggingId(id), [])
+  const handleDragEnd = useCallback(() => { setDraggingId(null); setDragOverId(null) }, [])
+  const handleDragOver = useCallback((id: number) => setDragOverId(id), [])
+
+  const handleDrop = useCallback((dropId: number) => {
+    setDraggingId(prev => {
+      if (prev !== null && prev !== dropId) onMerge(prev, dropId)
+      return null
+    })
     setDragOverId(null)
-  }
+  }, [onMerge])
 
   const handleBoundaryMouseDown = (
     e: React.MouseEvent,
@@ -390,7 +431,7 @@ export function SubtitleBlockList({
             <SubtitleBlock
               block={block}
               isActive={activeBlockId === block.id}
-              currentTime={currentTime}
+              isCurrentlyPlaying={currentTime >= block.startTime && currentTime <= block.endTime}
               playProgress={
                 currentTime < block.startTime ? 0
                 : currentTime > block.endTime ? 100
@@ -398,8 +439,8 @@ export function SubtitleBlockList({
               }
               isDragging={draggingId === block.id}
               isDragOver={dragOverId === block.id && draggingId !== block.id}
-              onSelect={() => onBlockSelect(block)}
-              onApprove={onApprove}
+              onSelect={onBlockSelect}
+              onApprove={handleApprove}
               onFlag={onFlag}
               onReSplit={onReSplit}
               onReTranslate={onReTranslate}
@@ -411,6 +452,7 @@ export function SubtitleBlockList({
               onEqualSplit={onEqualSplit}
               onUpdateTimes={onUpdateTimes}
               onIgnoreWarning={onIgnoreWarning}
+              onDraftChange={onDraftChange}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
               onDragOver={handleDragOver}

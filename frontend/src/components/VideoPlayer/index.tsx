@@ -144,10 +144,10 @@ export function VideoPlayer({
             padding: '6px 14px 10px',
             borderRadius: 6,
             textAlign: 'center',
-            maxWidth: '90%',
+            maxWidth: '95%',
             pointerEvents: 'none',
-            whiteSpace: 'pre-wrap',
-            overflow: 'hidden',
+            whiteSpace: 'pre',
+            overflow: 'visible',
           }}>
             <span>{subtitleOverlay.text}</span>
             <div style={{

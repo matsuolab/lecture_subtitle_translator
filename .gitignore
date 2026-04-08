@@ -2,9 +2,9 @@
 00_context/
 10_meetings/
 
-# Internal docs (research logs, ideas, drafts)
-docs/research/
-docs/ideas.md
+# Internal docs & private notes (local only)
+docs/
+notes/
 
 # PoC actual data (real lecture content - do not commit)
 poc/data/

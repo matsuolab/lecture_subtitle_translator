@@ -31,17 +31,21 @@ export interface MissingTerm {
 }
 
 /**
- * 用語パターンを生成する
- *
- * compromise の語形解析でヒットしなかったケースを regex でカバー:
- * - 大文字・小文字の揺れ（transformer → Transformer）
- * - 単純複数形（Transformers → Transformer）
- * - 所有格（Transformer's → Transformer）
- * - ハイフン表記（back-propagation → backpropagation）
+ * 検出用パターン（大文字小文字・複数形・所有格に対応）
+ * ハイライト・漏れチェック・タイポ検出で使用する
  */
 function buildPattern(term: string): RegExp {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`\\b${escaped}(?:'?s)?\\b`, 'gi')
+}
+
+/**
+ * 置換用パターン（大文字小文字のみ対応・複数形・所有格は変換しない）
+ * applyGlossaryToText でのみ使用する
+ */
+function buildPatternStrict(term: string): RegExp {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`\\b${escaped}\\b`, 'gi')
 }
 
 /**
@@ -85,7 +89,7 @@ export function applyGlossaryToText(
 
   for (const entry of entries) {
     if (!entry.confirmed) continue
-    const pattern = buildPattern(entry.en)
+    const pattern = buildPatternStrict(entry.en)
 
     result = result.replace(pattern, (match, matchOffset) => {
       // 既に正規形なら変更しない（所有格・複数形は正規化する）
