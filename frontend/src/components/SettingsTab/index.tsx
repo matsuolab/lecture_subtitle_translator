@@ -69,6 +69,55 @@ export function SettingsTab({
         <FieldCard theme={theme}>
           <Field
             theme={theme}
+            label="WhisperX URL"
+            value={adminSettings.whisperxUrl}
+            placeholder="http://localhost:8000"
+            onChange={(value) => onAdminSettingsChange({ whisperxUrl: value })}
+          />
+          <Field
+            theme={theme}
+            label="WhisperX API Key"
+            value={adminSettings.whisperxApiKey}
+            placeholder="（不要な場合は空白）"
+            type="password"
+            onChange={(value) => onAdminSettingsChange({ whisperxApiKey: value })}
+          />
+          <Field
+            theme={theme}
+            label="WhisperX Language"
+            value={adminSettings.whisperxLanguage}
+            placeholder="ja"
+            onChange={(value) => onAdminSettingsChange({ whisperxLanguage: value })}
+          />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <Field
+            theme={theme}
+            label="補正モデル (Correction)"
+            value={adminSettings.correctionModel}
+            placeholder="gpt-4.1-nano"
+            onChange={(value) => onAdminSettingsChange({ correctionModel: value })}
+          />
+          <Field
+            theme={theme}
+            label="翻訳モデル (Translation)"
+            value={adminSettings.translationModel}
+            placeholder="gpt-4.1-mini"
+            onChange={(value) => onAdminSettingsChange({ translationModel: value })}
+          />
+          <Field
+            theme={theme}
+            label="Embedding モデル"
+            value={adminSettings.embeddingModel}
+            placeholder="text-embedding-3-small"
+            onChange={(value) => onAdminSettingsChange({ embeddingModel: value })}
+          />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <Field
+            theme={theme}
             label={t.settingsPipelineApiUrl}
             value={adminSettings.pipelineApiUrl}
             placeholder={t.settingsPipelineApiUrlPlaceholder}

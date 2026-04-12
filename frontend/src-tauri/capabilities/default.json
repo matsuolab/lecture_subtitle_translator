@@ -8,17 +8,47 @@
     "core:default",
     {
       "identifier": "fs:allow-read-file",
-      "allow": [
-        {
-          "path": "**"
-        }
-      ]
+      "allow": [{ "path": "**" }]
     },
     {
       "identifier": "fs:allow-read-text-file",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [{ "path": "$APPCONFIG/**" }]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [
+        { "path": "$APPCONFIG/**" },
+        { "path": "$TEMP/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [{ "path": "$TEMP/**" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "$TEMP/**" }]
+    },
+    "dialog:allow-open",
+    "dialog:allow-confirm",
+    "dialog:allow-message",
+    {
+      "identifier": "shell:allow-execute",
       "allow": [
         {
-          "path": "**"
+          "name": "binaries/ffmpeg",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "docker",
+          "cmd": "docker",
+          "sidecar": false,
+          "args": true
         }
       ]
     }

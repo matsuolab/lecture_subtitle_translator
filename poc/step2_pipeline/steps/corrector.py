@@ -45,6 +45,7 @@ async def correct_segments(
     embed: EmbedProvider,
     flag_threshold: float = 0.15,
     batch_size: int = 20,
+    app_glossary: tuple[str, ...] = (),
 ) -> list[CorrectedSegment]:
     """
     書き起こしセグメントを LLM で補正する。
@@ -56,13 +57,20 @@ async def correct_segments(
         embed:           Embedding Provider（乖離チェック用）
         flag_threshold:  コサイン距離がこれを超えたら要確認フラグ
         batch_size:      1回の LLM リクエストに含めるセグメント数
+        app_glossary:    フロントエンドの用語辞書（glossary.json から読み込んだもの）
 
     Returns:
         CorrectedSegment のリスト
     """
-    glossary_text = (
-        "、".join(slide_context.glossary[:100]) if slide_context else "（なし）"
-    )
+    pdf_terms = slide_context.glossary[:100] if slide_context else ()
+    # PDF用語 + アプリ用語辞書をマージ（重複除去・順序保持）
+    seen: set[str] = set()
+    merged: list[str] = []
+    for term in (*pdf_terms, *app_glossary[:200]):
+        if term not in seen:
+            seen.add(term)
+            merged.append(term)
+    glossary_text = "、".join(merged) if merged else "（なし）"
     slide_text_excerpt = (
         slide_context.slide_text[:2000] if slide_context else "（なし）"
     )

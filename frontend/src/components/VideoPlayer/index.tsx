@@ -17,6 +17,7 @@ interface VideoPlayerProps {
   onTogglePlay: () => void
   onSeek: (seconds: number) => void
   onLoadVideo: (file: File) => void
+  onOpenDialogLoadVideo?: () => void
   subtitleOverlay: SubtitleOverlay | null
   blocks?: SubtitleBlock[]
   onTimeUpdate: () => void
@@ -35,6 +36,7 @@ export function VideoPlayer({
   onTogglePlay,
   onSeek,
   onLoadVideo,
+  onOpenDialogLoadVideo,
   subtitleOverlay,
   blocks,
   onTimeUpdate,
@@ -126,6 +128,22 @@ export function VideoPlayer({
             style={{ color: '#4a5568' }}>
             <Film size={40} strokeWidth={1.2} />
             <span style={{ fontSize: 13 }}>動画ファイルを読み込んでください</span>
+            {onOpenDialogLoadVideo && (
+              <button
+                onClick={onOpenDialogLoadVideo}
+                style={{
+                  fontSize: 12,
+                  padding: '5px 14px',
+                  borderRadius: 6,
+                  border: '1px solid #4a5568',
+                  background: 'transparent',
+                  color: '#718096',
+                  cursor: 'pointer',
+                }}
+              >
+                ファイルを選択
+              </button>
+            )}
           </div>
         )}
 

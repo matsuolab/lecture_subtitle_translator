@@ -116,9 +116,9 @@ class PipelineMetrics:
         print(f"  {'ステップ':<20} {'時間':>8}  {'入力tok':>8}  {'出力tok':>8}  {'コスト':>10}")
         print("-" * 60)
         for s in self.steps:
-            cost_str = f"${s.cost_usd:.4f}" if s.cost_usd > 0 else "—"
-            tok_in = str(s.tokens_in) if s.tokens_in > 0 else "—"
-            tok_out = str(s.tokens_out) if s.tokens_out > 0 else "—"
+            cost_str = f"${s.cost_usd:.4f}" if s.cost_usd > 0 else "-"
+            tok_in = str(s.tokens_in) if s.tokens_in > 0 else "-"
+            tok_out = str(s.tokens_out) if s.tokens_out > 0 else "-"
             print(
                 f"  {s.step:<20} {s.duration_sec:>7.1f}s"
                 f"  {tok_in:>8}  {tok_out:>8}  {cost_str:>10}"

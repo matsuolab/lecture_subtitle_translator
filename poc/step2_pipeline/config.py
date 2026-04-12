@@ -98,25 +98,25 @@ def load_config() -> PipelineConfig:
         aws_region=os.getenv("AWS_REGION", "ap-northeast-1"),
         aws_batch_poll_interval=int(os.getenv("AWS_BATCH_POLL_INTERVAL", "30")),
 
-        # 補正 LLM（デフォルト: gemini-2.5-flash で安価に）
+        # 補正 LLM（フィラー除去・誤字修正は軽量タスク → gpt-4.1-nano で十分）
         correction_llm=LLMConfig(
-            provider=os.getenv("CORRECTION_LLM_PROVIDER", "gemini"),
-            openai_model=os.getenv("CORRECTION_OPENAI_MODEL", "gpt-4.1-mini"),
-            gemini_model=os.getenv("CORRECTION_GEMINI_MODEL", "gemini-2.5-flash"),
+            provider=os.getenv("CORRECTION_LLM_PROVIDER", "openai"),
+            openai_model=os.getenv("CORRECTION_OPENAI_MODEL", "gpt-4.1-nano"),
+            gemini_model=os.getenv("CORRECTION_GEMINI_MODEL", "gemini-2.5-flash-lite"),
         ),
 
-        # 翻訳 LLM（デフォルト: gpt-4.1 で高品質に）
+        # 翻訳 LLM（品質が核心 → gpt-5.4-mini: 最新世代で品質/コスト最適）
         translation_llm=LLMConfig(
             provider=os.getenv("TRANSLATION_LLM_PROVIDER", "openai"),
-            openai_model=os.getenv("TRANSLATION_OPENAI_MODEL", "gpt-4.1"),
+            openai_model=os.getenv("TRANSLATION_OPENAI_MODEL", "gpt-5.4-mini"),
             gemini_model=os.getenv("TRANSLATION_GEMINI_MODEL", "gemini-2.5-flash"),
         ),
 
-        # 分割・CPS修正 LLM（軽量タスクなので安価モデルで十分）
+        # 分割・CPS修正 LLM（tool calling ループ → gpt-4.1-nano: tool calling 得意・最安値）
         split_llm=LLMConfig(
             provider=os.getenv("SPLIT_LLM_PROVIDER", "openai"),
-            openai_model=os.getenv("SPLIT_OPENAI_MODEL", "gpt-4.1-mini"),
-            gemini_model=os.getenv("SPLIT_GEMINI_MODEL", "gemini-2.5-flash"),
+            openai_model=os.getenv("SPLIT_OPENAI_MODEL", "gpt-4.1-nano"),
+            gemini_model=os.getenv("SPLIT_GEMINI_MODEL", "gemini-2.5-flash-lite"),
         ),
 
         # Embedding

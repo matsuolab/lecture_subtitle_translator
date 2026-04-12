@@ -25,6 +25,10 @@ jobs:
         working-directory: frontend
         run: npx tsc --noEmit
 
+      - name: Setup ffmpeg sidecar
+        working-directory: frontend
+        run: npm run setup:ffmpeg
+
       - name: Build
         working-directory: frontend
         run: npm run build

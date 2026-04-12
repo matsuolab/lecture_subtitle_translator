@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef, useTransition } from 'react'
 import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
+import { open as openDialog, confirm as confirmDialog } from '@tauri-apps/plugin-dialog'
 import { Download, Save, FolderOpen, Settings, Film, Pin, PinOff } from 'lucide-react'
 import { VideoPlayer } from '@/components/VideoPlayer'
 import { SubtitleBlockList } from '@/components/SubtitleBlockList'
@@ -22,9 +23,18 @@ import {
 } from '@/api/persistence'
 import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
 import { hasPipelineApi, runPipelineViaApi } from '@/api/pipelineClient'
+import { buildPipelineConfig } from '@/lib/pipeline/config'
+import { runPipeline } from '@/lib/pipeline/runner'
+import { createOpenAIEmbedProvider } from '@/lib/pipeline/providers/openaiEmbedProvider'
+import { createTauriFFmpegProvider } from '@/lib/pipeline/providers/ffmpegProvider'
+import { createDockerWhisperXProvider, createHTTPWhisperXProvider } from '@/lib/pipeline/providers/whisperxProvider'
+import { extractAudioNode } from '@/lib/pipeline/nodes/extractAudio'
+import { transcribeNode } from '@/lib/pipeline/nodes/transcribe'
+import type { PipelineSubtitleBlock } from '@/lib/pipeline/types'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
-import type { PipelineAuditReport, PipelineNodeTrace, PipelineReviewItem, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
+import type { PipelineAuditReport, PipelineNodeTrace, PipelineReviewItem, PipelineRunMetrics, PipelineRunResult, PipelineRunLog } from '@/types/pipeline'
+import { savePipelineLog, loadPipelineLogs } from '@/api/pipelineLogs'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
@@ -183,9 +193,10 @@ export default function App() {
 
   const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
     const totalBlocks = Math.max(1, generated.length)
-    const cpsViolationCount = generated.filter(b => b.cps > 15).length
-    const overLengthCount = generated.filter(b => b.target.split('\n').some(line => line.length > 42)).length
-    const flaggedCount = generated.filter(b => b.status === 'flagged').length
+    // splitEn と同じ基準（maxCps=17, maxChars=42 for English）で一致させる
+    const cpsViolationCount = generated.filter(b => b.status === 'flagged').length
+    const overLengthCount = generated.filter(b => b.source.length > 42).length
+    const flaggedCount = cpsViolationCount
 
     const sourceChars = generated.reduce((sum, b) => sum + b.source.length, 0)
     const targetChars = generated.reduce((sum, b) => sum + b.target.length, 0)
@@ -274,6 +285,23 @@ export default function App() {
     setPipelineHistory(prev => [result, ...prev].slice(0, 20))
   }, [])
 
+  // 起動時: ディスクのパイプラインログを履歴として復元する
+  useEffect(() => {
+    loadPipelineLogs().then(logs => {
+      if (logs.length === 0) return
+      const results: PipelineRunResult[] = [...logs].reverse().map(log => ({
+        status: 'success' as const,
+        step: 'done' as const,
+        message: `パイプライン完了（${log.finalBlocks.length}ブロック）`,
+        sourceName: log.sourceFile,
+        startedAt: log.startedAt,
+        finishedAt: log.finishedAt,
+        log,
+      }))
+      setPipelineHistory(results)
+    })
+  }, [])
+
   const buildPipelineStubBlocks = useCallback((videoName: string): SubtitleBlock[] => {
     const rows: Array<{ start: number; end: number; source: string; target: string }> = [
       {
@@ -313,6 +341,26 @@ export default function App() {
     })
   }, [])
 
+  const pipelineBlocksToSubtitleBlocks = useCallback(
+    (pipelineBlocks: readonly PipelineSubtitleBlock[]): SubtitleBlock[] =>
+      pipelineBlocks.map(b => {
+        const charCount = b.text.length
+        const durationSec = Math.max(0.1, b.end - b.start)
+        return {
+          id: b.id,
+          startTime: b.start,
+          endTime: b.end,
+          source: b.text,    // 英語字幕テキスト（SRT出力・動画オーバーレイ・CPS計算に使用）
+          target: b.jaText,  // 日本語原文（参照用）
+          cps: Math.round((charCount / durationSec) * 10) / 10,
+          charCount,
+          status: b.flagged ? 'flagged' : 'pending',
+          glossaryTerms: [],
+        }
+      }),
+    [],
+  )
+
   const runDropPipeline = useCallback(async (sourceName: string, sourcePath?: string) => {
     const startedAt = Date.now()
     const traces: PipelineNodeTrace[] = []
@@ -341,12 +389,121 @@ export default function App() {
       })
     }
 
+    // エラーをユーザー向けメッセージに変換
+    const toUserMessage = (err: unknown, step: string): string => {
+      const raw = (
+        err instanceof Error ? err.message :
+        typeof err === 'string' ? err :
+        err && typeof err === 'object' && 'message' in err ? String((err as Record<string, unknown>).message) :
+        (() => { try { return JSON.stringify(err) } catch { return String(err) } })()
+      ).toLowerCase()
+
+      if (!adminSettings.openaiApiKey.trim()) {
+        return '⚙️ OpenAI API Key が未設定です。設定タブ → OpenAI API Key を入力してください。'
+      }
+      if (raw.includes('no such image') || raw.includes('unable to find image')) {
+        return '🐳 WhisperX イメージが見つかりません。次のコマンドを実行してください:\ndocker pull ghcr.io/jim60105/whisperx:large-v3-ja'
+      }
+      if (raw.includes('docker') || raw.includes('command not found') || raw.includes('exit 127')) {
+        return '🐳 Docker が起動していないか、docker コマンドが見つかりません。Docker Desktop を起動してください。'
+      }
+      if (raw.includes('unauthorized') || raw.includes('invalid api key') || raw.includes('incorrect api key')) {
+        return '🔑 OpenAI API Key が無効です。設定タブから正しい Key を入力してください。'
+      }
+      if (raw.includes('rate limit') || raw.includes('429') || raw.includes('quota')) {
+        return '⏱ OpenAI API のレート制限またはクォータ超過です。しばらく待ってから再試行してください。'
+      }
+      if (raw.includes('ffmpeg')) {
+        return `🎬 音声抽出（ffmpeg）に失敗しました。動画ファイルが対応形式か確認してください。\n詳細: ${raw}`
+      }
+
+      const rawFull = err instanceof Error ? err.message :
+        typeof err === 'string' ? err :
+        (() => { try { return JSON.stringify(err) } catch { return String(err) } })()
+      return `[${step}] ${rawFull}`
+    }
+
+    let currentStep = 'init'
+
     setActiveTab('subtitles')
     try {
       let generated: SubtitleBlock[] = []
       let audit: PipelineAuditReport | undefined
+      let pipelineLog: PipelineRunLog | undefined
 
-      if (hasPipelineApi(adminSettings)) {
+      // openaiApiKey があれば LLM パイプラインを実行
+      // whisperxUrl が空 → ローカル Docker、設定済み → AWS HTTP
+      const hasLocalPipeline = adminSettings.openaiApiKey.trim().length > 0
+
+      if (hasLocalPipeline && sourcePath) {
+        // ─── ローカルパイプライン（ffmpeg → WhisperX → LLMパイプライン）────
+        const pipelineConfig = buildPipelineConfig(adminSettings)
+        const embedProvider = createOpenAIEmbedProvider(
+          pipelineConfig.openaiApiKey,
+          pipelineConfig.embeddingModel,
+        )
+        const ctx = {
+          config: pipelineConfig,
+          onProgress: (msg: string) => {
+            const step = (
+              msg.startsWith('extractAudio') ? 'transcribe' :
+              msg.startsWith('transcribe') ? 'transcribe' :
+              msg.startsWith('correctJa') ? 'correct' :
+              msg.startsWith('splitJa') || msg.startsWith('translateEn') || msg.startsWith('splitEn') ? 'translate' :
+              'subtitle'
+            ) as PipelineRunResult['step']
+            setPipelineRun({ status: 'running', step, message: msg, sourceName, startedAt })
+          },
+          reportUsage: (_: { tokensIn: number; tokensOut: number; model: string; provider: string }) => {
+            // TODO: Phase 5 でコスト集計に接続
+          },
+        }
+
+        currentStep = 'extractAudio'
+        setPipelineRun({ status: 'running', step: 'transcribe', message: '音声抽出中...', sourceName, startedAt })
+        const ffmpegProvider = createTauriFFmpegProvider()
+        const { wavPath } = await extractAudioNode.run({ videoPath: sourcePath, ffmpeg: ffmpegProvider }, ctx)
+
+        // whisperxUrl が設定済み → AWS HTTP、未設定 → ローカル Docker
+        const whisperxProvider = pipelineConfig.whisperxUrl
+          ? createHTTPWhisperXProvider(pipelineConfig.whisperxUrl, pipelineConfig.whisperxApiKey)
+          : createDockerWhisperXProvider()
+
+        currentStep = 'transcribe'
+        setPipelineRun({ status: 'running', step: 'transcribe', message: 'WhisperX 書き起こし中...', sourceName, startedAt })
+        let transcriptSegments
+        try {
+          transcriptSegments = await transcribeNode.run({ wavPath, whisperxProvider }, ctx)
+        } finally {
+          // WAV 一時ファイルを確実に削除（書き起こし成功・失敗どちらでも）
+          const { remove } = await import('@tauri-apps/plugin-fs')
+          await remove(wavPath).catch(() => {})
+        }
+
+        currentStep = 'correctJa'
+
+        const pipelineResult = await runPipeline(transcriptSegments, ctx, {
+          embedProvider,
+          sourceFile: sourceName,
+          startedAt,
+        })
+
+        generated = pipelineBlocksToSubtitleBlocks(pipelineResult.result.subtitleBlocks)
+        pipelineLog = pipelineResult.log
+
+        const pipelineTraces: PipelineNodeTrace[] = pipelineResult.runState.nodeTraces.map((t: import('@/lib/pipeline/nodeContract').NodeTrace) => ({
+          nodeId: t.nodeId,
+          status: t.status,
+          attempt: t.attempt,
+          durationMs: t.durationMs,
+          provider: t.provider,
+          model: t.model,
+          summary: t.error ?? `${t.nodeId} 完了`,
+        }))
+        audit = buildAuditReport(generated, pipelineTraces)
+
+      } else if (hasPipelineApi(adminSettings)) {
+        // ─── 旧バックエンドAPI ────────────────────────────────────────────────
         setPipelineRun({ status: 'running', step: 'transcribe', message: 'パイプライン開始中...', sourceName, startedAt })
         const apiResult = await runPipelineViaApi(sourceName, adminSettings, sourcePath, (progress) => {
           const nodeLabel: Record<string, string> = {
@@ -374,6 +531,7 @@ export default function App() {
         generated = apiResult.blocks
         audit = apiResult.audit
       } else {
+        // ─── スタブ（開発用） ─────────────────────────────────────────────────
         await runStep('transcribe', 'transcribe', '文字起こしを実行中...', 350, 'WhisperXでセグメント生成')
         await runStep('correct', 'correct', '日本語テキストを補正中...', 300, 'LLMで補正と正規化')
         await runStep('translate', 'translate', '英訳を生成中...', 350, 'LLMで字幕翻訳')
@@ -426,14 +584,19 @@ export default function App() {
         finishedAt,
         metrics,
         audit,
+        log: pipelineLog,
       }
       setPipelineRun(result)
       appendPipelineHistory(result)
+      if (pipelineLog) {
+        savePipelineLog(pipelineLog, adminSettings.logRetentionCount)
+      }
     } catch (err) {
+      const userMessage = toUserMessage(err, currentStep)
       const result: PipelineRunResult = {
         status: 'error',
         step: 'done',
-        message: `パイプライン失敗: ${err instanceof Error ? err.message : '不明なエラー'}`,
+        message: userMessage,
         sourceName,
         startedAt,
         finishedAt: Date.now(),
@@ -444,8 +607,8 @@ export default function App() {
           reviewItems: [
             {
               id: 'pipeline-error',
-              nodeId: 'pipeline',
-              reason: err instanceof Error ? err.message : '不明なエラー',
+              nodeId: currentStep,
+              reason: userMessage,
               priority: 'must_review',
               score: 0,
             },
@@ -456,15 +619,17 @@ export default function App() {
       setPipelineRun(result)
       appendPipelineHistory(result)
     }
-  }, [adminSettings, appendPipelineHistory, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, reset, sleep])
+  }, [adminSettings, appendPipelineHistory, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, pipelineBlocksToSubtitleBlocks, reset, sleep])
 
-  const confirmAndLoadVideo = useCallback((doLoad: () => void) => {
-    if (blocks.length > 0) {
-      const ok = window.confirm('新しい動画を読み込むと現在の字幕がリセットされます。続けますか？')
-      if (!ok) return
-      reset([])
-    }
+  const confirmAndLoadVideo = useCallback(async (doLoad: () => void) => {
+    // 動画は必ず読み込む。字幕が存在する場合のみリセットするか確認する。
     doLoad()
+    if (blocks.length > 0) {
+      const ok = isTauri()
+        ? await confirmDialog('字幕データをリセットしますか？\n\nOK → 字幕をクリアして新しい動画に切り替えます\nキャンセル → 字幕を保持したまま動画だけ切り替えます', { title: '字幕のリセット', kind: 'warning' })
+        : window.confirm('字幕データをリセットしますか？\nキャンセルを選ぶと字幕を保持したまま動画だけ切り替えます。')
+      if (ok) reset([])
+    }
   }, [blocks.length, reset])
 
   const handleVideoInput = useCallback((file: File) => {
@@ -475,8 +640,31 @@ export default function App() {
     confirmAndLoadVideo(() => loadVideoPath(path))
   }, [confirmAndLoadVideo, loadVideoPath])
 
-  const handleRunPipelineFromReport = useCallback(() => {
+  const handleOpenVideoDialog = useCallback(async () => {
+    if (!isTauri()) return
+    const selected = await openDialog({
+      multiple: false,
+      filters: [{ name: '動画ファイル', extensions: ['mp4', 'mkv', 'avi', 'mov', 'webm', 'ts', 'mts'] }],
+    })
+    if (!selected) return
+    const path = typeof selected === 'string' ? selected : selected
+    confirmAndLoadVideo(() => loadVideoPath(path))
+  }, [confirmAndLoadVideo, loadVideoPath])
+
+  const handleRunPipelineFromReport = useCallback(async () => {
     if (!videoSource) return
+    // Tauri 環境でフルパスが未取得の場合、ダイアログでパスを取得してから実行
+    if (!videoSource.path && isTauri()) {
+      const selected = await openDialog({
+        multiple: false,
+        title: `パイプライン用の動画ファイルを選択（${videoSource.name}）`,
+        filters: [{ name: '動画ファイル', extensions: ['mp4', 'mkv', 'avi', 'mov', 'webm', 'ts', 'mts'] }],
+      })
+      if (!selected) return
+      const path = typeof selected === 'string' ? selected : selected
+      void runDropPipeline(videoSource.name, path)
+      return
+    }
     void runDropPipeline(videoSource.name, videoSource.path)
   }, [videoSource, runDropPipeline])
 
@@ -1003,6 +1191,7 @@ export default function App() {
             isPlaying={isPlaying}
             totalDuration={duration}
             onLoadVideo={handleVideoInput}
+            onOpenDialogLoadVideo={isTauri() ? handleOpenVideoDialog : undefined}
             onTogglePlay={togglePlay}
             onSeek={seekTo}
             subtitleOverlay={subtitleOverlay}

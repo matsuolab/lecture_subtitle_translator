@@ -1,3 +1,13 @@
+import type {
+  TranscriptSegment,
+  CorrectedSegment,
+  JapaneseSentenceBlock,
+  EnglishBlock,
+  PipelineSubtitleBlock,
+  CpsViolation,
+  SplitHint,
+} from '@/lib/pipeline/types'
+
 export type PipelineStep = 'idle' | 'transcribe' | 'correct' | 'translate' | 'subtitle' | 'done'
 
 export type PipelineStatus = 'idle' | 'running' | 'success' | 'error'
@@ -50,6 +60,39 @@ export interface PipelineAuditReport {
   nodeTraces: PipelineNodeTrace[]
 }
 
+// ---------------------------------------------------------------------------
+// パイプライン完全実行ログ（トレーサビリティ用）
+// ---------------------------------------------------------------------------
+
+/** CPSループの1回の試行記録 */
+export interface CpsAttemptLog {
+  readonly attempt: number
+  readonly splitHints: readonly SplitHint[]
+  readonly splitJaOutput: readonly JapaneseSentenceBlock[]
+  readonly translateEnOutput: readonly EnglishBlock[]
+  readonly splitEnOutput: readonly PipelineSubtitleBlock[]
+  readonly violations: readonly CpsViolation[]
+  readonly result: 'pass' | 'retry' | 'max_attempts_reached'
+  readonly durationMs: number
+}
+
+/**
+ * 一回のパイプライン実行の完全ログ。
+ * schemaVersion により将来の後方互換マイグレーションが可能。
+ */
+export interface PipelineRunLog {
+  readonly schemaVersion: '1.0'
+  readonly runId: string
+  readonly startedAt: number
+  readonly finishedAt: number
+  readonly sourceFile: string
+  readonly transcribeOutput: readonly TranscriptSegment[]
+  readonly correctJaOutput: readonly CorrectedSegment[]
+  readonly cpsAttempts: readonly CpsAttemptLog[]
+  readonly finalBlocks: readonly PipelineSubtitleBlock[]
+  readonly nodeTraces: readonly PipelineNodeTrace[]
+}
+
 export interface PipelineRunResult {
   status: PipelineStatus
   step: PipelineStep
@@ -59,4 +102,6 @@ export interface PipelineRunResult {
   finishedAt?: number
   metrics?: PipelineRunMetrics
   audit?: PipelineAuditReport
+  /** 完全実行ログ（トレーサビリティ用）。成功時のみセット。 */
+  log?: PipelineRunLog
 }

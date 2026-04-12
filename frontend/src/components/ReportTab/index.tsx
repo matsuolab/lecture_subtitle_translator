@@ -1,7 +1,11 @@
-import { Play } from 'lucide-react'
-import type { PipelineReviewItem, PipelineRunResult } from '@/types/pipeline'
+import { useState } from 'react'
+import { Play, Download } from 'lucide-react'
+import type { PipelineRunResult } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
+import { SummaryTab } from './SummaryTab'
+import { ExecutionLogTab } from './ExecutionLogTab'
+import { BlockDetailTab } from './BlockDetailTab'
 
 interface ReportTabProps {
   runs: PipelineRunResult[]
@@ -10,50 +14,32 @@ interface ReportTabProps {
   onRunPipeline: () => void
 }
 
-function formatFinishedAt(ts?: number): string {
-  if (!ts) return '-'
-  return new Date(ts).toLocaleString()
-}
+type SubTab = 'summary' | 'log' | 'block'
 
-function priorityBadge(priority: PipelineReviewItem['priority']): string {
-  if (priority === 'must_review') return 'MUST'
-  if (priority === 'should_review') return 'SHOULD'
-  return 'AUTO'
+function downloadJson(obj: unknown, filename: string): void {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }: ReportTabProps) {
   const { theme } = useTheme()
-  const { strings: t } = useLocale()
+  useLocale() // locale strings は SummaryTab で使用
+  const [subTab, setSubTab] = useState<SubTab>('summary')
   const isRunning = pipelineRun.status === 'running'
 
-  const successRuns = runs.filter(r => r.status === 'success')
-  const measuredRuns = runs.filter(r => r.metrics)
+  // 最新の実行ログ: pipelineRun（直近）を優先、なければ history から
+  const latestLog = pipelineRun.log ?? runs.find(r => r.log)?.log
 
-  const totalRuns = runs.length
-  const successRate = totalRuns > 0 ? successRuns.length / totalRuns : 0
-  const avgCost = measuredRuns.length > 0
-    ? measuredRuns.reduce((sum, r) => sum + (r.metrics?.cost.estimatedUsd ?? 0), 0) / measuredRuns.length
-    : 0
-  const avgDurationSec = measuredRuns.length > 0
-    ? measuredRuns.reduce((sum, r) => sum + (r.metrics?.cost.durationMs ?? 0), 0) / measuredRuns.length / 1000
-    : 0
-
-  const latestAudit = runs.find(r => r.audit)?.audit
-  const topReviewItems = latestAudit
-    ? [...latestAudit.reviewItems]
-      .sort((a, b) => {
-        const weight = (p: PipelineReviewItem['priority']) => (p === 'must_review' ? 3 : p === 'should_review' ? 2 : 1)
-        return weight(b.priority) - weight(a.priority)
-      })
-      .slice(0, 8)
-    : []
-
-  const statusLabel = (status: PipelineRunResult['status']) => {
-    if (status === 'success') return t.reportStatusSuccess
-    if (status === 'error') return t.reportStatusError
-    if (status === 'running') return t.reportStatusRunning
-    return t.reportStatusIdle
-  }
+  const subTabs: Array<{ key: SubTab; label: string; disabled?: boolean }> = [
+    { key: 'summary', label: '概要' },
+    { key: 'log', label: '実行ログ', disabled: !latestLog },
+    { key: 'block', label: 'ブロック詳細', disabled: !latestLog },
+  ]
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 10 }}>
@@ -65,9 +51,6 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }:
         padding: '10px 12px',
         marginBottom: 10,
       }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
-          パイプライン実行
-        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <button
             onClick={onRunPipeline}
@@ -93,9 +76,30 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }:
           <span style={{ fontSize: 11, color: theme.textSecondary }}>
             {videoSourceName ? `対象: ${videoSourceName}` : '動画プレイヤーに動画を読み込んでください'}
           </span>
+          {latestLog && (
+            <button
+              onClick={() => downloadJson(latestLog, `${latestLog.sourceFile}_log.json`)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                fontSize: 11,
+                padding: '4px 10px',
+                borderRadius: 6,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textSecondary,
+                cursor: 'pointer',
+                marginLeft: 'auto',
+              }}
+            >
+              <Download size={11} />
+              ログをエクスポート
+            </button>
+          )}
         </div>
 
-        {/* 現在の実行状態 */}
+        {/* 現在の実行状態インライン */}
         {pipelineRun.status !== 'idle' && (
           <div style={{ marginTop: 8, fontSize: 11 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -128,126 +132,45 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }:
         )}
       </div>
 
-      <div style={{
-        border: `1px solid ${theme.panelBorder}`,
-        borderRadius: 8,
-        background: theme.cardBg,
-        padding: '10px 12px',
-        marginBottom: 10,
-      }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
-          {t.reportSummary}
-        </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: theme.textSecondary }}>
-          <span>{t.reportTotalRuns}: {totalRuns}</span>
-          <span>{t.reportSuccessRate}: {(successRate * 100).toFixed(1)}%</span>
-          <span>{t.reportAvgCost}: ${avgCost.toFixed(6)}</span>
-          <span>{t.reportAvgDuration}: {avgDurationSec.toFixed(2)}s</span>
-        </div>
+      {/* サブタブ切り替え */}
+      <div style={{ display: 'flex', gap: 0, marginBottom: 12, borderBottom: `1px solid ${theme.panelBorder}` }}>
+        {subTabs.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => !tab.disabled && setSubTab(tab.key)}
+            disabled={tab.disabled}
+            style={{
+              fontSize: 12,
+              fontWeight: subTab === tab.key ? 700 : 400,
+              padding: '6px 14px',
+              border: 'none',
+              borderBottom: subTab === tab.key ? `2px solid ${theme.accent}` : '2px solid transparent',
+              background: 'transparent',
+              color: tab.disabled ? theme.textDisabled : subTab === tab.key ? theme.accent : theme.textSecondary,
+              cursor: tab.disabled ? 'default' : 'pointer',
+              marginBottom: -1,
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      <div style={{
-        border: `1px solid ${theme.panelBorder}`,
-        borderRadius: 8,
-        background: theme.cardBg,
-        padding: '10px 12px',
-        marginBottom: 10,
-      }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
-          {t.reportReviewQueue}
+      {/* タブコンテンツ */}
+      {subTab === 'summary' && (
+        <SummaryTab runs={runs} pipelineRun={pipelineRun} />
+      )}
+      {subTab === 'log' && latestLog && (
+        <ExecutionLogTab log={latestLog} />
+      )}
+      {subTab === 'block' && latestLog && (
+        <BlockDetailTab log={latestLog} />
+      )}
+      {(subTab === 'log' || subTab === 'block') && !latestLog && (
+        <div style={{ fontSize: 12, color: theme.textMuted }}>
+          パイプラインを実行するとログが表示されます。
         </div>
-
-        {!latestAudit ? (
-          <div style={{ fontSize: 12, color: theme.textMuted }}>{t.reportReviewQueueEmpty}</div>
-        ) : (
-          <>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8, fontSize: 11, color: theme.textSecondary }}>
-              <span>MUST: {latestAudit.mustReviewCount}</span>
-              <span>SHOULD: {latestAudit.shouldReviewCount}</span>
-              <span>AUTO: {latestAudit.autoPassCount}</span>
-              <span>{t.reportNodeTraceCount(latestAudit.nodeTraces.length)}</span>
-            </div>
-
-            <div style={{ display: 'grid', gap: 6 }}>
-              {topReviewItems.map(item => (
-                <div
-                  key={item.id}
-                  style={{
-                    border: `1px solid ${theme.panelBorder}`,
-                    borderRadius: 6,
-                    padding: '6px 8px',
-                    background: theme.panelBg,
-                    fontSize: 11,
-                    color: theme.textSecondary,
-                  }}
-                >
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 2 }}>
-                    <span style={{ fontWeight: 700, color: item.priority === 'must_review' ? '#ef4444' : item.priority === 'should_review' ? '#f59e0b' : '#22c55e' }}>
-                      {priorityBadge(item.priority)}
-                    </span>
-                    <span style={{ color: theme.textPrimary }}>{item.nodeId}</span>
-                    <span style={{ color: theme.textMuted }}>score: {item.score.toFixed(2)}</span>
-                    {item.blockId !== undefined && <span style={{ color: theme.textMuted }}>block: {item.blockId}</span>}
-                  </div>
-                  <div>{item.reason}</div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-
-      <div style={{
-        border: `1px solid ${theme.panelBorder}`,
-        borderRadius: 8,
-        background: theme.cardBg,
-        padding: '10px 12px',
-      }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
-          {t.reportRecentRuns}
-        </div>
-
-        {runs.length === 0 ? (
-          <div style={{ fontSize: 12, color: theme.textMuted }}>
-            {t.reportEmpty}
-          </div>
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-              <thead>
-                <tr style={{ color: theme.textMuted, borderBottom: `1px solid ${theme.panelBorder}` }}>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColSource}</th>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColStatus}</th>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColFinishedAt}</th>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColCost}</th>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColDuration}</th>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColQuality}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs.map((run, idx) => (
-                  <tr key={`${run.startedAt ?? 0}-${idx}`} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
-                    <td style={{ padding: '6px 4px', color: theme.textPrimary }}>{run.sourceName ?? '-'}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{statusLabel(run.status)}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{formatFinishedAt(run.finishedAt)}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
-                      {run.metrics ? `$${run.metrics.cost.estimatedUsd.toFixed(6)}` : '-'}
-                    </td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
-                      {run.metrics ? `${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : '-'}
-                    </td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
-                      {run.metrics
-                        ? `CPS ${(run.metrics.quality.cpsViolationRate * 100).toFixed(1)}% / 42字 ${(run.metrics.quality.overLengthRate * 100).toFixed(1)}%`
-                        : '-'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      )}
     </div>
   )
 }

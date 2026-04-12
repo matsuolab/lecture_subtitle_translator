@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -28,5 +29,10 @@ export default defineConfig({
       : process.env.TAURI_ENV_PLATFORM === 'macos'
         ? 'safari13'
         : 'esnext',
+  },
+  test: {
+    environment: 'node',
+    globals: true,
+    include: ['src/**/__tests__/**/*.test.ts'],
   },
 })

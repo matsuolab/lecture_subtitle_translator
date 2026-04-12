@@ -429,7 +429,7 @@ function SubtitleBlockInner({
       }} />
       {/* コンテンツ（背景バーの上） */}
       <div style={{ position: 'relative', zIndex: 1 }}>
-      {/* 訳文テキスト（編集可能） */}
+      {/* 訳文テキスト（英語） */}
       {isEditingTarget ? (
         <>
           <textarea
@@ -485,16 +485,16 @@ function SubtitleBlockInner({
             cursor: isApproved ? 'default' : 'text',
             minHeight: 20,
           }}
-          title={isApproved ? undefined : 'クリックで訳文を編集'}
+          title={isApproved ? undefined : 'クリックで英訳を編集'}
         >
           {block.target
             ? <TermHighlight text={block.target} terms={matchedTermsJa} />
-            : <span style={{ color: theme.textDisabled, fontStyle: 'italic' }}>（訳文なし）</span>
+            : <span style={{ color: theme.textDisabled, fontStyle: 'italic' }}>（英訳なし）</span>
           }
         </div>
       )}
 
-      {/* 原文テキスト */}
+      {/* 原文テキスト（日本語） */}
       {isEditing ? (
         <>
           <textarea

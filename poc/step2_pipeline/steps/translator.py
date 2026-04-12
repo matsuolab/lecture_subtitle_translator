@@ -101,6 +101,7 @@ async def _translate_batch(
             {"role": "user", "content": user_message},
         ],
         temperature=0.2,
+        max_tokens=16384,
     )
 
     return _parse_numbered_response(response, segments)

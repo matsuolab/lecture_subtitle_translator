@@ -36,7 +36,7 @@ class OpenAILLMProvider(LLMProvider):
             model=self._model,
             messages=messages,  # type: ignore[arg-type]
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
         )
         if response.usage:
             self._record_usage(

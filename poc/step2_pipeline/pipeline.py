@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -33,12 +34,59 @@ from .steps.transcriber import transcribe
 from .steps.translator import translate_segments
 
 
+def load_glossary_json(glossary_path: str) -> tuple[str, ...]:
+    """
+    フロントエンドが書き出した glossary.json を読み込み、
+    補正・翻訳プロンプトに渡せる文字列タプルに変換する。
+
+    Args:
+        glossary_path: glossary.json のパス
+                       デフォルト: %APPDATA%/subtitle-editor/glossary.json (Windows)
+                                   ~/Library/Application Support/subtitle-editor/glossary.json (Mac)
+                                   ~/.config/subtitle-editor/glossary.json (Linux)
+
+    Returns:
+        "ja → en" 形式の文字列タプル（空の場合は空タプル）
+    """
+    import json
+    path = Path(glossary_path)
+    if not path.exists():
+        print(f"      ℹ 用語辞書ファイルが見つかりません（スキップ）: {glossary_path}")
+        return ()
+    with open(path, encoding="utf-8") as f:
+        entries = json.load(f)
+    result = []
+    for e in entries:
+        ja = (e.get("ja") or "").strip()
+        en = (e.get("en") or "").strip()
+        if ja and en:
+            result.append(f"{ja} → {en}")
+        elif ja:
+            result.append(ja)
+    print(f"      → 用語辞書 {len(result)} 件読み込み")
+    return tuple(result)
+
+
+def _default_glossary_path() -> str:
+    """OS に応じたデフォルトの glossary.json パスを返す。"""
+    import sys
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+    return str(Path(base) / "subtitle-editor" / "glossary.json")
+
+
 async def run_pipeline(
     video_path: str,
     pdf_path: str | None = None,
     output_dir: str | None = None,
     subtitle_lang: str = "en",
     constraints_cfg: ConstraintsConfig | None = None,
+    glossary_path: str | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> PipelineResult:
     """
     動画ファイルから英語 SRT を生成するフルパイプライン。
@@ -66,25 +114,40 @@ async def run_pipeline(
 
     # [1/9] 音声抽出
     print(f"[1/9] 音声抽出: {video_path}")
+    if progress_callback:
+        progress_callback("extract_audio")
     with step_timer(metrics, "audio_extract") as sm:
         wav_path = await extract_audio(video_path, output_dir=out_dir)
 
     # [2/9] 書き起こし
     print(f"[2/9] 書き起こし ({config.whisperx_backend})")
+    if progress_callback:
+        progress_callback("transcribe")
     with step_timer(metrics, "transcribe") as sm:
         segments = await transcribe(wav_path, provider=providers.transcribe)
     print(f"      → {len(segments)} セグメント取得")
 
-    # [3/9] PDF 抽出
-    print("[3/9] PDF 抽出")
+    # [3/9] PDF 抽出 + 用語辞書読み込み
+    print("[3/9] PDF 抽出 + 用語辞書読み込み")
+    if progress_callback:
+        progress_callback("pdf_extract")
     with step_timer(metrics, "pdf_extract") as sm:
         slide_context = extract_slide_context(pdf_path) if pdf_path else None
     if slide_context:
-        print(f"      → 専門用語 {len(slide_context.glossary)} 件抽出")
+        print(f"      → PDF 専門用語 {len(slide_context.glossary)} 件抽出")
     else:
         print("      → PDF なし（スキップ）")
 
+    # フロントエンドの用語辞書を読み込む（auto-save 済みの glossary.json）
+    gpath = glossary_path if glossary_path is not None else _default_glossary_path()
+    app_glossary = load_glossary_json(gpath)
+
+    # slide_context の glossary と app_glossary をマージ
+    merged_glossary = (slide_context.glossary if slide_context else ()) + app_glossary
+
     # [4/9] 日本語補正
+    if progress_callback:
+        progress_callback("correct")
     print(
         f"[4/9] 日本語補正"
         f" ({config.correction_llm.provider} / {config.correction_llm.effective_model()})"
@@ -93,6 +156,7 @@ async def run_pipeline(
         corrected = await correct_segments(
             segments,
             slide_context=slide_context,
+            app_glossary=merged_glossary,
             llm=providers.correction_llm,
             embed=providers.embed,
             flag_threshold=constraints_cfg.quality.correction,
@@ -106,11 +170,12 @@ async def run_pipeline(
     print(f"      → 補正フラグ: {len(flagged_corrections)} 件")
 
     # [5/9] 英訳
+    if progress_callback:
+        progress_callback("translate")
     print(
         f"[5/9] 英訳"
         f" ({config.translation_llm.provider} / {config.translation_llm.effective_model()})"
     )
-    glossary = slide_context.glossary if slide_context else ()
     with step_timer(metrics, "translation") as sm:
         translated = await translate_segments(
             corrected,
@@ -118,7 +183,7 @@ async def run_pipeline(
             embed=providers.embed,
             flag_threshold=constraints_cfg.quality.translation,
             batch_size=config.llm_batch_size,
-            glossary=glossary,
+            glossary=merged_glossary,
         )
         sm.usages = [
             LLMUsage(**u) for u in
@@ -128,6 +193,8 @@ async def run_pipeline(
     print(f"      → 翻訳フラグ: {len(flagged_translations)} 件")
 
     # [6/9] 字幕分割 + CPS 検証ループ
+    if progress_callback:
+        progress_callback("split")
     print(
         f"[6/9] 字幕分割 + CPS 検証ループ"
         f" (lang={subtitle_lang},"
@@ -144,11 +211,15 @@ async def run_pipeline(
     print(f"      → {len(blocks)} ブロック生成")
 
     # [7/9] タイムスタンプアライメント
+    if progress_callback:
+        progress_callback("align")
     print("[7/9] タイムスタンプアライメント")
     with step_timer(metrics, "align"):
         aligned_blocks = align_blocks(blocks, original_segments=segments)
 
     # [8/9] SRT 出力
+    if progress_callback:
+        progress_callback("srt_export")
     print("[8/9] SRT 出力")
     with step_timer(metrics, "srt_export"):
         srt_path = export_srt(
@@ -158,6 +229,8 @@ async def run_pipeline(
     print(f"      → {srt_path}")
 
     # [9/9] 品質レポート出力（計測サマリーを含む）
+    if progress_callback:
+        progress_callback("report")
     print("[9/9] 品質レポート出力")
     metrics.print_summary()
 
@@ -196,6 +269,12 @@ def main() -> None:
     parser.add_argument("--video", required=True, help="入力動画ファイルパス")
     parser.add_argument("--pdf", default=None, help="スライド PDF パス（任意）")
     parser.add_argument("--output", default=None, help="出力ディレクトリ")
+    parser.add_argument(
+        "--glossary",
+        default=None,
+        metavar="PATH",
+        help=f"glossary.json のパス（省略時は OS 標準の appConfigDir を使用: {_default_glossary_path()}）",
+    )
     parser.add_argument(
         "--constraints",
         default=None,
@@ -238,6 +317,7 @@ def main() -> None:
             output_dir=args.output,
             subtitle_lang=args.lang,
             constraints_cfg=constraints_cfg,
+            glossary_path=args.glossary,
         )
     )
 

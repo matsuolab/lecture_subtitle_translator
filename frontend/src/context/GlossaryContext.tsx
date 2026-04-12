@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useRef } from 'react'
+import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
 
 export interface GlossaryEntry {
   id: string
@@ -23,6 +23,7 @@ export interface ExtractedTerm {
 }
 
 const STORAGE_KEY = 'glossary_v1'
+export const GLOSSARY_FILENAME = 'glossary.json'
 
 function loadFromStorage(): GlossaryEntry[] | null {
   try {
@@ -39,6 +40,19 @@ function saveToStorage(entries: GlossaryEntry[]) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
   } catch {
     // localStorage が使えない環境では無視
+  }
+}
+
+/** Tauri 環境のときだけ appConfigDir に glossary.json を書き出す */
+async function saveToDisk(entries: GlossaryEntry[]): Promise<void> {
+  try {
+    const { writeTextFile, mkdir } = await import('@tauri-apps/plugin-fs')
+    const { appConfigDir } = await import('@tauri-apps/api/path')
+    const dir = await appConfigDir()
+    await mkdir(dir, { recursive: true })
+    await writeTextFile(`${dir}/${GLOSSARY_FILENAME}`, JSON.stringify(entries, null, 2))
+  } catch {
+    // Tauri 環境以外（ブラウザ開発時）では無視
   }
 }
 
@@ -85,6 +99,11 @@ export function GlossaryProvider({ children }: { children: React.ReactNode }) {
     },
     []
   )
+
+  // glossary 変更時にディスクへ非同期で書き出す（Tauri 環境のみ）
+  useEffect(() => {
+    saveToDisk(glossary)
+  }, [glossary])
 
   const importEntries = useCallback((incoming: GlossaryEntry[]) => {
     // O(n*m) を避けるため、ja+en の複合キーでインデックスを作る

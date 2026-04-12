@@ -77,6 +77,10 @@ jobs:
           "
           npx @tauri-apps/cli icon src-tauri/icons/source.png
 
+      - name: Setup ffmpeg sidecar
+        working-directory: frontend
+        run: npm run setup:ffmpeg
+
       - name: Build Tauri app (portable)
         working-directory: frontend
         run: npx @tauri-apps/cli build

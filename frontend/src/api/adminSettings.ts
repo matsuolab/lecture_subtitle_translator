@@ -15,6 +15,13 @@ export function getDefaultAdminSettings(): AdminSettings {
     deeplApiKey: '',
     openaiCompatibleBaseUrl: '',
     translationProvider: DEFAULT_TRANSLATION_PROVIDER,
+    whisperxUrl: '',
+    whisperxApiKey: '',
+    whisperxLanguage: 'ja',
+    correctionModel: 'gpt-4.1-nano',
+    translationModel: 'gpt-4.1-mini',
+    embeddingModel: 'text-embedding-3-small',
+    logRetentionCount: null,
   }
 }
 
@@ -35,6 +42,13 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     deeplApiKey: typeof raw.deeplApiKey === 'string' ? raw.deeplApiKey : '',
     openaiCompatibleBaseUrl: typeof raw.openaiCompatibleBaseUrl === 'string' ? raw.openaiCompatibleBaseUrl : '',
     translationProvider: normalizeTranslationProvider(raw.translationProvider),
+    whisperxUrl: typeof raw.whisperxUrl === 'string' ? raw.whisperxUrl : '',
+    whisperxApiKey: typeof raw.whisperxApiKey === 'string' ? raw.whisperxApiKey : '',
+    whisperxLanguage: typeof raw.whisperxLanguage === 'string' ? raw.whisperxLanguage : 'ja',
+    correctionModel: typeof raw.correctionModel === 'string' ? raw.correctionModel : defaults.correctionModel,
+    translationModel: typeof raw.translationModel === 'string' ? raw.translationModel : defaults.translationModel,
+    embeddingModel: typeof raw.embeddingModel === 'string' ? raw.embeddingModel : defaults.embeddingModel,
+    logRetentionCount: typeof raw.logRetentionCount === 'number' ? raw.logRetentionCount : null,
   }
 }
 
