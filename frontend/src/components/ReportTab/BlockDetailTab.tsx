@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { PipelineRunLog } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 
 interface BlockDetailTabProps {
   log: PipelineRunLog
+  activeBlockId?: number | null
 }
 
 function formatTime(sec: number): string {
@@ -12,10 +13,17 @@ function formatTime(sec: number): string {
   return `${m}:${s}`
 }
 
-export function BlockDetailTab({ log }: BlockDetailTabProps) {
+export function BlockDetailTab({ log, activeBlockId }: BlockDetailTabProps) {
   const { theme } = useTheme()
   const [query, setQuery] = useState('')
   const [searched, setSearched] = useState(false)
+
+  // 字幕エディタでアクティブなブロックが変わったら自動検索
+  useEffect(() => {
+    if (activeBlockId == null) return
+    setQuery(String(activeBlockId))
+    setSearched(true)
+  }, [activeBlockId])
 
   const search = () => setSearched(true)
 

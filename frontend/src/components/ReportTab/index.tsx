@@ -13,6 +13,7 @@ interface ReportTabProps {
   videoSourceName: string | null
   onRunPipeline: () => void
   onRerunFromTranscript?: (run: PipelineRunResult) => void
+  activeBlockId?: number | null
 }
 
 type SubTab = 'summary' | 'log' | 'block'
@@ -27,7 +28,7 @@ function downloadJson(obj: unknown, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
-export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, onRerunFromTranscript }: ReportTabProps) {
+export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, onRerunFromTranscript, activeBlockId }: ReportTabProps) {
   const { theme } = useTheme()
   useLocale() // locale strings は SummaryTab で使用
   const [subTab, setSubTab] = useState<SubTab>('summary')
@@ -165,7 +166,7 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, o
         <ExecutionLogTab log={latestLog} />
       )}
       {subTab === 'block' && latestLog && (
-        <BlockDetailTab log={latestLog} />
+        <BlockDetailTab log={latestLog} activeBlockId={activeBlockId} />
       )}
       {(subTab === 'log' || subTab === 'block') && !latestLog && (
         <div style={{ fontSize: 12, color: theme.textMuted }}>

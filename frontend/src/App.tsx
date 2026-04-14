@@ -1595,6 +1595,7 @@ export default function App() {
                 videoSourceName={videoSource?.name ?? null}
                 onRunPipeline={handleRunPipelineFromReport}
                 onRerunFromTranscript={handleRerunFromTranscript}
+                activeBlockId={activeBlockId}
               />
             )}
             {!isResizing && activeTab === 'settings' && (

@@ -427,6 +427,28 @@ function SubtitleBlockInner({
         transition: 'width 0.1s linear',
         zIndex: 0,
       }} />
+      {/* ブロックID バッジ（右上・クリックでコピー） */}
+      <div
+        onClick={e => {
+          e.stopPropagation()
+          void navigator.clipboard.writeText(String(block.id))
+        }}
+        title={`ブロックID: ${block.id}（クリックでコピー）`}
+        style={{
+          position: 'absolute',
+          top: 4,
+          right: 6,
+          zIndex: 2,
+          fontSize: 9,
+          fontFamily: 'monospace',
+          color: theme.textDisabled,
+          cursor: 'pointer',
+          userSelect: 'none',
+          letterSpacing: '0.02em',
+        }}
+      >
+        #{block.id}
+      </div>
       {/* コンテンツ（背景バーの上） */}
       <div style={{ position: 'relative', zIndex: 1 }}>
       {/* 訳文テキスト（英語） */}
