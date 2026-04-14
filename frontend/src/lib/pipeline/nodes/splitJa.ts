@@ -32,106 +32,98 @@ function flattenWords(segments: readonly CorrectedSegment[]): readonly WordTimes
 }
 
 /**
- * 各文が correctedSegments のどのセグメント ID に由来するかを文字位置で計算する。
- * 文が複数セグメントにまたがる場合は両方の ID を含む。
+ * セグメント内の CorrectedSegment.original.words を WordTimestampFlat[] に変換する。
  */
-function computeSourceSegmentIds(
-  sentences: readonly string[],
-  fullText: string,
-  correctedSegments: readonly CorrectedSegment[],
-): readonly (readonly number[])[] {
-  let offset = 0
-  const segRanges = correctedSegments.map(seg => {
-    const charStart = offset
-    offset += seg.correctedText.length
-    return { id: seg.original.id, charStart, charEnd: offset }
-  })
-
-  let searchFrom = 0
-  return sentences.map(sentence => {
-    const pos = fullText.indexOf(sentence, searchFrom)
-    if (pos === -1) return []
-    const sentEnd = pos + sentence.length
-    searchFrom = sentEnd
-    return segRanges
-      .filter(s => s.charStart < sentEnd && s.charEnd > pos)
-      .map(s => s.id)
-  })
+function segmentWords(seg: CorrectedSegment): readonly WordTimestampFlat[] {
+  return seg.original.words
+    .filter(w => w.start !== undefined && w.end !== undefined)
+    .map(w => ({ word: w.word, start: w.start, end: w.end }))
 }
 
 /**
- * correctedSegments の id → 時間範囲のルックアップマップを構築する。
- * フォールバック時に文字位置から割り出したセグメント時間を使うために利用。
+ * セグメントTSを基準として JapaneseSentenceBlock[] を構築する。
+ *
+ * 設計方針:
+ *   各 CorrectedSegment を独立して処理する。
+ *   - 1文のみ → WhisperXセグメントTS（start/end）をそのまま使用（exact）
+ *   - 複数文 → そのセグメントの word TS のみで局所アライメント
+ *              マッチ失敗 → そのセグメントの時間窓内で均等配分（proportional）
+ *
+ * グローバル結合を廃止することで:
+ *   - fallback 時のTS範囲がセグメント幅に収まる（パイルアップ不可能）
+ *   - 他セグメントの単語に誤マッチする問題を排除
+ *   - 1文=1セグメントの大半のケースでセグメントTSをそのまま利用できる
  */
-function buildSegTimeMap(
+function buildPrimaryBlocks(
   correctedSegments: readonly CorrectedSegment[],
-): Map<number, { start: number; end: number }> {
-  return new Map(
-    correctedSegments.map(seg => [
-      seg.original.id,
-      { start: seg.original.start, end: seg.original.end },
-    ])
-  )
-}
-
-function assignTimestamps(
-  sentences: readonly string[],
-  sourceSegmentIdsPerSentence: readonly (readonly number[])[],
-  correctedSegments: readonly CorrectedSegment[],
-  allWords: readonly WordTimestampFlat[],
-  totalDuration: number,
   attempt: number,
 ): readonly JapaneseSentenceBlock[] {
-  let searchFrom = 0
-  const segTimeMap = buildSegTimeMap(correctedSegments)
+  const blocks: JapaneseSentenceBlock[] = []
+  let idCounter = 1
 
-  return sentences.map((jaText, i) => {
-    const range =
-      allWords.length > 0
-        ? findTimeRangeSequential(jaText, allWords, searchFrom)
+  for (const seg of correctedSegments) {
+    const sentences = seg.correctedText.split(SENTENCE_END_RE).map(s => s.trim()).filter(Boolean)
+    if (sentences.length === 0) continue
+
+    if (sentences.length === 1) {
+      // 分割不要 → WhisperXセグメントTSを直接使用
+      const id = idCounter++
+      blocks.push({
+        id,
+        start: seg.original.start,
+        end: seg.original.end,
+        jaText: sentences[0],
+        sourceSegmentIds: [seg.original.id],
+        alignConfidence: 'exact',
+        attempt,
+        blockKey: `a${attempt}s${id}`,
+      })
+      continue
+    }
+
+    // 複数文 → このセグメントの word TS のみで局所アライメント
+    const words = segmentWords(seg)
+    let searchFrom = 0
+
+    for (let j = 0; j < sentences.length; j++) {
+      const jaText = sentences[j]
+      const range = words.length > 0
+        ? findTimeRangeSequential(jaText, words, searchFrom)
         : null
 
-    const id = i + 1
-    const blockKey = `a${attempt}s${id}`
-    const sourceSegmentIds = sourceSegmentIdsPerSentence[i] ?? []
+      const id = idCounter++
+      const blockKey = `a${attempt}s${id}`
+      const segDur = seg.original.end - seg.original.start
 
-    if (range !== null) {
-      searchFrom = range.nextSearchFrom
-      return {
-        id,
-        start: range.start,
-        end: range.end,
-        jaText,
-        sourceSegmentIds,
-        alignConfidence: 'exact' as const,
-        attempt,
-        blockKey,
+      if (range !== null) {
+        searchFrom = range.nextSearchFrom
+        blocks.push({
+          id,
+          start: range.start,
+          end: range.end,
+          jaText,
+          sourceSegmentIds: [seg.original.id],
+          alignConfidence: 'exact',
+          attempt,
+          blockKey,
+        })
+      } else {
+        // fallback: このセグメントの時間窓内で均等配分
+        blocks.push({
+          id,
+          start: seg.original.start + segDur * (j / sentences.length),
+          end: seg.original.start + segDur * ((j + 1) / sentences.length),
+          jaText,
+          sourceSegmentIds: [seg.original.id],
+          alignConfidence: 'proportional',
+          attempt,
+          blockKey,
+        })
       }
     }
+  }
 
-    // フォールバック: sourceSegmentIds からセグメント時間範囲を取得して比例配分
-    // → lastKnownEnd の連鎖を廃止し、動画末尾へのパイルアップを防ぐ
-    const segRanges = sourceSegmentIds
-      .map(sid => segTimeMap.get(sid))
-      .filter((r): r is { start: number; end: number } => r != null)
-    const fallbackStart = segRanges.length > 0
-      ? Math.min(...segRanges.map(r => r.start))
-      : (i / Math.max(1, sentences.length)) * totalDuration
-    const fallbackEnd = segRanges.length > 0
-      ? Math.max(...segRanges.map(r => r.end))
-      : ((i + 1) / Math.max(1, sentences.length)) * totalDuration
-
-    return {
-      id,
-      start: fallbackStart,
-      end: Math.max(fallbackStart, fallbackEnd),
-      jaText,
-      sourceSegmentIds,
-      alignConfidence: 'proportional' as const,
-      attempt,
-      blockKey,
-    }
-  })
+  return blocks
 }
 
 /**
@@ -217,19 +209,13 @@ export const splitJaNode: NodeContract<SplitJaInput, readonly JapaneseSentenceBl
     const { correctedSegments, splitHints, attempt } = input
     ctx.onProgress('splitJa: 日本語文分割中...')
 
-    const allWords = flattenWords(correctedSegments)
-    const fullText = correctedSegments.map(s => s.correctedText).join('')
-    const totalDuration =
-      correctedSegments.length > 0
-        ? correctedSegments[correctedSegments.length - 1].original.end
-        : 0
-
-    const sentences = fullText.split(SENTENCE_END_RE).map(s => s.trim()).filter(Boolean)
-    const sourceSegmentIdsPerSentence = computeSourceSegmentIds(sentences, fullText, correctedSegments)
-    const primaryBlocks = assignTimestamps(sentences, sourceSegmentIdsPerSentence, correctedSegments, allWords, totalDuration, attempt)
+    const primaryBlocks = buildPrimaryBlocks(correctedSegments, attempt)
 
     if (splitHints.length === 0) return primaryBlocks
 
+    // refineWithHints は時間窓フィルタで自動的に該当セグメントの単語のみ使うため
+    // 全単語のフラットリストを渡す（内部で block.start/end に絞り込まれる）
+    const allWords = flattenWords(correctedSegments)
     return refineWithHints(primaryBlocks, splitHints, allWords, attempt)
   },
 }
