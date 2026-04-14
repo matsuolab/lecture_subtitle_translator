@@ -1,4 +1,6 @@
 import { useRef, useState, useCallback } from 'react'
+import { isTauri } from '@tauri-apps/api/core'
+import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog'
 import { Upload, Download, Trash2 } from 'lucide-react'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
@@ -189,8 +191,11 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
           {isImporting ? '用語集を取り込み中です...' : 'CSV・XLSXをD&Dでも読み込めます'}
         </span>
         <button
-          onClick={() => {
-            if (confirm(`用語辞書を全件削除しますか？（${glossary.length} 件）`)) clearGlossary()
+          onClick={async () => {
+            const ok = isTauri()
+              ? await confirmDialog(`用語辞書を全件削除しますか？（${glossary.length} 件）`, { title: '確認', kind: 'warning' })
+              : window.confirm(`用語辞書を全件削除しますか？（${glossary.length} 件）`)
+            if (ok) clearGlossary()
           }}
           disabled={glossary.length === 0}
           title="全件削除"

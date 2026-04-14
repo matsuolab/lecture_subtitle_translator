@@ -30,7 +30,7 @@ import { createTauriFFmpegProvider } from '@/lib/pipeline/providers/ffmpegProvid
 import { createDockerWhisperXProvider, createHTTPWhisperXProvider } from '@/lib/pipeline/providers/whisperxProvider'
 import { extractAudioNode } from '@/lib/pipeline/nodes/extractAudio'
 import { transcribeNode } from '@/lib/pipeline/nodes/transcribe'
-import type { PipelineSubtitleBlock } from '@/lib/pipeline/types'
+import type { PipelineSubtitleBlock, TranscriptSegment } from '@/lib/pipeline/types'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineReviewItem, PipelineRunMetrics, PipelineRunResult, PipelineRunLog } from '@/types/pipeline'
@@ -667,6 +667,105 @@ export default function App() {
     }
     void runDropPipeline(videoSource.name, videoSource.path)
   }, [videoSource, runDropPipeline])
+
+  const handleRerunFromTranscript = useCallback(async (run: PipelineRunResult) => {
+    const transcriptSegments = run.log?.transcribeOutput
+    if (!transcriptSegments || transcriptSegments.length === 0) return
+
+    const sourceName = run.sourceName ?? 'unknown'
+    const startedAt = Date.now()
+    setActiveTab('subtitles')
+
+    const toUserMessage = (err: unknown, step: string): string => {
+      const rawFull = err instanceof Error ? err.message :
+        typeof err === 'string' ? err :
+        (() => { try { return JSON.stringify(err) } catch { return String(err) } })()
+      return `[${step}] ${rawFull}`
+    }
+
+    let currentStep = 'correctJa'
+    try {
+      const pipelineConfig = buildPipelineConfig(adminSettings)
+      const embedProvider = createOpenAIEmbedProvider(
+        pipelineConfig.openaiApiKey,
+        pipelineConfig.embeddingModel,
+      )
+      const ctx = {
+        config: pipelineConfig,
+        onProgress: (msg: string) => {
+          const step = (
+            msg.startsWith('correctJa') ? 'correct' :
+            msg.startsWith('splitJa') || msg.startsWith('translateEn') || msg.startsWith('splitEn') ? 'translate' :
+            'subtitle'
+          ) as PipelineRunResult['step']
+          setPipelineRun({ status: 'running', step, message: msg, sourceName, startedAt })
+        },
+        reportUsage: (_: { tokensIn: number; tokensOut: number; model: string; provider: string }) => {},
+      }
+
+      setPipelineRun({ status: 'running', step: 'correct', message: '書き起こし再利用: 日本語補正中...', sourceName, startedAt })
+
+      const pipelineResult = await runPipeline(transcriptSegments as readonly TranscriptSegment[], ctx, {
+        embedProvider,
+        sourceFile: sourceName,
+        startedAt,
+      })
+
+      const generated = pipelineBlocksToSubtitleBlocks(pipelineResult.result.subtitleBlocks)
+      const pipelineLog = pipelineResult.log
+
+      const pipelineTraces: PipelineNodeTrace[] = pipelineResult.runState.nodeTraces.map((t: import('@/lib/pipeline/nodeContract').NodeTrace) => ({
+        nodeId: t.nodeId,
+        status: t.status,
+        attempt: t.attempt,
+        durationMs: t.durationMs,
+        provider: t.provider,
+        model: t.model,
+        summary: t.error ?? `${t.nodeId} 完了`,
+      }))
+      const audit = buildAuditReport(generated, pipelineTraces)
+
+      reset(generated)
+
+      const finishedAt = Date.now()
+      const metrics = calcPipelineMetrics(generated, startedAt, finishedAt)
+      const result: PipelineRunResult = {
+        status: 'success',
+        step: 'done',
+        message: `再実行完了（書き起こし再利用・${generated.length}ブロック）`,
+        sourceName,
+        startedAt,
+        finishedAt,
+        metrics,
+        audit,
+        log: pipelineLog,
+      }
+      setPipelineRun(result)
+      appendPipelineHistory(result)
+      if (pipelineLog) {
+        savePipelineLog(pipelineLog, adminSettings.logRetentionCount)
+      }
+    } catch (err) {
+      const userMessage = toUserMessage(err, currentStep)
+      const result: PipelineRunResult = {
+        status: 'error',
+        step: 'done',
+        message: userMessage,
+        sourceName,
+        startedAt,
+        finishedAt: Date.now(),
+        audit: {
+          mustReviewCount: 1,
+          shouldReviewCount: 0,
+          autoPassCount: 0,
+          reviewItems: [{ id: 'pipeline-error', nodeId: currentStep, reason: userMessage, priority: 'must_review', score: 0 }],
+          nodeTraces: [],
+        },
+      }
+      setPipelineRun(result)
+      appendPipelineHistory(result)
+    }
+  }, [adminSettings, appendPipelineHistory, buildAuditReport, calcPipelineMetrics, pipelineBlocksToSubtitleBlocks, reset])
 
   const handleRightDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -1495,6 +1594,7 @@ export default function App() {
                 pipelineRun={pipelineRun}
                 videoSourceName={videoSource?.name ?? null}
                 onRunPipeline={handleRunPipelineFromReport}
+                onRerunFromTranscript={handleRerunFromTranscript}
               />
             )}
             {!isResizing && activeTab === 'settings' && (

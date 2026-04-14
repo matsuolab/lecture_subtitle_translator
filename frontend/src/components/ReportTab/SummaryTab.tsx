@@ -5,6 +5,7 @@ import { useLocale } from '@/context/LocaleContext'
 interface SummaryTabProps {
   runs: PipelineRunResult[]
   pipelineRun: PipelineRunResult
+  onRerunFromTranscript?: (run: PipelineRunResult) => void
 }
 
 function formatFinishedAt(ts?: number): string {
@@ -18,7 +19,7 @@ function priorityBadge(priority: PipelineReviewItem['priority']): string {
   return 'AUTO'
 }
 
-export function SummaryTab({ runs, pipelineRun }: SummaryTabProps) {
+export function SummaryTab({ runs, pipelineRun, onRerunFromTranscript }: SummaryTabProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
 
@@ -170,6 +171,7 @@ export function SummaryTab({ runs, pipelineRun }: SummaryTabProps) {
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColCost}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColDuration}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColQuality}</th>
+                  {onRerunFromTranscript && <th style={{ textAlign: 'left', padding: '6px 4px' }}>再実行</th>}
                 </tr>
               </thead>
               <tbody>
@@ -189,6 +191,30 @@ export function SummaryTab({ runs, pipelineRun }: SummaryTabProps) {
                         ? `CPS ${(run.metrics.quality.cpsViolationRate * 100).toFixed(1)}% / 42字 ${(run.metrics.quality.overLengthRate * 100).toFixed(1)}%`
                         : '-'}
                     </td>
+                    {onRerunFromTranscript && (
+                      <td style={{ padding: '6px 4px' }}>
+                        {run.log?.transcribeOutput && run.log.transcribeOutput.length > 0 ? (
+                          <button
+                            onClick={() => onRerunFromTranscript(run)}
+                            title="WhisperXをスキップしてcorrectJa以降を再実行"
+                            style={{
+                              fontSize: 10,
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              border: `1px solid ${theme.panelBorder}`,
+                              background: theme.panelBg,
+                              color: theme.textSecondary,
+                              cursor: 'pointer',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            ▶ 書き起こし再利用
+                          </button>
+                        ) : (
+                          <span style={{ color: theme.textDisabled, fontSize: 10 }}>-</span>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
