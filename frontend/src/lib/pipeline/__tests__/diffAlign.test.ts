@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { findBestMatchingBlock, findTimeRange, findTimeRangeSequential } from '../utils/diffAlign'
+import { findBestMatchingBlock, findTimeRange, findTimeRangeSequential, getOpcodes, buildCharTS, alignTimestamps } from '../utils/diffAlign'
 
 describe('findBestMatchingBlock', () => {
   it('完全一致するサブ列を見つける', () => {
@@ -106,5 +106,95 @@ describe('findTimeRangeSequential', () => {
     const result = findTimeRangeSequential('松尾研', jaWords, 0)
     expect(result).not.toBeNull()
     expect(result!.nextSearchFrom).toBeGreaterThan(0)
+  })
+})
+
+describe('getOpcodes', () => {
+  it('同一文字列は equal のみ', () => {
+    const ops = getOpcodes('abc', 'abc')
+    expect(ops).toEqual([['equal', 0, 3, 0, 3]])
+  })
+
+  it('delete: 文字削除', () => {
+    const ops = getOpcodes('abc', 'ac')
+    // 'b' が削除される
+    const tags = ops.map(o => o[0])
+    expect(tags).toContain('delete')
+  })
+
+  it('insert: 文字挿入', () => {
+    const ops = getOpcodes('ac', 'abc')
+    const tags = ops.map(o => o[0])
+    expect(tags).toContain('insert')
+  })
+
+  it('replace: 誤字修正（ラーディング→ラーニング）', () => {
+    const a = 'ディープラーディング'
+    const b = 'ディープラーニング'
+    const ops = getOpcodes(a, b)
+    // equal部分とreplace/deleteが混在
+    const tags = ops.map(o => o[0])
+    expect(tags).toContain('equal') // 'ディープラー' は共通
+    // 変更がある
+    expect(tags.some(t => t !== 'equal')).toBe(true)
+  })
+})
+
+describe('buildCharTS', () => {
+  it('各単語の時間を文字数で均等分配する', () => {
+    const words = [
+      { word: 'ディープ', start: 0.0, end: 0.4 },
+      { word: 'ラーニング', start: 0.4, end: 1.0 },
+    ]
+    const chars = buildCharTS(words)
+    expect(chars.length).toBe(9) // 4 + 5
+    expect(chars[0].char).toBe('デ')
+    expect(chars[0].start).toBeCloseTo(0.0)
+    expect(chars[4].char).toBe('ラ')
+    expect(chars[4].start).toBeCloseTo(0.4)
+  })
+})
+
+describe('alignTimestamps', () => {
+  it('equal: TSをそのまま引き継ぐ', () => {
+    const original = [
+      { char: 'あ', start: 0.0, end: 0.1 },
+      { char: 'い', start: 0.1, end: 0.2 },
+    ]
+    const aligned = alignTimestamps(original, 'あい')
+    expect(aligned.length).toBe(2)
+    expect(aligned[0].start).toBeCloseTo(0.0)
+    expect(aligned[1].start).toBeCloseTo(0.1)
+  })
+
+  it('replace: 誤字修正後にTSが引き継がれる（ラーディング→ラーニング）', () => {
+    // ASR生: "ディープラーディング" → 各文字に均等TS
+    const words = [
+      { word: 'ディープラーディング', start: 1.0, end: 2.0 },
+    ]
+    const rawChars = buildCharTS(words)
+    // 補正後: "ディープラーニング"
+    const aligned = alignTimestamps(rawChars, 'ディープラーニング')
+
+    // 補正後テキストと同じ長さになる
+    expect(aligned.length).toBe('ディープラーニング'.length)
+    // 最初の文字 'デ' のTSは元の start に近い
+    expect(aligned[0].start).toBeCloseTo(1.0, 1)
+    // 最後の文字 'グ' のTSは元の end に近い
+    const last = aligned[aligned.length - 1]
+    expect(last.end).toBeGreaterThan(1.0)
+    expect(last.end).toBeLessThanOrEqual(2.0 + 0.01)
+  })
+
+  it('insert: 句読点追加は直前のTSを使う', () => {
+    const original = [
+      { char: 'あ', start: 0.0, end: 0.5 },
+    ]
+    const aligned = alignTimestamps(original, 'あ。')
+    expect(aligned.length).toBe(2)
+    expect(aligned[1].char).toBe('。')
+    // 句読点は直前文字のendを使う（duration=0）
+    expect(aligned[1].start).toBeCloseTo(0.5)
+    expect(aligned[1].end).toBeCloseTo(0.5)
   })
 })

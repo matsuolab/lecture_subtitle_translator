@@ -13,7 +13,7 @@ import type {
   JapaneseSentenceBlock,
   SplitHint,
 } from '../types'
-import { findTimeRangeSequential } from '../utils/diffAlign'
+import { findTimeRangeSequential, buildCharTS, alignTimestamps } from '../utils/diffAlign'
 import type { WordTimestampFlat } from '../utils/diffAlign'
 
 export interface SplitJaInput {
@@ -81,26 +81,38 @@ function buildPrimaryBlocks(
       continue
     }
 
-    // 複数文 → このセグメントの word TS のみで局所アライメント
+    // 複数文 → このセグメントの word TS を文字単位に展開し、
+    // ASR生テキスト ↔ correctedText の diff で各文字にTSを付け直す（Python PoC方式）
     const words = segmentWords(seg)
-    let searchFrom = 0
+    const rawChars = buildCharTS(words)
+    // rawChars は words[].word を結合したテキストの各文字に対応
+    // correctedText との diff を取り、補正後の各文字にTSを付け直す
+    const aligned = alignTimestamps(rawChars, seg.correctedText)
 
-    for (let j = 0; j < sentences.length; j++) {
-      const jaText = sentences[j]
-      const range = words.length > 0
-        ? findTimeRangeSequential(jaText, words, searchFrom)
-        : null
+    // correctedText を句点で分割（trim なし → pos で位置追跡）
+    const rawSentences = seg.correctedText.split(SENTENCE_END_RE)
+    const segDur = seg.original.end - seg.original.start
+    let pos = 0
+    let validSentIdx = 0
+    const validSentCount = rawSentences.filter(s => s.trim()).length
+
+    for (const rawSent of rawSentences) {
+      const jaText = rawSent.trim()
+      if (!jaText) { pos += rawSent.length; continue }
+
+      // aligned[pos .. pos+rawSent.length) がこの文の文字TS
+      const sentChars = aligned.slice(pos, pos + rawSent.length)
+      // 空白以外の文字のTSを取得
+      const spokenChars = sentChars.filter(c => c.char.trim() !== '')
 
       const id = idCounter++
       const blockKey = `a${attempt}s${id}`
-      const segDur = seg.original.end - seg.original.start
 
-      if (range !== null) {
-        searchFrom = range.nextSearchFrom
+      if (spokenChars.length > 0) {
         blocks.push({
           id,
-          start: range.start,
-          end: range.end,
+          start: spokenChars[0].start,
+          end: spokenChars[spokenChars.length - 1].end,
           jaText,
           sourceSegmentIds: [seg.original.id],
           alignConfidence: 'exact',
@@ -111,8 +123,8 @@ function buildPrimaryBlocks(
         // fallback: このセグメントの時間窓内で均等配分
         blocks.push({
           id,
-          start: seg.original.start + segDur * (j / sentences.length),
-          end: seg.original.start + segDur * ((j + 1) / sentences.length),
+          start: seg.original.start + segDur * (validSentIdx / validSentCount),
+          end: seg.original.start + segDur * ((validSentIdx + 1) / validSentCount),
           jaText,
           sourceSegmentIds: [seg.original.id],
           alignConfidence: 'proportional',
@@ -120,6 +132,9 @@ function buildPrimaryBlocks(
           blockKey,
         })
       }
+
+      pos += rawSent.length
+      validSentIdx++
     }
   }
 
