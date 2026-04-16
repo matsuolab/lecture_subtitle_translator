@@ -4,6 +4,7 @@
  */
 
 import type { PipelineConfig } from './config'
+import type { GlossaryItem } from './types'
 
 // ---------------------------------------------------------------------------
 // ノード実行コンテキスト
@@ -18,6 +19,7 @@ export interface LLMUsage {
 
 export interface NodeContext {
   readonly config: PipelineConfig
+  readonly glossary: readonly GlossaryItem[]
   readonly onProgress: (label: string) => void
   reportUsage(usage: LLMUsage): void
 }

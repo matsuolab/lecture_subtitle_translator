@@ -16,7 +16,7 @@ import type { EmbedProvider } from '../providers/openaiEmbedProvider'
 
 const BATCH_SIZE = 20
 
-const SYSTEM_PROMPT = `You are correcting Japanese lecture transcription errors produced by WhisperX ASR.
+const BASE_SYSTEM_PROMPT = `You are correcting Japanese lecture transcription errors produced by WhisperX ASR.
 
 Rules:
 - Fix obvious ASR errors (mishearing, homophones, missing punctuation)
@@ -26,6 +26,14 @@ Rules:
 - Do NOT translate — output must be Japanese
 - Output format: [N] <corrected text> (one per line, same numbering as input)
 - If a segment is already correct, output it unchanged`
+
+function buildSystemPrompt(glossaryItems: readonly import('../types').GlossaryItem[]): string {
+  if (glossaryItems.length === 0) return BASE_SYSTEM_PROMPT
+  const termLines = glossaryItems
+    .map(g => `  ${g.en}（カタカナ：${g.ja}）`)
+    .join('\n')
+  return BASE_SYSTEM_PROMPT + `\n\nDomain term normalization (use exact JA spelling):\n${termLines}`
+}
 
 export interface CorrectJaInput {
   readonly segments: readonly TranscriptSegment[]
@@ -61,7 +69,7 @@ export const correctJaNode: NodeContract<CorrectJaInput, readonly CorrectedSegme
       const response = await client.chat.completions.create({
         model: correctionModel,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: buildSystemPrompt(ctx.glossary) },
           { role: 'user', content: userPrompt },
         ],
       })

@@ -444,12 +444,16 @@ export default function App() {
         )
         const ctx = {
           config: pipelineConfig,
+          glossary: glossary
+            .filter(g => g.confirmed)
+            .map(g => ({ ja: g.ja, en: g.en, ...(g.abbr ? { abbr: g.abbr } : {}) })),
           onProgress: (msg: string) => {
             const step = (
               msg.startsWith('extractAudio') ? 'transcribe' :
               msg.startsWith('transcribe') ? 'transcribe' :
               msg.startsWith('correctJa') ? 'correct' :
-              msg.startsWith('splitJa') || msg.startsWith('translateEn') || msg.startsWith('splitEn') ? 'translate' :
+              msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('splitEn') ? 'translate' :
+              msg.startsWith('finalQA') ? 'subtitle' :
               'subtitle'
             ) as PipelineRunResult['step']
             setPipelineRun({ status: 'running', step, message: msg, sourceName, startedAt })
@@ -692,10 +696,14 @@ export default function App() {
       )
       const ctx = {
         config: pipelineConfig,
+        glossary: glossary
+          .filter(g => g.confirmed)
+          .map(g => ({ ja: g.ja, en: g.en, ...(g.abbr ? { abbr: g.abbr } : {}) })),
         onProgress: (msg: string) => {
           const step = (
             msg.startsWith('correctJa') ? 'correct' :
-            msg.startsWith('splitJa') || msg.startsWith('translateEn') || msg.startsWith('splitEn') ? 'translate' :
+            msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('splitEn') ? 'translate' :
+            msg.startsWith('finalQA') ? 'subtitle' :
             'subtitle'
           ) as PipelineRunResult['step']
           setPipelineRun({ status: 'running', step, message: msg, sourceName, startedAt })

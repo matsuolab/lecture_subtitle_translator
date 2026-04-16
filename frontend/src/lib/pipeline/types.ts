@@ -1,11 +1,42 @@
 /**
  * パイプライン内部データ構造。
  * Python PoC の models/segment.py に対応。
+ * Python PoC の models/segment.py に対応。
  * 全フィールドは readonly（immutable パターン）。
  *
  * ⚠️ 既存 UI の SubtitleBlock（types/subtitle.ts）とは別物。
  * runner.ts の出力時に変換する。
  */
+
+// ---------------------------------------------------------------------------
+// 用語辞書（パイプライン層の軽量型 — React Context に依存しない）
+// ---------------------------------------------------------------------------
+
+export interface GlossaryItem {
+  readonly ja: string
+  readonly en: string
+  readonly abbr?: string
+}
+
+// ---------------------------------------------------------------------------
+// QA 違反種別・優先度（finalQA ノードが付与）
+// ---------------------------------------------------------------------------
+
+export type QaViolationType =
+  | 'cps'              // CPS > maxCps
+  | 'lineLength'       // 1行 > maxChars
+  | 'durationShort'    // duration < MIN_DURATION
+  | 'durationLong'     // duration > MAX_DURATION
+  | 'timestampUncertain'  // alignConfidence = proportional/merged
+  | 'overlap'          // 前ブロックとの重複（自動修正済みのものもflagで残す）
+
+export interface QaViolation {
+  readonly type: QaViolationType
+  readonly detail: string  // 人間向け説明（例: "CPS 23.4 > 17.0"）
+}
+
+/** P1🔴=必須修正 P2🟡=修正推奨 P3🔵=確認推奨 null=問題なし */
+export type ViolationPriority = 'p1' | 'p2' | 'p3' | null
 
 // ---------------------------------------------------------------------------
 // Step 2: 書き起こし出力
@@ -56,7 +87,7 @@ export interface PipelineSubtitleBlock {
   readonly id: number
   readonly start: number          // 秒
   readonly end: number            // 秒
-  readonly text: string           // 英語テキスト
+  readonly text: string           // 英語テキスト（\n で改行を含む場合あり）
   readonly jaText: string         // 日本語元テキスト（UI の source フィールド用）
   readonly charCount: number
   readonly cps: number            // Characters Per Second
@@ -66,13 +97,16 @@ export interface PipelineSubtitleBlock {
   readonly attempt: number
   readonly sourceSegmentIds: readonly number[]
   readonly blockKey: string       // ユニークキー "a{attempt}s{id}"
+  readonly alignConfidence: AlignConfidence  // TS精度（exact/proportional/merged）
+  readonly qaViolations: readonly QaViolation[]   // finalQA が付与
+  readonly violationPriority: ViolationPriority   // finalQA が付与
 }
 
 // ---------------------------------------------------------------------------
 // #32: 日本語サイドアライメント — 中間型
 // ---------------------------------------------------------------------------
 
-export type AlignConfidence = 'exact' | 'proportional'
+export type AlignConfidence = 'exact' | 'proportional' | 'merged'
 
 /**
  * splitJa ノードの出力。
@@ -105,6 +139,7 @@ export interface EnglishBlock {
   readonly attempt: number
   readonly sourceSegmentIds: readonly number[]
   readonly blockKey: string
+  readonly alignConfidence: AlignConfidence  // JapaneseSentenceBlock から継承
 }
 
 // ---------------------------------------------------------------------------

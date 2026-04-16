@@ -2,21 +2,35 @@
  * translateEn ノード。
  * 日本語文ブロックを OpenAI SDK でバッチ英訳する。
  * タイムスタンプは JapaneseSentenceBlock からそのまま継承する。
+ * 用語辞書（GlossaryItem[]）が渡された場合、EN訳語を一貫させるルールをプロンプトに付加する。
  */
 
 import OpenAI from 'openai'
 import type { NodeContract, NodeContext } from '../nodeContract'
-import type { JapaneseSentenceBlock, EnglishBlock } from '../types'
+import type { JapaneseSentenceBlock, EnglishBlock, GlossaryItem } from '../types'
 import { formatNumberedInput, mergeWithFallback } from '../utils/numberedParse'
 
-const SYSTEM_PROMPT = `You are a professional subtitle translator for university lectures.
+const BASE_SYSTEM_PROMPT = `You are a professional subtitle translator for university lectures.
 Translate each numbered Japanese sentence to English.
+
 Rules:
 - Output format: [N] <translation> (one per line, same numbering as input)
+- SUBTITLE LENGTH (critical): Each translation must fit within 2 lines, max 42 characters per line
+  - If the content cannot fit in 42 chars, compress: omit filler phrases, use shorter synonyms
+  - A single long sentence is WORSE than a slightly compressed short one
 - Keep translations concise and natural (subtitle style)
-- Preserve technical and academic terms
+- Preserve technical and academic terms exactly
 - Use active voice where possible
-- Each line must be self-contained`
+- Each subtitle must be self-contained (no dangling phrases)
+- Do NOT split mid-clause; end at a natural phrase boundary`
+
+function buildSystemPrompt(glossaryItems: readonly GlossaryItem[]): string {
+  if (glossaryItems.length === 0) return BASE_SYSTEM_PROMPT
+  const termLines = glossaryItems
+    .map(g => `  ${g.ja} → ${g.en}${g.abbr ? ` (abbr: ${g.abbr})` : ''}`)
+    .join('\n')
+  return BASE_SYSTEM_PROMPT + `\n\nDomain term translations (use these exact English spellings):\n${termLines}`
+}
 
 export const translateEnNode: NodeContract<
   readonly JapaneseSentenceBlock[],
@@ -44,7 +58,7 @@ export const translateEnNode: NodeContract<
     const response = await client.chat.completions.create({
       model: translationModel,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt(ctx.glossary) },
         { role: 'user', content: userPrompt },
       ],
     })
@@ -67,6 +81,7 @@ export const translateEnNode: NodeContract<
       enText: translated.get(block.id) ?? block.jaText,
       translationDistance: 0,   // TODO: cosine similarity (Phase 3)
       translationFlagged: false,
+      alignConfidence: block.alignConfidence,
       attempt: block.attempt,
       sourceSegmentIds: block.sourceSegmentIds,
       blockKey: block.blockKey,

@@ -226,11 +226,15 @@ export const splitJaNode: NodeContract<SplitJaInput, readonly JapaneseSentenceBl
 
     const primaryBlocks = buildPrimaryBlocks(correctedSegments, attempt)
 
-    if (splitHints.length === 0) return primaryBlocks
+    // start 順に並べてから返す（diffAlign がタイムスタンプ逆転を起こす場合の安全策）
+    const sortByStart = (blocks: readonly JapaneseSentenceBlock[]) =>
+      [...blocks].sort((a, b) => a.start - b.start)
+
+    if (splitHints.length === 0) return sortByStart(primaryBlocks)
 
     // refineWithHints は時間窓フィルタで自動的に該当セグメントの単語のみ使うため
     // 全単語のフラットリストを渡す（内部で block.start/end に絞り込まれる）
     const allWords = flattenWords(correctedSegments)
-    return refineWithHints(primaryBlocks, splitHints, allWords, attempt)
+    return sortByStart(refineWithHints(primaryBlocks, splitHints, allWords, attempt))
   },
 }
