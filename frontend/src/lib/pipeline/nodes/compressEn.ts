@@ -20,6 +20,13 @@ import type { EmbedProvider } from '../providers/openaiEmbedProvider'
 const MAX_COMPRESS_ATTEMPTS = 5
 
 /**
+ * CPS がこれ未満のブロックは圧縮をスキップする。
+ * 既にテキストが短すぎる（講義感が失われる）ブロックをさらに短縮しないための安全弁。
+ * 例: 20秒のブロックで既に CPS=4.0 → 圧縮すると CPS=3 未満になる可能性
+ */
+const MIN_CPS_TO_COMPRESS = 5.0
+
+/**
  * コサイン距離がこれを超えたら意味喪失とみなす。
  * PoC: 平均距離 0.05〜0.12 程度、0.15 を閾値に設定。
  */
@@ -96,9 +103,22 @@ export interface CompressEnInput {
   readonly embedProvider?: EmbedProvider
 }
 
+export interface CompressEnStats {
+  readonly total: number
+  readonly violating: number      // 行長超過（処理候補）
+  readonly skippedLowCps: number  // CPS低すぎでスキップ
+  readonly compressed: number     // 実際に圧縮成功
+  readonly flagged: number        // translationFlagged になった数
+}
+
+export interface CompressEnOutput {
+  readonly blocks: readonly EnglishBlock[]
+  readonly stats: CompressEnStats
+}
+
 export const compressEnNode: NodeContract<
   CompressEnInput,
-  readonly EnglishBlock[]
+  CompressEnOutput
 > = {
   id: 'compressEn',
   schemaVersion: '1.0',
@@ -106,26 +126,45 @@ export const compressEnNode: NodeContract<
   async run(
     input: CompressEnInput,
     ctx: NodeContext,
-  ): Promise<readonly EnglishBlock[]> {
+  ): Promise<CompressEnOutput> {
     const { blocks, embedProvider } = input
     const { maxChars } = ctx.config.subtitleConstraints
 
-    const violatingIndices = blocks
+    // 行長超過ブロックを特定し、低CPS スキップを分けてカウント
+    const allViolatingIndices = blocks
       .map((b, i) => i)
       .filter(i => blocks[i].enText.split('\n').some(l => l.length > maxChars))
 
+    const violatingIndices = allViolatingIndices.filter(i => {
+      const b = blocks[i]
+      const dur = b.end - b.start
+      if (dur > 0) {
+        const charCount = b.enText.split('\n').reduce((s, l) => s + l.length, 0)
+        const cps = charCount / dur
+        if (cps < MIN_CPS_TO_COMPRESS) return false
+      }
+      return true
+    })
+
+    const skippedLowCps = allViolatingIndices.length - violatingIndices.length
+
     if (violatingIndices.length === 0) {
-      ctx.onProgress('compressEn: 行長超過なし、スキップ')
-      return blocks
+      ctx.onProgress(`compressEn: 行長超過なし / ${skippedLowCps > 0 ? `低CPS スキップ ${skippedLowCps}件` : 'スキップ'}`)
+      return {
+        blocks,
+        stats: { total: blocks.length, violating: allViolatingIndices.length, skippedLowCps, compressed: 0, flagged: 0 },
+      }
     }
 
-    ctx.onProgress(`compressEn: ${violatingIndices.length} ブロック短縮中...`)
+    ctx.onProgress(`compressEn: ${violatingIndices.length} ブロック短縮中...${skippedLowCps > 0 ? `（低CPS スキップ: ${skippedLowCps}件）` : ''}`)
 
     const { openaiApiKey, translationModel } = ctx.config
     const client = new OpenAI({ apiKey: openaiApiKey, dangerouslyAllowBrowser: true })
 
     // mutable コピー（index アクセスで更新）
     const result: EnglishBlock[] = [...blocks]
+    let compressedCount = 0
+    let flaggedCount = 0
 
     for (const idx of violatingIndices) {
       const block = blocks[idx]
@@ -193,6 +232,9 @@ export const compressEnNode: NodeContract<
         }
       }
 
+      if (succeeded) compressedCount++
+      if (translationFlagged) flaggedCount++
+
       result[idx] = {
         ...block,
         enText: bestText,
@@ -200,6 +242,15 @@ export const compressEnNode: NodeContract<
       }
     }
 
-    return result
+    return {
+      blocks: result,
+      stats: {
+        total: blocks.length,
+        violating: allViolatingIndices.length,
+        skippedLowCps,
+        compressed: compressedCount,
+        flagged: flaggedCount,
+      },
+    }
   },
 }

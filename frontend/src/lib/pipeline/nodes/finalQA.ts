@@ -23,6 +23,9 @@ const MAX_DURATION = 7.0            // 秒
 const CPS_P1_THRESHOLD = 25.0   // これ超 → P1（実質読めない）
 const CPS_P2_THRESHOLD = 17.0   // これ超 → P2（maxCps 超過）
 
+// CPS 下限（低すぎる = テキストが短すぎて字幕が長く出続ける）
+const CPS_TOO_LOW_THRESHOLD = 3.0   // これ未満 → P3（字幕が長く表示され続ける）
+
 // 行長 閾値（二段階）
 const LINE_P1_THRESHOLD = 55    // これ超 → P1（画面外に出る可能性）
 
@@ -34,11 +37,16 @@ function computeViolations(
   const violations: QaViolation[] = []
   const dur = block.end - block.start
 
-  // CPS
+  // CPS（高すぎ）
   if (block.cps > CPS_P1_THRESHOLD) {
     violations.push({ type: 'cps', detail: `CPS ${block.cps.toFixed(1)} > ${CPS_P1_THRESHOLD}（P1）` })
   } else if (block.cps > maxCps) {
     violations.push({ type: 'cps', detail: `CPS ${block.cps.toFixed(1)} > ${maxCps}（P2）` })
+  }
+
+  // CPS（低すぎ = テキストが短く字幕が長く表示されすぎる）
+  if (block.cps > 0 && block.cps < CPS_TOO_LOW_THRESHOLD && dur > 5.0) {
+    violations.push({ type: 'cpsTooLow', detail: `CPS ${block.cps.toFixed(1)} < ${CPS_TOO_LOW_THRESHOLD}（表示時間 ${dur.toFixed(1)}s、テキスト不足）` })
   }
 
   // 行長
@@ -90,6 +98,7 @@ function computePriority(violations: readonly QaViolation[], block: PipelineSubt
   )
   if (hasP2) return 'p2'
 
+  // cpsTooLow は P3（情報提供。人間が判断）
   return 'p3'
 }
 

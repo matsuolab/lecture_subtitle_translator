@@ -70,10 +70,21 @@ export interface CpsAttemptLog {
   readonly splitHints: readonly SplitHint[]
   readonly splitJaOutput: readonly JapaneseSentenceBlock[]
   readonly translateEnOutput: readonly EnglishBlock[]
+  readonly compressEnOutput: readonly EnglishBlock[]          // compressEn 後の状態
+  readonly compressEnStats: CompressEnStats                   // compressEn 統計
   readonly splitEnOutput: readonly PipelineSubtitleBlock[]
   readonly violations: readonly CpsViolation[]
   readonly result: 'pass' | 'retry' | 'max_attempts_reached'
   readonly durationMs: number
+}
+
+/** compressEn ノードの統計 */
+export interface CompressEnStats {
+  readonly total: number          // 全ブロック数
+  readonly violating: number      // 行長超過（処理対象）
+  readonly skippedLowCps: number  // CPS低すぎでスキップ
+  readonly compressed: number     // 実際に圧縮成功
+  readonly flagged: number        // translationFlagged になった数
 }
 
 /**

@@ -29,7 +29,7 @@ import { splitEnNode } from './nodes/splitEn'
 import { finalQaNode } from './nodes/finalQA'
 import { exportSrtNode } from './nodes/exportSrt'
 import type { EmbedProvider } from './providers/openaiEmbedProvider'
-import type { CpsAttemptLog, PipelineRunLog } from '../../types/pipeline'
+import type { CpsAttemptLog, CompressEnStats, PipelineRunLog } from '../../types/pipeline'
 
 const MAX_SPLIT_ATTEMPTS = 3
 
@@ -339,7 +339,7 @@ async function runTranslateLoop(
 
     // compressEn（行長超過ブロックを LLM フィードバックループで短縮）
     const compressStart = Date.now()
-    const compressedBlocks: readonly EnglishBlock[] = await compressEnNode.run(
+    const { blocks: compressedBlocks, stats: compressStats } = await compressEnNode.run(
       { blocks: formattedBlocks, embedProvider },
       ctx,
     )
@@ -352,6 +352,7 @@ async function runTranslateLoop(
       model: ctx.config.translationModel,
       tokensIn: 0,
       tokensOut: 0,
+      summary: `圧縮: ${compressStats.compressed}/${compressStats.violating}件 スキップ(低CPS): ${compressStats.skippedLowCps}件 フラグ: ${compressStats.flagged}件`,
     }, 0)
 
     // splitEn
@@ -401,6 +402,8 @@ async function runTranslateLoop(
       splitHints,
       splitJaOutput: jaSentences,
       translateEnOutput: enBlocks,
+      compressEnOutput: compressedBlocks,
+      compressEnStats: compressStats,
       splitEnOutput: blocks,
       violations,
       result: attemptResult,

@@ -1,17 +1,68 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronRight } from 'lucide-react'
-import type { PipelineRunLog, CpsAttemptLog } from '@/types/pipeline'
+import { ChevronDown, ChevronRight, CheckCircle, AlertCircle, AlertTriangle } from 'lucide-react'
+import type { PipelineRunLog, CpsAttemptLog, PipelineNodeTrace } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 
 interface ExecutionLogTabProps {
   log: PipelineRunLog
 }
 
-type Filter = 'all' | 'error' | 'cps' | 'correct' | 'translate'
-
 function formatMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
 }
+
+// ── ノードトレース タイムライン ──────────────────────────────────────────
+
+function NodeTraceLine({ trace }: { trace: PipelineNodeTrace }) {
+  const { theme } = useTheme()
+  const isFailure = trace.status === 'failure'
+
+  const nodeColors: Record<string, string> = {
+    correctJa:  '#a78bfa',
+    splitJa:    '#60a5fa',
+    mergeShort: '#34d399',
+    translateEn:'#f59e0b',
+    formatLines:'#fb923c',
+    compressEn: '#ec4899',
+    splitEn:    '#22d3ee',
+    finalQA:    '#ef4444',
+    exportSrt:  '#6ee7b7',
+  }
+  const color = nodeColors[trace.nodeId] ?? theme.textMuted
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 8,
+      fontSize: 11,
+      padding: '4px 0',
+      borderBottom: `1px solid ${theme.panelBorder}`,
+    }}>
+      <span style={{ color: isFailure ? '#ef4444' : '#22c55e', lineHeight: '16px', flexShrink: 0 }}>
+        {isFailure ? '✗' : '✓'}
+      </span>
+      <span style={{ color, fontWeight: 600, minWidth: 100, lineHeight: '16px' }}>
+        {trace.nodeId}{trace.attempt > 1 ? ` #${trace.attempt}` : ''}
+      </span>
+      <span style={{ color: theme.textMuted, minWidth: 50, lineHeight: '16px' }}>
+        {formatMs(trace.durationMs)}
+      </span>
+      {trace.summary && (
+        <span style={{ color: theme.textSecondary, lineHeight: '16px', flex: 1 }}>
+          {trace.summary}
+        </span>
+      )}
+      {isFailure && trace.error && (
+        <span style={{ color: '#ef4444', lineHeight: '16px', flex: 1 }}>
+          {trace.error}
+        </span>
+      )}
+    </div>
+  )
+}
+
+// ── CPSループ 試行カード ───────────────────────────────────────────────────
 
 function AttemptCard({ attemptLog, isExpanded, onToggle }: {
   attemptLog: CpsAttemptLog
@@ -19,10 +70,11 @@ function AttemptCard({ attemptLog, isExpanded, onToggle }: {
   onToggle: () => void
 }) {
   const { theme } = useTheme()
-  const { attempt, result, durationMs, splitJaOutput, translateEnOutput, splitEnOutput, violations, splitHints } = attemptLog
+  const { attempt, result, durationMs, splitJaOutput, translateEnOutput,
+          compressEnStats, splitEnOutput, violations, splitHints } = attemptLog
 
   const resultColor = result === 'pass' ? '#22c55e' : result === 'retry' ? '#f59e0b' : '#ef4444'
-  const resultLabel = result === 'pass' ? 'PASS' : result === 'retry' ? 'RETRY' : 'MAX_ATTEMPTS'
+  const resultLabel = result === 'pass' ? 'PASS' : result === 'retry' ? 'RETRY' : 'MAX'
 
   return (
     <div style={{
@@ -46,36 +98,75 @@ function AttemptCard({ attemptLog, isExpanded, onToggle }: {
           fontSize: 11,
         }}
       >
-        {isExpanded ? <ChevronDown size={12} color={theme.textMuted} /> : <ChevronRight size={12} color={theme.textMuted} />}
+        {isExpanded
+          ? <ChevronDown size={12} color={theme.textMuted} />
+          : <ChevronRight size={12} color={theme.textMuted} />}
         <span style={{ fontWeight: 700, color: theme.textPrimary }}>Attempt {attempt}</span>
         <span style={{ color: resultColor, fontWeight: 600 }}>{resultLabel}</span>
         <span style={{ color: theme.textMuted }}>{formatMs(durationMs)}</span>
         {splitHints.length > 0 && (
-          <span style={{ color: '#f59e0b' }}>{splitHints.length}ヒント適用</span>
+          <span style={{ color: '#f59e0b' }}>{splitHints.length}ヒント</span>
         )}
-        <span style={{ color: theme.textSecondary, marginLeft: 'auto' }}>
-          splitJa: {splitJaOutput.length}文 → translateEn: {translateEnOutput.length}文 → splitEn: {splitEnOutput.length}ブロック
+        <span style={{ color: theme.textSecondary, marginLeft: 'auto', fontSize: 10 }}>
+          splitJa {splitJaOutput.length} → en {translateEnOutput.length} → compress {compressEnStats?.compressed ?? '?'}件 → splitEn {splitEnOutput.length}
         </span>
         {violations.length > 0 && (
-          <span style={{ color: '#ef4444' }}>CPS違反: {violations.length}件</span>
+          <span style={{ color: '#ef4444', fontSize: 10 }}>CPS違反: {violations.length}</span>
         )}
       </button>
 
       {isExpanded && (
         <div style={{ padding: '8px 10px', background: theme.panelBg, borderTop: `1px solid ${theme.panelBorder}` }}>
-          {/* Node rows */}
+          {/* ノード行 */}
           {[
-            { label: 'splitJa', count: splitJaOutput.length, unit: '文', extra: splitJaOutput.filter(b => b.alignConfidence === 'proportional').length > 0 ? `(proportional: ${splitJaOutput.filter(b => b.alignConfidence === 'proportional').length}件)` : '' },
-            { label: 'translateEn', count: translateEnOutput.length, unit: '英訳', extra: '' },
-            { label: 'splitEn', count: splitEnOutput.length, unit: 'ブロック', extra: violations.length > 0 ? `CPS違反: ${violations.length}件` : 'CPS OK' },
+            {
+              label: 'splitJa',
+              value: `${splitJaOutput.length}文`,
+              sub: splitJaOutput.filter(b => b.alignConfidence === 'proportional').length > 0
+                ? `proportional: ${splitJaOutput.filter(b => b.alignConfidence === 'proportional').length}件`
+                : '',
+              color: '',
+            },
+            {
+              label: 'translateEn',
+              value: `${translateEnOutput.length}英訳`,
+              sub: '',
+              color: '',
+            },
+            {
+              label: 'formatLines',
+              value: '',
+              sub: '',
+              color: '',
+            },
+            {
+              label: 'compressEn',
+              value: compressEnStats
+                ? `圧縮: ${compressEnStats.compressed}/${compressEnStats.violating}件`
+                : '',
+              sub: compressEnStats
+                ? [
+                    compressEnStats.skippedLowCps > 0 ? `低CPS スキップ: ${compressEnStats.skippedLowCps}件` : '',
+                    compressEnStats.flagged > 0 ? `フラグ: ${compressEnStats.flagged}件` : '',
+                  ].filter(Boolean).join(' / ')
+                : '',
+              color: compressEnStats?.flagged ? '#f59e0b' : '',
+            },
+            {
+              label: 'splitEn',
+              value: `${splitEnOutput.length}ブロック`,
+              sub: violations.length > 0 ? `CPS違反: ${violations.length}件` : 'CPS OK',
+              color: violations.length > 0 ? '#ef4444' : '#22c55e',
+            },
           ].map(row => (
-            <div key={row.label} style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 11, marginBottom: 4 }}>
+            <div key={row.label} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 11, marginBottom: 3 }}>
               <span style={{ color: theme.textMuted, minWidth: 90 }}>{row.label}</span>
-              <span style={{ color: theme.textSecondary }}>{row.count} {row.unit}</span>
-              {row.extra && <span style={{ color: row.extra.startsWith('CPS違反') ? '#ef4444' : theme.textMuted }}>{row.extra}</span>}
+              {row.value && <span style={{ color: theme.textSecondary }}>{row.value}</span>}
+              {row.sub && <span style={{ color: row.color || theme.textMuted, fontSize: 10 }}>{row.sub}</span>}
             </div>
           ))}
 
+          {/* CPS 違反ブロック一覧 */}
           {violations.length > 0 && (
             <div style={{ marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: theme.textMuted, marginBottom: 4 }}>CPS違反ブロック</div>
@@ -101,9 +192,14 @@ function AttemptCard({ attemptLog, isExpanded, onToggle }: {
   )
 }
 
+// ── メインコンポーネント ──────────────────────────────────────────────────
+
+type Filter = 'all' | 'error' | 'cps' | 'correct' | 'translate'
+
 export function ExecutionLogTab({ log }: ExecutionLogTabProps) {
   const { theme } = useTheme()
   const [expandedAttempts, setExpandedAttempts] = useState<Set<number>>(new Set([1]))
+  const [showTraces, setShowTraces] = useState(false)
   const [filter, setFilter] = useState<Filter>('all')
 
   const toggleAttempt = (attempt: number) => {
@@ -123,8 +219,16 @@ export function ExecutionLogTab({ log }: ExecutionLogTabProps) {
     { key: 'translate', label: '翻訳' },
   ]
 
-  // correctJa stats
   const flaggedCorrections = log.correctJaOutput.filter(s => s.correctionFlagged)
+
+  // finalQA 違反サマリー
+  const violationSummary: Record<string, number> = {}
+  log.finalBlocks.forEach(b =>
+    (b.qaViolations ?? []).forEach(v => {
+      violationSummary[v.type] = (violationSummary[v.type] ?? 0) + 1
+    })
+  )
+  const totalFlagged = log.finalBlocks.filter(b => b.flagged).length
 
   return (
     <div>
@@ -149,22 +253,62 @@ export function ExecutionLogTab({ log }: ExecutionLogTabProps) {
         ))}
       </div>
 
-      {/* transcribe */}
+      {/* ── ノードトレース タイムライン ── */}
+      {(filter === 'all') && (
+        <div style={{ marginBottom: 10 }}>
+          <button
+            onClick={() => setShowTraces(t => !t)}
+            style={{
+              width: '100%', textAlign: 'left',
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '6px 10px',
+              background: theme.cardBg,
+              border: `1px solid ${theme.panelBorder}`,
+              borderRadius: showTraces ? '6px 6px 0 0' : 6,
+              cursor: 'pointer', fontSize: 11,
+            }}
+          >
+            {showTraces
+              ? <ChevronDown size={12} color={theme.textMuted} />
+              : <ChevronRight size={12} color={theme.textMuted} />}
+            <span style={{ fontWeight: 700, color: theme.textPrimary }}>全ノードトレース</span>
+            <span style={{ color: theme.textMuted }}>{log.nodeTraces.length}件</span>
+            <span style={{ color: theme.textSecondary, marginLeft: 'auto' }}>
+              合計 {formatMs(log.finishedAt - log.startedAt)}
+            </span>
+          </button>
+          {showTraces && (
+            <div style={{
+              padding: '6px 10px',
+              background: theme.panelBg,
+              border: `1px solid ${theme.panelBorder}`,
+              borderTop: 'none',
+              borderRadius: '0 0 6px 6px',
+            }}>
+              {log.nodeTraces.map((t, i) => (
+                <NodeTraceLine key={i} trace={t} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── transcribe ── */}
       {(filter === 'all') && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, marginBottom: 6, padding: '6px 10px', background: theme.cardBg, borderRadius: 6, border: `1px solid ${theme.panelBorder}` }}>
-          <span style={{ color: '#22c55e', fontWeight: 700 }}>✓</span>
+          <CheckCircle size={12} color='#22c55e' />
           <span style={{ color: theme.textMuted, minWidth: 80 }}>transcribe</span>
           <span style={{ color: theme.textSecondary }}>{log.transcribeOutput.length}セグメント</span>
         </div>
       )}
 
-      {/* correctJa */}
+      {/* ── correctJa ── */}
       {(filter === 'all' || filter === 'correct' || (filter === 'error' && flaggedCorrections.length > 0)) && (
         <div style={{ marginBottom: 6, padding: '6px 10px', background: theme.cardBg, borderRadius: 6, border: `1px solid ${theme.panelBorder}`, fontSize: 11 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ color: flaggedCorrections.length > 0 ? '#f59e0b' : '#22c55e', fontWeight: 700 }}>
-              {flaggedCorrections.length > 0 ? '!' : '✓'}
-            </span>
+            {flaggedCorrections.length > 0
+              ? <AlertTriangle size={12} color='#f59e0b' />
+              : <CheckCircle size={12} color='#22c55e' />}
             <span style={{ color: theme.textMuted, minWidth: 80 }}>correctJa</span>
             <span style={{ color: theme.textSecondary }}>{log.correctJaOutput.length}セグメント補正</span>
             {flaggedCorrections.length > 0 && (
@@ -185,7 +329,7 @@ export function ExecutionLogTab({ log }: ExecutionLogTabProps) {
         </div>
       )}
 
-      {/* CPSループ各attempt */}
+      {/* ── CPSループ 各attempt ── */}
       {log.cpsAttempts
         .filter(a => {
           if (filter === 'all') return true
@@ -204,10 +348,48 @@ export function ExecutionLogTab({ log }: ExecutionLogTabProps) {
         ))
       }
 
-      {/* 最終出力 */}
+      {/* ── finalQA サマリー ── */}
+      {(filter === 'all' || filter === 'error') && (
+        <div style={{ marginBottom: 6, padding: '6px 10px', background: theme.cardBg, borderRadius: 6, border: `1px solid ${theme.panelBorder}`, fontSize: 11 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+            {totalFlagged > 0
+              ? <AlertCircle size={12} color='#ef4444' />
+              : <CheckCircle size={12} color='#22c55e' />}
+            <span style={{ color: theme.textMuted, minWidth: 80 }}>finalQA</span>
+            <span style={{ color: theme.textSecondary }}>
+              {log.finalBlocks.length}ブロック
+            </span>
+            {totalFlagged > 0 && (
+              <span style={{ color: '#ef4444' }}>フラグ: {totalFlagged}件</span>
+            )}
+          </div>
+          {Object.keys(violationSummary).length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, paddingLeft: 20 }}>
+              {Object.entries(violationSummary).map(([type, count]) => {
+                const isP1 = type === 'cps' || type === 'lineLength'
+                const isLow = type === 'cpsTooLow'
+                return (
+                  <span key={type} style={{
+                    fontSize: 10,
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    background: isP1 ? 'rgba(239,68,68,0.1)' : isLow ? 'rgba(96,165,250,0.1)' : 'rgba(245,158,11,0.1)',
+                    border: `1px solid ${isP1 ? 'rgba(239,68,68,0.3)' : isLow ? 'rgba(96,165,250,0.3)' : 'rgba(245,158,11,0.3)'}`,
+                    color: isP1 ? '#ef4444' : isLow ? '#60a5fa' : '#f59e0b',
+                  }}>
+                    {type}: {count}
+                  </span>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── exportSrt ── */}
       {(filter === 'all') && (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, marginBottom: 6, padding: '6px 10px', background: theme.cardBg, borderRadius: 6, border: `1px solid ${theme.panelBorder}` }}>
-          <span style={{ color: '#22c55e', fontWeight: 700 }}>✓</span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, padding: '6px 10px', background: theme.cardBg, borderRadius: 6, border: `1px solid ${theme.panelBorder}` }}>
+          <CheckCircle size={12} color='#22c55e' />
           <span style={{ color: theme.textMuted, minWidth: 80 }}>exportSrt</span>
           <span style={{ color: theme.textSecondary }}>最終ブロック: {log.finalBlocks.length}件</span>
         </div>
