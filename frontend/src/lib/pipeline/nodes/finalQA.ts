@@ -111,19 +111,10 @@ export const finalQaNode: NodeContract<
     // ── Step 0: start 時刻で昇順ソート（splitJa が順序保証しない場合の安全策）──
     const sorted = [...input].sort((a, b) => a.start - b.start)
 
-    // ── Step 0b: 過長ブロックを自動キャップ（Netflix MAX_DURATION = 7s）──
-    // 長い沈黙・スライド表示区間で WhisperX が 20s+ セグメントを出すケースに対応。
-    // end を cap するのみ（start は変えない）。
-    const capped: PipelineSubtitleBlock[] = sorted.map(b => {
-      const dur = b.end - b.start
-      if (dur > MAX_DURATION) {
-        return { ...b, end: b.start + MAX_DURATION }
-      }
-      return b
-    })
-
     // ── Step 1: 重複・ギャップを自動調整 ──
-    const adjusted: PipelineSubtitleBlock[] = capped.map(b => ({ ...b }))
+    // 過長ブロック（>7s）は自動キャップしない → 字幕が途中で消えて空白が生まれるため
+    // durationLong 違反としてフラグを立て、人間が判断する
+    const adjusted: PipelineSubtitleBlock[] = sorted.map(b => ({ ...b }))
 
     for (let i = 0; i < adjusted.length - 1; i++) {
       const cur  = adjusted[i]

@@ -24,6 +24,7 @@ import { splitJaNode } from './nodes/splitJa'
 import { mergeShortNode } from './nodes/mergeShort'
 import { translateEnNode } from './nodes/translateEn'
 import { formatLinesNode } from './nodes/formatLines'
+import { compressEnNode } from './nodes/compressEn'
 import { splitEnNode } from './nodes/splitEn'
 import { finalQaNode } from './nodes/finalQA'
 import { exportSrtNode } from './nodes/exportSrt'
@@ -124,12 +125,13 @@ export async function runPipeline(
     tokensOut: 0,
   }, 0)
 
-  // ── Phase 2: translateEn → formatLines → splitEn（リトライループ） ──
+  // ── Phase 2: translateEn → formatLines → compressEn → splitEn（リトライループ） ──
   const { blocks, runState: loopState, cpsAttempts } = await runTranslateLoop(
     correctedSegments,
     mergedJaSentences,
     ctx,
     runState,
+    options.embedProvider,
   )
   runState = loopState
 
@@ -225,7 +227,7 @@ export async function runPipelineFromCorrection(
   }, 0)
 
   const { blocks, runState: loopState } = await runTranslateLoop(
-    correctedSegments, mergedJaSentences, ctx, runState,
+    correctedSegments, mergedJaSentences, ctx, runState, undefined,
   )
   runState = loopState
 
@@ -273,6 +275,7 @@ async function runTranslateLoop(
   initialJaSentences: readonly JapaneseSentenceBlock[],
   ctx: NodeContext,
   initialRunState: RunState,
+  embedProvider?: EmbedProvider,
 ): Promise<TranslateLoopResult> {
   let runState = initialRunState
   let jaSentences = initialJaSentences
@@ -334,10 +337,27 @@ async function runTranslateLoop(
       tokensOut: 0,
     }, 0)
 
+    // compressEn（行長超過ブロックを LLM フィードバックループで短縮）
+    const compressStart = Date.now()
+    const compressedBlocks: readonly EnglishBlock[] = await compressEnNode.run(
+      { blocks: formattedBlocks, embedProvider },
+      ctx,
+    )
+    runState = appendTrace(runState, {
+      nodeId: 'compressEn',
+      status: 'success',
+      durationMs: Date.now() - compressStart,
+      attempt,
+      provider: 'openai',
+      model: ctx.config.translationModel,
+      tokensIn: 0,
+      tokensOut: 0,
+    }, 0)
+
     // splitEn
     const splitEnStart = Date.now()
     const { blocks, violations }: { blocks: readonly PipelineSubtitleBlock[]; violations: readonly CpsViolation[] } =
-      await splitEnNode.run(formattedBlocks, ctx)
+      await splitEnNode.run(compressedBlocks, ctx)
     runState = appendTrace(runState, {
       nodeId: 'splitEn',
       status: 'success',

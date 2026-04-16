@@ -452,7 +452,7 @@ export default function App() {
               msg.startsWith('extractAudio') ? 'transcribe' :
               msg.startsWith('transcribe') ? 'transcribe' :
               msg.startsWith('correctJa') ? 'correct' :
-              msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('splitEn') ? 'translate' :
+              msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('compressEn') || msg.startsWith('splitEn') ? 'translate' :
               msg.startsWith('finalQA') ? 'subtitle' :
               'subtitle'
             ) as PipelineRunResult['step']
@@ -702,7 +702,7 @@ export default function App() {
         onProgress: (msg: string) => {
           const step = (
             msg.startsWith('correctJa') ? 'correct' :
-            msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('splitEn') ? 'translate' :
+            msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('compressEn') || msg.startsWith('splitEn') ? 'translate' :
             msg.startsWith('finalQA') ? 'subtitle' :
             'subtitle'
           ) as PipelineRunResult['step']

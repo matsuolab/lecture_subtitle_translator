@@ -15,14 +15,10 @@ Translate each numbered Japanese sentence to English.
 
 Rules:
 - Output format: [N] <translation> (one per line, same numbering as input)
-- SUBTITLE LENGTH (critical): Each translation must fit within 2 lines, max 42 characters per line
-  - If the content cannot fit in 42 chars, compress: omit filler phrases, use shorter synonyms
-  - A single long sentence is WORSE than a slightly compressed short one
-- Keep translations concise and natural (subtitle style)
-- Preserve technical and academic terms exactly
-- Use active voice where possible
-- Each subtitle must be self-contained (no dangling phrases)
-- Do NOT split mid-clause; end at a natural phrase boundary`
+- Keep translations concise and natural for subtitle reading
+- Preserve technical terms (Machine Learning, Deep Learning, etc.)
+- Each subtitle must be self-contained
+- Avoid filler phrases ("In this lecture,", "As I mentioned,", "First of all,")`
 
 function buildSystemPrompt(glossaryItems: readonly GlossaryItem[]): string {
   if (glossaryItems.length === 0) return BASE_SYSTEM_PROMPT
