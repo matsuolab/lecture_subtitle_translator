@@ -12,7 +12,7 @@
  */
 
 import type { NodeContract, NodeContext } from '../nodeContract'
-import type { PipelineSubtitleBlock, QaViolation, ViolationPriority } from '../types'
+import type { PipelineSubtitleBlock, QaViolation, ViolationPriority, DiagnosticPattern } from '../types'
 
 // Netflix チェイニングルール: 24fps で 2フレーム = 83ms
 const MIN_GAP_MS   = 83    / 1000   // 秒
@@ -102,6 +102,67 @@ function computePriority(violations: readonly QaViolation[], block: PipelineSubt
   return 'p3'
 }
 
+// ---------------------------------------------------------------------------
+// 根本原因診断
+// ---------------------------------------------------------------------------
+
+/**
+ * ブロックの問題根本原因を1つ特定する。
+ * 複数シグナル（duration・JA文字数・EN/JA比・CPS・alignConfidence）を組み合わせて判定。
+ *
+ * 優先順位（最も緊急性・情報価値が高いものを先に判定）:
+ * 1. proportional_ts  — TS自体が信頼できない（他の診断が不確実になる）
+ * 2. short_duration   — 分割しすぎ（CPS計算が不安定で他の症状を引き起こす）
+ * 3. merged_long      — マージ後の長ブロック
+ * 4. over_compressed  — 翻訳が要約しすぎ（意味喪失リスク）
+ * 5. long_segment     — WhisperX長発話（自然現象、対処困難）
+ * 6. verbose_en       — 英訳冗長（CPS高）
+ * 7. line_length_only — 行長のみ（書式問題）
+ * 8. ok
+ */
+function diagnoseBlock(
+  block: PipelineSubtitleBlock,
+  maxCps: number,
+  maxChars: number,
+): DiagnosticPattern {
+  const dur = block.end - block.start
+
+  // JA文字数（空白除く）
+  const jaCharsRaw = block.jaText.length
+  const jaChars = block.jaText.replace(/\s/g, '').length
+  const enChars = block.charCount
+
+  // EN/JA 文字比（日本語は英語より情報密度が高いため 0.5〜1.2 が正常範囲）
+  const enToJaRatio = jaChars > 0 ? enChars / jaChars : 1.0
+
+  // 1. TS推定（word アライメント失敗）— TS自体が不確実
+  if (block.alignConfidence === 'proportional') return 'proportional_ts'
+
+  // 2. 分割しすぎ（短い duration → CPS計算が不安定）
+  if (dur < 1.5) return 'short_duration'
+
+  // 3. マージ後長ブロック
+  if (block.alignConfidence === 'merged' && dur > MAX_DURATION) return 'merged_long'
+
+  // 4. 過剰圧縮
+  // JA が十分な長さ（15文字以上）で EN/JA 比が異常に低い場合
+  // 閾値 0.25: 日本語10文字 → 英語2.5文字は明らかに短縮しすぎ
+  if (jaCharsRaw > 15 && enToJaRatio < 0.25 && block.cps < 5) return 'over_compressed'
+
+  // 5. 長発話セグメント（WhisperX が長い発話を1セグメントにまとめた）
+  // EN/JA 比が正常範囲（過剰圧縮ではない）だが duration が長く CPS が低い
+  if (dur > 10 && block.cps < 4) return 'long_segment'
+
+  // 6. 英訳冗長（CPS高）
+  if (block.cps > maxCps) return 'verbose_en'
+
+  // 7. 行長のみ（CPS はOK だが1行が長すぎる）
+  const maxLineLen = Math.max(...block.text.split('\n').map(l => l.length))
+  if (maxLineLen > maxChars) return 'line_length_only'
+
+  return 'ok'
+}
+
 export const finalQaNode: NodeContract<
   readonly PipelineSubtitleBlock[],
   readonly PipelineSubtitleBlock[]
@@ -152,11 +213,14 @@ export const finalQaNode: NodeContract<
         const violations = computeViolations(block, maxCps, maxChars)
         const violationPriority = computePriority(violations, block)
 
+        const diagPattern = diagnoseBlock(block, maxCps, maxChars)
+
         return {
           ...block,
           id: idx + 1,   // filter後に id を振り直す
           qaViolations: violations,
           violationPriority,
+          diagPattern,
           flagged: violations.length > 0 || block.flagged,
         }
       })

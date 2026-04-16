@@ -1,7 +1,58 @@
 import { useState, useEffect } from 'react'
 import type { PipelineRunLog } from '@/types/pipeline'
-import type { JapaneseSentenceBlock } from '@/lib/pipeline/types'
+import type { JapaneseSentenceBlock, DiagnosticPattern } from '@/lib/pipeline/types'
 import { useTheme } from '@/context/ThemeContext'
+
+const DIAG_INFO: Record<DiagnosticPattern, { label: string; color: string; bg: string; desc: string; action: string }> = {
+  short_duration: {
+    label: '分割しすぎ',
+    color: '#f59e0b', bg: 'rgba(245,158,11,0.1)',
+    desc: 'duration < 1.5s。splitJaが細かく分割しすぎています。CPS計算が不安定になります。',
+    action: 'mergeShortで対処済みのはずですが、残っている場合は手動でマージを検討してください。',
+  },
+  long_segment: {
+    label: '長発話セグメント',
+    color: '#60a5fa', bg: 'rgba(96,165,250,0.1)',
+    desc: 'duration > 10s かつ CPS < 4。WhisperXが長い息継ぎなし発話を1セグメントとして出力しました。ENテキストが短くなるのは自然です。',
+    action: '字幕が長時間表示されます。必要であれば手動でタイムスタンプを分割してください。',
+  },
+  over_compressed: {
+    label: '過剰圧縮',
+    color: '#ef4444', bg: 'rgba(239,68,68,0.1)',
+    desc: 'EN/JA文字比 < 0.25 かつ CPS < 5。translateEnまたはcompressEnが内容を要約しすぎた可能性があります。',
+    action: '英訳を確認し、意味が失われていないか検証してください。必要なら再翻訳を検討。',
+  },
+  verbose_en: {
+    label: '英訳冗長',
+    color: '#f97316', bg: 'rgba(249,115,22,0.1)',
+    desc: 'CPS > maxCps。英訳が長すぎて読みきれない速度になっています。',
+    action: 'compressEnで対処済みのはず。残っている場合は手動で短縮してください。',
+  },
+  proportional_ts: {
+    label: 'TS推定値',
+    color: '#a78bfa', bg: 'rgba(167,139,250,0.1)',
+    desc: 'word アライメントが失敗し、タイムスタンプはセグメント時間窓の均等配分で推定されています。',
+    action: '実際の発話タイミングと合っていない可能性があります。TS を手動確認してください。',
+  },
+  merged_long: {
+    label: 'マージ後長ブロック',
+    color: '#34d399', bg: 'rgba(52,211,153,0.1)',
+    desc: 'mergeShortで複数文をマージした結果、duration > 7sになりました。',
+    action: '字幕が長時間表示されます。内容が自然かどうか確認してください。',
+  },
+  line_length_only: {
+    label: '行長のみ',
+    color: '#94a3b8', bg: 'rgba(148,163,184,0.1)',
+    desc: '1行がmaxCharsを超えていますが、CPSはOKです。書式のみの問題です。',
+    action: 'compressEnで対処済みのはず。残っている場合は手動で改行を調整してください。',
+  },
+  ok: {
+    label: '問題なし',
+    color: '#22c55e', bg: 'rgba(34,197,94,0.1)',
+    desc: '検出された問題パターンなし。',
+    action: '',
+  },
+}
 
 interface BlockDetailTabProps {
   log: PipelineRunLog
@@ -149,6 +200,48 @@ export function BlockDetailTab({ log, activeBlockId }: BlockDetailTabProps) {
               {infoRow('CPS', `${block.cps.toFixed(1)}`, block.cpsOk ? 'ok' : 'error')}
               {infoRow('EN', block.text)}
               {infoRow('JA', block.jaText)}
+
+              {/* 数値シグナル */}
+              {(() => {
+                const dur = block.end - block.start
+                const jaChars = block.jaText.replace(/\s/g, '').length
+                const enChars = block.charCount
+                const ratio = jaChars > 0 ? (enChars / jaChars).toFixed(2) : 'N/A'
+                return (
+                  <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 10 }}>
+                    <span style={{ color: theme.textMuted }}>JA文字数: <strong style={{ color: theme.textSecondary }}>{jaChars}</strong></span>
+                    <span style={{ color: theme.textMuted }}>EN文字数: <strong style={{ color: theme.textSecondary }}>{enChars}</strong></span>
+                    <span style={{ color: theme.textMuted }}>EN/JA比: <strong style={{ color: Number(ratio) < 0.25 ? '#ef4444' : theme.textSecondary }}>{ratio}</strong></span>
+                    <span style={{ color: theme.textMuted }}>duration: <strong style={{ color: dur > 10 ? '#60a5fa' : dur < 1.5 ? '#f59e0b' : theme.textSecondary }}>{dur.toFixed(2)}s</strong></span>
+                    <span style={{ color: theme.textMuted }}>alignConf: <strong style={{ color: block.alignConfidence === 'exact' ? '#22c55e' : '#f59e0b' }}>{block.alignConfidence}</strong></span>
+                  </div>
+                )
+              })()}
+
+              {/* 診断パターン */}
+              {(() => {
+                const info = DIAG_INFO[block.diagPattern ?? 'ok']
+                return (
+                  <div style={{ marginTop: 8, padding: '6px 8px', borderRadius: 4, background: info.bg, border: `1px solid ${info.color}40` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: info.desc ? 4 : 0 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: info.color, padding: '1px 6px', background: `${info.color}20`, borderRadius: 3 }}>
+                        {info.label}
+                      </span>
+                    </div>
+                    {info.desc && <div style={{ fontSize: 10, color: theme.textSecondary }}>{info.desc}</div>}
+                    {info.action && <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 2 }}>→ {info.action}</div>}
+                  </div>
+                )
+              })()}
+
+              {/* QA 違反一覧 */}
+              {block.qaViolations?.length > 0 && (
+                <div style={{ marginTop: 6 }}>
+                  {block.qaViolations.map((v, i) => (
+                    <div key={i} style={{ fontSize: 10, color: '#f59e0b', marginBottom: 1 }}>⚠ {v.detail}</div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* ━━ 2. splitJa タイムスタンプ割り当て詳細 ━━ */}

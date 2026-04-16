@@ -22,6 +22,32 @@ export interface GlossaryItem {
 // QA 違反種別・優先度（finalQA ノードが付与）
 // ---------------------------------------------------------------------------
 
+/**
+ * ブロックの問題パターン分類（複数シグナルの組み合わせで根本原因を特定）。
+ *
+ * QaViolation が「症状」を列挙するのに対し、DiagnosticPattern は「根本原因」を1つ特定する。
+ * finalQA が付与する。
+ *
+ * パターン定義:
+ *   short_duration   duration < 1.5s            → splitJa分割しすぎ。CPS計算が不安定
+ *   long_segment     duration > 10s, cps < 4    → WhisperX長発話。EN文が短くなるのは自然
+ *   over_compressed  EN/JA比 < 0.25, cps < 5   → translateEn/compressEnが要約しすぎた
+ *   verbose_en       cps > maxCps               → 英訳が冗長。compressEnで対処済みのはず
+ *   proportional_ts  alignConfidence=proportional → wordアライメント失敗、TS推定値
+ *   merged_long      merged + duration > 7s     → mergeShortで長くなりすぎた
+ *   line_length_only lineLength違反、CPS=OK     → 行長のみの問題（書式）
+ *   ok               問題なし
+ */
+export type DiagnosticPattern =
+  | 'short_duration'
+  | 'long_segment'
+  | 'over_compressed'
+  | 'verbose_en'
+  | 'proportional_ts'
+  | 'merged_long'
+  | 'line_length_only'
+  | 'ok'
+
 export type QaViolationType =
   | 'cps'              // CPS > maxCps
   | 'cpsTooLow'        // CPS < MIN_CPS_LOW（テキストが短すぎる・字幕が長く表示されすぎる）
@@ -101,6 +127,7 @@ export interface PipelineSubtitleBlock {
   readonly alignConfidence: AlignConfidence  // TS精度（exact/proportional/merged）
   readonly qaViolations: readonly QaViolation[]   // finalQA が付与
   readonly violationPriority: ViolationPriority   // finalQA が付与
+  readonly diagPattern: DiagnosticPattern          // finalQA が付与（根本原因分類）
 }
 
 // ---------------------------------------------------------------------------

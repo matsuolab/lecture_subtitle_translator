@@ -47,6 +47,7 @@ export const splitEnNode: NodeContract<readonly EnglishBlock[], SplitEnResult> =
         alignConfidence: block.alignConfidence,
         qaViolations: [],
         violationPriority: null,
+        diagPattern: 'ok',
         attempt: block.attempt,
         sourceSegmentIds: block.sourceSegmentIds,
         blockKey: block.blockKey,
