@@ -28,10 +28,6 @@ interface SubtitleBlockProps {
   onEqualSplit: (id: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
-  onDragStart: (id: number) => void
-  onDragEnd: () => void
-  onDragOver: (id: number) => void
-  onDrop: (id: number) => void
 }
 
 // ─── 警告バッジ共通コンポーネント ───────────────────────────────────────────
@@ -154,6 +150,18 @@ function cpsBadgeStyle(level: 'ok' | 'warn' | 'error', theme: Theme) {
   return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
 }
 
+
+const splitBtnStyle: React.CSSProperties = {
+  fontSize: 11,
+  padding: '3px 9px',
+  borderRadius: 4,
+  border: '1px solid #6366f1',
+  background: 'rgba(99,102,241,0.12)',
+  color: '#6366f1',
+  cursor: 'pointer',
+  fontWeight: 600,
+}
+
 function getCharLevel(lineLengths: number[]): 'ok' | 'warn' | 'error' {
   const max = Math.max(...lineLengths, 0)
   if (max > 42) return 'error'
@@ -182,10 +190,6 @@ function SubtitleBlockInner({
   onEqualSplit,
   onIgnoreWarning,
   onDraftChange,
-  onDragStart,
-  onDragEnd,
-  onDragOver,
-  onDrop,
 }: SubtitleBlockProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -247,6 +251,7 @@ function SubtitleBlockInner({
   const [showMissingList, setShowMissingList] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState(block.source)
+  const skipSaveRef = useRef(false)  // 分割時に blur→save をスキップするフラグ
   // 編集中のタイポ候補（editText に対してライブ計算）
   const editTypoCandidates = useMemo(
     () => isEditing ? findTypoCandidates(editText, deferredGlossary) : [],
@@ -313,6 +318,7 @@ function SubtitleBlockInner({
   }, [isEditingTarget])
 
   const handleTargetSave = () => {
+    if (skipSaveRef.current) { skipSaveRef.current = false; return }
     onUpdateTarget(block.id, editTargetText)
     setIsEditingTarget(false)
   }
@@ -326,6 +332,7 @@ function SubtitleBlockInner({
       const before = editTargetText.slice(0, cursor).trimEnd()
       const after = editTargetText.slice(cursor).trimStart()
       if (before && after) {
+        skipSaveRef.current = true
         onSplitFromTarget(block.id, before, after)
         setIsEditingTarget(false)
       }
@@ -333,6 +340,7 @@ function SubtitleBlockInner({
   }
 
   const handleEditSave = () => {
+    if (skipSaveRef.current) { skipSaveRef.current = false; return }
     onUpdateSource(block.id, editText)
     onDraftChange(block.id, null)
     setIsEditing(false)
@@ -347,6 +355,7 @@ function SubtitleBlockInner({
       const before = editText.slice(0, cursor).trimEnd()
       const after = editText.slice(cursor).trimStart()
       if (before && after) {
+        skipSaveRef.current = true
         onManualSplit(block.id, before, after)
         onDraftChange(block.id, null)
         setIsEditing(false)
@@ -396,8 +405,9 @@ function SubtitleBlockInner({
           : isFlagged
             ? theme.cardBgFlagged
             : theme.cardBg,
-    cursor: isApproved ? 'default' : 'pointer',
+    cursor: isApproved ? 'default' : 'grab',
     opacity: isDragging ? 0.4 : 1,
+    userSelect: isApproved ? undefined : 'none',
     boxShadow: isDragOver
       ? theme.cardShadowDragOver
       : isActive
@@ -409,12 +419,8 @@ function SubtitleBlockInner({
   return (
     <div
       style={blockStyle}
+      data-block-id={block.id}
       onClick={() => onSelect(block.id)}
-      draggable={!isApproved}
-      onDragStart={e => { if (isApproved) { e.preventDefault(); return }; e.dataTransfer.effectAllowed = 'move'; onDragStart(block.id) }}
-      onDragEnd={onDragEnd}
-      onDragOver={e => { e.preventDefault(); if (!isApproved) { e.dataTransfer.dropEffect = 'move'; onDragOver(block.id) } else { e.dataTransfer.dropEffect = 'none' } }}
-      onDrop={e => { e.preventDefault(); if (!isApproved) onDrop(block.id) }}
     >
       {/* 再生進行バー（背景） */}
       <div style={{
@@ -454,6 +460,23 @@ function SubtitleBlockInner({
       {/* 訳文テキスト（英語） */}
       {isEditingTarget ? (
         <>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                const cursor = targetTextareaRef.current?.selectionStart ?? editTargetText.length
+                const before = editTargetText.slice(0, cursor).trimEnd()
+                const after = editTargetText.slice(cursor).trimStart()
+                if (before && after) {
+                  skipSaveRef.current = true
+                  onSplitFromTarget(block.id, before, after)
+                  setIsEditingTarget(false)
+                }
+              }}
+              title="カーソル位置でブロックを2分割し、文字数比でタイムコードを再割り付けします"
+              style={splitBtnStyle}
+            >✂ 編集位置で分割</button>
+          </div>
           <textarea
             ref={targetTextareaRef}
             value={editTargetText}
@@ -490,7 +513,7 @@ function SubtitleBlockInner({
             ))}
           </div>
           <div style={{ fontSize: 10, color: theme.textMuted, marginBottom: 4 }}>
-            Enter: 改行 / Ctrl+Enter: 保存 / Shift+Enter: ここで分割 / Esc: キャンセル
+            {t.targetEditHint}
           </div>
         </>
       ) : (
@@ -519,6 +542,24 @@ function SubtitleBlockInner({
       {/* 原文テキスト（日本語） */}
       {isEditing ? (
         <>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                const cursor = textareaRef.current?.selectionStart ?? editText.length
+                const before = editText.slice(0, cursor).trimEnd()
+                const after = editText.slice(cursor).trimStart()
+                if (before && after) {
+                  skipSaveRef.current = true
+                  onManualSplit(block.id, before, after)
+                  onDraftChange(block.id, null)
+                  setIsEditing(false)
+                }
+              }}
+              title="カーソル位置でブロックを2分割し、文字数比でタイムコードを再割り付けします"
+              style={splitBtnStyle}
+            >✂ 編集位置で分割</button>
+          </div>
           <textarea
             ref={textareaRef}
             value={editText}

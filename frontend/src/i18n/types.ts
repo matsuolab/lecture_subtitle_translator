@@ -31,6 +31,7 @@ export interface LocaleStrings {
   reSplit: string
   reTranslate: string
   editHint: string
+  targetEditHint: string
   charCount: (lineLengths: number[], isOver: boolean) => string
   timeErrorFormat: string
   timeErrorStartNeg: string
@@ -105,6 +106,16 @@ export interface LocaleStrings {
   settingsOpenAiBaseUrlPlaceholder: string
   settingsStorageNotice: string
   settingsResetAdmin: string
+  settingsSubtitleQualityTitle: string
+  settingsEnMaxCharsPerLine: string
+  settingsEnMaxLines: string
+  settingsEnMaxTotalChars: string
+  settingsEnMaxCps: string
+  settingsSubtitleMinDuration: string
+  settingsSubtitleMaxDuration: string
+  settingsMergeMinJaChars: string
+  settingsQualityCorrectionThreshold: string
+  settingsQualityTranslationThreshold: string
   pocThemeDesc: string
   matsuoThemeDesc: string
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, CheckCircle, AlertCircle, AlertTriangle } from 'lucide-react'
-import type { PipelineRunLog, CpsAttemptLog, PipelineNodeTrace } from '@/types/pipeline'
+import type { PipelineRunLog, CpsAttemptLog, PipelineNodeTrace, ExpandEnStats, SplitLongBlockStats } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 
 interface ExecutionLogTabProps {
@@ -18,15 +18,17 @@ function NodeTraceLine({ trace }: { trace: PipelineNodeTrace }) {
   const isFailure = trace.status === 'failure'
 
   const nodeColors: Record<string, string> = {
-    correctJa:  '#a78bfa',
-    splitJa:    '#60a5fa',
-    mergeShort: '#34d399',
-    translateEn:'#f59e0b',
-    formatLines:'#fb923c',
-    compressEn: '#ec4899',
-    splitEn:    '#22d3ee',
-    finalQA:    '#ef4444',
-    exportSrt:  '#6ee7b7',
+    correctJa:      '#a78bfa',
+    splitJa:        '#60a5fa',
+    mergeShort:     '#34d399',
+    translateEn:    '#f59e0b',
+    expandEn:       '#84cc16',
+    formatLines:    '#fb923c',
+    compressEn:     '#ec4899',
+    splitEn:        '#22d3ee',
+    splitLongBlock: '#f97316',
+    finalQA:        '#ef4444',
+    exportSrt:      '#6ee7b7',
   }
   const color = nodeColors[trace.nodeId] ?? theme.textMuted
 
@@ -71,7 +73,7 @@ function AttemptCard({ attemptLog, isExpanded, onToggle }: {
 }) {
   const { theme } = useTheme()
   const { attempt, result, durationMs, splitJaOutput, translateEnOutput,
-          compressEnStats, splitEnOutput, violations, splitHints } = attemptLog
+          expandEnStats, compressEnStats, splitEnOutput, violations, splitHints } = attemptLog
 
   const resultColor = result === 'pass' ? '#22c55e' : result === 'retry' ? '#f59e0b' : '#ef4444'
   const resultLabel = result === 'pass' ? 'PASS' : result === 'retry' ? 'RETRY' : 'MAX'
@@ -108,7 +110,9 @@ function AttemptCard({ attemptLog, isExpanded, onToggle }: {
           <span style={{ color: '#f59e0b' }}>{splitHints.length}ヒント</span>
         )}
         <span style={{ color: theme.textSecondary, marginLeft: 'auto', fontSize: 10 }}>
-          splitJa {splitJaOutput.length} → en {translateEnOutput.length} → compress {compressEnStats?.compressed ?? '?'}件 → splitEn {splitEnOutput.length}
+          splitJa {splitJaOutput.length} → en {translateEnOutput.length}
+          {expandEnStats?.overCompressed > 0 ? ` → expand ${expandEnStats.expanded}/${expandEnStats.overCompressed}件` : ''}
+          {' '}→ compress {compressEnStats?.compressed ?? '?'}件 → splitEn {splitEnOutput.length}
         </span>
         {violations.length > 0 && (
           <span style={{ color: '#ef4444', fontSize: 10 }}>CPS違反: {violations.length}</span>
@@ -132,6 +136,14 @@ function AttemptCard({ attemptLog, isExpanded, onToggle }: {
               value: `${translateEnOutput.length}英訳`,
               sub: '',
               color: '',
+            },
+            {
+              label: 'expandEn',
+              value: expandEnStats?.overCompressed > 0
+                ? `拡張: ${expandEnStats.expanded}/${expandEnStats.overCompressed}件`
+                : '対象なし',
+              sub: expandEnStats?.flagged > 0 ? `フラグ: ${expandEnStats.flagged}件` : '',
+              color: expandEnStats?.flagged > 0 ? '#f59e0b' : '',
             },
             {
               label: 'formatLines',
@@ -347,6 +359,30 @@ export function ExecutionLogTab({ log }: ExecutionLogTabProps) {
           />
         ))
       }
+
+      {/* ── splitLongBlock ── */}
+      {(filter === 'all' || filter === 'cps') && log.splitLongBlockStats && (
+        <div style={{ marginBottom: 6, padding: '6px 10px', background: theme.cardBg, borderRadius: 6, border: `1px solid ${theme.panelBorder}`, fontSize: 11 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {log.splitLongBlockStats.longSegments > 0
+              ? <AlertTriangle size={12} color='#f97316' />
+              : <CheckCircle size={12} color='#22c55e' />}
+            <span style={{ color: theme.textMuted, minWidth: 80 }}>splitLongBlock</span>
+            <span style={{ color: theme.textSecondary }}>{log.splitLongBlockStats.total}ブロック入力</span>
+            {log.splitLongBlockStats.longSegments > 0 ? (
+              <>
+                <span style={{ color: '#f97316' }}>long_segment: {log.splitLongBlockStats.longSegments}件</span>
+                <span style={{ color: '#22c55e', marginLeft: 4 }}>分割: {log.splitLongBlockStats.splitBlocks}件 → +{log.splitLongBlockStats.newBlocks}ブロック</span>
+                {log.splitLongBlockStats.skipped > 0 && (
+                  <span style={{ color: theme.textMuted }}>「、」なし スキップ: {log.splitLongBlockStats.skipped}件</span>
+                )}
+              </>
+            ) : (
+              <span style={{ color: '#22c55e' }}>long_segment なし</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── finalQA サマリー ── */}
       {(filter === 'all' || filter === 'error') && (

@@ -9,9 +9,11 @@
 // ---------------------------------------------------------------------------
 
 export interface SubtitleConstraints {
-  readonly maxChars: number    // 1ブロックの最大文字数
-  readonly maxCps: number      // 最大 Characters Per Second
-  readonly maxRetry: number    // CPS違反時の再プロンプト最大試行回数
+  readonly maxChars: number      // 1行の最大文字数
+  readonly maxLines: number      // 最大行数
+  readonly maxTotalChars: number // 全行合計の最大文字数
+  readonly maxCps: number        // 最大 Characters Per Second
+  readonly maxRetry: number      // CPS違反時の再プロンプト最大試行回数
 }
 
 // ---------------------------------------------------------------------------

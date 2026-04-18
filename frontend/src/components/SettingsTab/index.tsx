@@ -65,6 +65,78 @@ export function SettingsTab({
         ))}
       </Section>
 
+      <Section title={t.settingsSubtitleQualityTitle} theme={theme}>
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxCharsPerLine}
+            value={adminSettings.enMaxCharsPerLine}
+            min={20} max={80} step={1} unit="chars"
+            onChange={(v) => onAdminSettingsChange({ enMaxCharsPerLine: v })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxLines}
+            value={adminSettings.enMaxLines}
+            min={1} max={4} step={1} unit="lines"
+            onChange={(v) => onAdminSettingsChange({ enMaxLines: v })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxTotalChars}
+            value={adminSettings.enMaxTotalChars}
+            min={20} max={200} step={1} unit="chars"
+            onChange={(v) => onAdminSettingsChange({ enMaxTotalChars: v })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxCps}
+            value={adminSettings.enMaxCps}
+            min={5} max={30} step={0.5} unit="CPS"
+            onChange={(v) => onAdminSettingsChange({ enMaxCps: v })}
+          />
+        </FieldCard>
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsSubtitleMinDuration}
+            value={adminSettings.subtitleMinDurationSec}
+            min={0.1} max={2.0} step={0.1} unit="sec"
+            onChange={(v) => onAdminSettingsChange({ subtitleMinDurationSec: v })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsSubtitleMaxDuration}
+            value={adminSettings.subtitleMaxDurationSec}
+            min={3.0} max={15.0} step={0.5} unit="sec"
+            onChange={(v) => onAdminSettingsChange({ subtitleMaxDurationSec: v })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsMergeMinJaChars}
+            value={adminSettings.mergeMinJaChars}
+            min={2} max={20} step={1} unit="chars"
+            onChange={(v) => onAdminSettingsChange({ mergeMinJaChars: v })}
+          />
+        </FieldCard>
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsQualityCorrectionThreshold}
+            value={adminSettings.qualityCorrectionThreshold}
+            min={0.05} max={0.5} step={0.01}
+            onChange={(v) => onAdminSettingsChange({ qualityCorrectionThreshold: v })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsQualityTranslationThreshold}
+            value={adminSettings.qualityTranslationThreshold}
+            min={0.05} max={0.5} step={0.01}
+            onChange={(v) => onAdminSettingsChange({ qualityTranslationThreshold: v })}
+          />
+        </FieldCard>
+      </Section>
+
       <Section title={t.settingsAdminTitle} theme={theme}>
         <FieldCard theme={theme}>
           <Field
@@ -296,6 +368,57 @@ function Field({
           fontSize: 12,
         }}
       />
+    </label>
+  )
+}
+
+function NumberField({
+  theme,
+  label,
+  value,
+  min,
+  max,
+  step,
+  unit,
+  onChange,
+}: {
+  theme: Theme
+  label: string
+  value: number
+  min?: number
+  max?: number
+  step?: number
+  unit?: string
+  onChange: (value: number) => void
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input
+          type="number"
+          value={value}
+          min={min}
+          max={max}
+          step={step}
+          onChange={(e) => {
+            const parsed = parseFloat(e.target.value)
+            if (!isNaN(parsed)) onChange(parsed)
+          }}
+          style={{
+            width: '100%',
+            padding: '10px 12px',
+            borderRadius: 8,
+            border: `1px solid ${theme.panelBorder}`,
+            background: theme.panelBg,
+            color: theme.textPrimary,
+            fontSize: 12,
+          }}
+        />
+        {unit && (
+          <span style={{ fontSize: 11, color: theme.textSecondary, flexShrink: 0 }}>{unit}</span>
+        )}
+      </div>
     </label>
   )
 }

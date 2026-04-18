@@ -300,6 +300,112 @@ export function SubtitleBlockList({
     container.scrollTop = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 6)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ブロック結合ドラッグ: HTML5 DnD は Tauri WebView2 では不安定なため
+  // ポインターイベントで完全実装する
+  const onMergeRef = useRef(onMerge)
+  useEffect(() => { onMergeRef.current = onMerge }, [onMerge])
+  const blocksRef = useRef(blocks)
+  useEffect(() => { blocksRef.current = blocks }, [blocks])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    const getBlockId = (target: Element | null): number | null => {
+      const blockEl = target?.closest('[data-block-id]') as HTMLElement | null
+      if (!blockEl) return null
+      const id = parseInt(blockEl.dataset.blockId ?? '', 10)
+      return isNaN(id) ? null : id
+    }
+
+    let pointerSrcId: number | null = null
+    let dragging = false
+    let grabStyleEl: HTMLStyleElement | null = null
+
+    const setGrabbingCursor = () => {
+      if (grabStyleEl) return
+      grabStyleEl = document.createElement('style')
+      grabStyleEl.textContent = '* { cursor: grabbing !important; }'
+      document.head.appendChild(grabStyleEl)
+    }
+
+    const clearGrabbingCursor = () => {
+      if (!grabStyleEl) return
+      grabStyleEl.remove()
+      grabStyleEl = null
+    }
+
+    const onGlobalPointerMove = (e: PointerEvent) => {
+      if (pointerSrcId === null) return
+      if (!dragging) {
+        dragging = true
+        setDraggingId(pointerSrcId)
+        setGrabbingCursor()
+      }
+      const underEl = document.elementFromPoint(e.clientX, e.clientY)
+      setDragOverId(getBlockId(underEl))
+    }
+
+    const endDrag = (e: PointerEvent) => {
+      const src = pointerSrcId
+      const wasDragging = dragging
+      pointerSrcId = null
+      dragging = false
+      clearGrabbingCursor()
+      window.removeEventListener('pointermove', onGlobalPointerMove)
+      window.removeEventListener('pointerup', endDrag)
+      window.removeEventListener('pointercancel', cancelDrag)
+
+      setDraggingId(null)
+      setDragOverId(null)
+
+      if (!wasDragging || src === null) return
+      const underEl = document.elementFromPoint(e.clientX, e.clientY)
+      const dropId = getBlockId(underEl)
+      if (dropId === null || dropId === src) return
+      const dropBlock = blocksRef.current.find(b => b.id === dropId)
+      if (dropBlock?.status === 'approved') return
+      onMergeRef.current(src, dropId)
+    }
+
+    const cancelDrag = () => {
+      pointerSrcId = null
+      dragging = false
+      clearGrabbingCursor()
+      window.removeEventListener('pointermove', onGlobalPointerMove)
+      window.removeEventListener('pointerup', endDrag)
+      window.removeEventListener('pointercancel', cancelDrag)
+      setDraggingId(null)
+      setDragOverId(null)
+    }
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0 || e.ctrlKey) return  // Ctrl は境界ドラッグ用
+      const target = e.target as HTMLElement
+      if (target.closest('button, input, textarea, select')) return
+
+      const id = getBlockId(target)
+      if (id === null) return
+      const block = blocksRef.current.find(b => b.id === id)
+      if (!block || block.status === 'approved') return
+
+      pointerSrcId = id
+      dragging = false
+      window.addEventListener('pointermove', onGlobalPointerMove)
+      window.addEventListener('pointerup', endDrag)
+      window.addEventListener('pointercancel', cancelDrag)
+    }
+
+    el.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      el.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointermove', onGlobalPointerMove)
+      window.removeEventListener('pointerup', endDrag)
+      window.removeEventListener('pointercancel', cancelDrag)
+      clearGrabbingCursor()
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // 境界ドラッグ中のカーソル変更
   useEffect(() => {
     if (boundaryDrag) {
@@ -377,17 +483,6 @@ export function SubtitleBlockList({
     })
   }, [onApprove, onBlockSelect, displayBlocks])
 
-  const handleDragStart = useCallback((id: number) => setDraggingId(id), [])
-  const handleDragEnd = useCallback(() => { setDraggingId(null); setDragOverId(null) }, [])
-  const handleDragOver = useCallback((id: number) => setDragOverId(id), [])
-
-  const handleDrop = useCallback((dropId: number) => {
-    setDraggingId(prev => {
-      if (prev !== null && prev !== dropId) onMerge(prev, dropId)
-      return null
-    })
-    setDragOverId(null)
-  }, [onMerge])
 
   const handleBoundaryMouseDown = (
     e: React.MouseEvent,
@@ -453,10 +548,6 @@ export function SubtitleBlockList({
               onUpdateTimes={onUpdateTimes}
               onIgnoreWarning={onIgnoreWarning}
               onDraftChange={onDraftChange}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-              onDragOver={handleDragOver}
-              onDrop={handleDrop}
             />
           </div>
           {idx < displayBlocks.length - 1 && (() => {
@@ -611,6 +702,7 @@ export function SubtitleBlockList({
           </span>
         </div>
       )}
+
 
     </div>
   )

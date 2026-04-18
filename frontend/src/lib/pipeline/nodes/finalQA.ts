@@ -14,25 +14,23 @@
 import type { NodeContract, NodeContext } from '../nodeContract'
 import type { PipelineSubtitleBlock, QaViolation, ViolationPriority, DiagnosticPattern } from '../types'
 
-// Netflix チェイニングルール: 24fps で 2フレーム = 83ms
+// Netflix チェイニングルール: 24fps で 2フレーム = 83ms（技術仕様固定）
 const MIN_GAP_MS   = 83    / 1000   // 秒
-const MIN_DURATION = 0.833          // 秒（Netflix 最短 5/6 秒）
-const MAX_DURATION = 7.0            // 秒
 
-// CPS 閾値（二段階）
+// CPS 閾値（二段階）— 物理的上限のため固定
 const CPS_P1_THRESHOLD = 25.0   // これ超 → P1（実質読めない）
-const CPS_P2_THRESHOLD = 17.0   // これ超 → P2（maxCps 超過）
 
-// CPS 下限（低すぎる = テキストが短すぎて字幕が長く出続ける）
+// CPS 下限（低すぎる = テキストが短すぎて字幕が長く出続ける）— 診断補助値のため固定
 const CPS_TOO_LOW_THRESHOLD = 3.0   // これ未満 → P3（字幕が長く表示され続ける）
-
-// 行長 閾値（二段階）
-const LINE_P1_THRESHOLD = 55    // これ超 → P1（画面外に出る可能性）
 
 function computeViolations(
   block: PipelineSubtitleBlock,
   maxCps: number,
   maxChars: number,
+  maxLines: number,
+  maxTotalChars: number,
+  minDuration: number,
+  maxDuration: number,
 ): readonly QaViolation[] {
   const violations: QaViolation[] = []
   const dur = block.end - block.start
@@ -49,24 +47,34 @@ function computeViolations(
     violations.push({ type: 'cpsTooLow', detail: `CPS ${block.cps.toFixed(1)} < ${CPS_TOO_LOW_THRESHOLD}（表示時間 ${dur.toFixed(1)}s、テキスト不足）` })
   }
 
-  // 行長
+  // 行長・行数・合計文字数チェック
   const lines = block.text.split('\n')
+
+  // 行数
+  if (lines.length > maxLines) {
+    violations.push({ type: 'lineCount', detail: `${lines.length}行 > ${maxLines}行` })
+  }
+
+  // 1行の最大文字数
   for (const line of lines) {
-    if (line.length > LINE_P1_THRESHOLD) {
-      violations.push({ type: 'lineLength', detail: `行長 ${line.length} > ${LINE_P1_THRESHOLD}（P1）` })
-      break
-    } else if (line.length > maxChars) {
-      violations.push({ type: 'lineLength', detail: `行長 ${line.length} > ${maxChars}（P2）` })
+    if (line.length > maxChars) {
+      violations.push({ type: 'lineLength', detail: `行長 ${line.length} > ${maxChars}` })
       break
     }
   }
 
-  // 表示時間
-  if (dur < MIN_DURATION) {
-    violations.push({ type: 'durationShort', detail: `表示時間 ${dur.toFixed(3)}s < ${MIN_DURATION}s` })
+  // 全行合計文字数
+  const totalChars = lines.reduce((sum, l) => sum + l.length, 0)
+  if (totalChars > maxTotalChars) {
+    violations.push({ type: 'totalChars', detail: `合計 ${totalChars} > ${maxTotalChars}文字` })
   }
-  if (dur > MAX_DURATION) {
-    violations.push({ type: 'durationLong', detail: `表示時間 ${dur.toFixed(1)}s > ${MAX_DURATION}s` })
+
+  // 表示時間
+  if (dur < minDuration) {
+    violations.push({ type: 'durationShort', detail: `表示時間 ${dur.toFixed(3)}s < ${minDuration}s` })
+  }
+  if (dur > maxDuration) {
+    violations.push({ type: 'durationLong', detail: `表示時間 ${dur.toFixed(1)}s > ${maxDuration}s` })
   }
 
   // TS精度
@@ -75,7 +83,7 @@ function computeViolations(
   }
   if (block.alignConfidence === 'merged') {
     // merged は通常問題ないが、長くなった場合だけ記録
-    if (dur > MAX_DURATION) {
+    if (dur > maxDuration) {
       violations.push({ type: 'timestampUncertain', detail: 'マージ済みブロック（推定TS）' })
     }
   }
@@ -86,19 +94,17 @@ function computeViolations(
 function computePriority(violations: readonly QaViolation[], block: PipelineSubtitleBlock): ViolationPriority {
   if (violations.length === 0) return null
 
-  const hasP1 = violations.some(v => {
-    if (v.type === 'cps')        return block.cps > CPS_P1_THRESHOLD
-    if (v.type === 'lineLength') return block.text.split('\n').some(l => l.length > LINE_P1_THRESHOLD)
-    return false
-  })
+  const hasP1 = violations.some(v =>
+    v.type === 'cps' && block.cps > CPS_P1_THRESHOLD
+  )
   if (hasP1) return 'p1'
 
   const hasP2 = violations.some(v =>
-    v.type === 'cps' || v.type === 'lineLength' || v.type === 'durationLong'
+    v.type === 'cps' || v.type === 'lineLength' || v.type === 'lineCount' || v.type === 'totalChars' || v.type === 'durationLong'
   )
   if (hasP2) return 'p2'
 
-  // cpsTooLow は P3（情報提供。人間が判断）
+  // cpsTooLow, durationShort, timestampUncertain は P3（情報提供。人間が判断）
   return 'p3'
 }
 
@@ -124,6 +130,7 @@ function diagnoseBlock(
   block: PipelineSubtitleBlock,
   maxCps: number,
   maxChars: number,
+  maxDuration: number,
 ): DiagnosticPattern {
   const dur = block.end - block.start
 
@@ -142,7 +149,7 @@ function diagnoseBlock(
   if (dur < 1.5) return 'short_duration'
 
   // 3. マージ後長ブロック
-  if (block.alignConfidence === 'merged' && dur > MAX_DURATION) return 'merged_long'
+  if (block.alignConfidence === 'merged' && dur > maxDuration) return 'merged_long'
 
   // 4. 過剰圧縮
   // JA が十分な長さ（15文字以上）で EN/JA 比が異常に低い場合
@@ -152,6 +159,11 @@ function diagnoseBlock(
   // 5. 長発話セグメント（WhisperX が長い発話を1セグメントにまとめた）
   // EN/JA 比が正常範囲（過剰圧縮ではない）だが duration が長く CPS が低い
   if (dur > 10 && block.cps < 4) return 'long_segment'
+
+  // 5b. 話者がゆっくり話している（自然現象 — 対処不要）
+  // JA テキスト自体が短い（< 20文字）のに duration が長い → 話者が意図的にゆっくり話している
+  // over_compressed とは異なり、EN/JA 比は正常。単に話者速度が遅い
+  if (jaCharsRaw < 20 && dur >= 5.0 && block.cps > 0 && block.cps < 5.0) return 'slow_speech'
 
   // 6. 英訳冗長（CPS高）
   if (block.cps > maxCps) return 'verbose_en'
@@ -176,13 +188,14 @@ export const finalQaNode: NodeContract<
   ): Promise<readonly PipelineSubtitleBlock[]> {
     ctx.onProgress('finalQA: 最終品質チェック・ギャップ調整中...')
 
-    const { maxCps, maxChars } = ctx.config.subtitleConstraints
+    const { maxCps, maxChars, maxLines, maxTotalChars } = ctx.config.subtitleConstraints
+    const { minDurationSec, maxDurationSec } = ctx.config.timingConstraints
 
     // ── Step 0: start 時刻で昇順ソート（splitJa が順序保証しない場合の安全策）──
     const sorted = [...input].sort((a, b) => a.start - b.start)
 
     // ── Step 1: 重複・ギャップを自動調整 ──
-    // 過長ブロック（>7s）は自動キャップしない → 字幕が途中で消えて空白が生まれるため
+    // 過長ブロックは自動キャップしない → 字幕が途中で消えて空白が生まれるため
     // durationLong 違反としてフラグを立て、人間が判断する
     const adjusted: PipelineSubtitleBlock[] = sorted.map(b => ({ ...b }))
 
@@ -210,10 +223,10 @@ export const finalQaNode: NodeContract<
     return adjusted
       .filter(block => block.end > block.start)
       .map((block, idx) => {
-        const violations = computeViolations(block, maxCps, maxChars)
+        const violations = computeViolations(block, maxCps, maxChars, maxLines, maxTotalChars, minDurationSec, maxDurationSec)
         const violationPriority = computePriority(violations, block)
 
-        const diagPattern = diagnoseBlock(block, maxCps, maxChars)
+        const diagPattern = diagnoseBlock(block, maxCps, maxChars, maxDurationSec)
 
         return {
           ...block,

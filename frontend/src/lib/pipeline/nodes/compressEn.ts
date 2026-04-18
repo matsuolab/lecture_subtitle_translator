@@ -6,8 +6,13 @@
  *   - LLM はプロンプトで文字数制約に従えない（短くする・長くするという方向性しか伝えられない）
  *   - TypeScript が正確に計測 → "line 1 is 49 chars, 7 over limit" と伝える
  *   - LLM は「短くする」方向性のみ受け取り、TypeScript が合否判定（tool-use フィードバックループ）
- *   - 成功後: EmbedProvider があればコサイン距離で意味喪失チェック → 閾値超えは translationFlagged
- *   - MAX_COMPRESS_ATTEMPTS 回失敗: 最良試行を保持し translationFlagged = true（人間レビュー）
+ *
+ * Embedding バッチ化（コスト最適化）:
+ *   - 全ブロックの LLM ループ完了後に 1 回の embed() 呼び出しでバッチ処理
+ *   - triplet [JA, EN_orig, EN_compressed] で同時チェック:
+ *       distAB = JA→EN_orig   : translationDistance（translateEn の TODO を解消）
+ *       distBC = EN_orig→EN_compressed : 圧縮による意味変化
+ *       distAC = JA→EN_compressed : 最終的な翻訳品質（フラグ判定）
  *
  * LLM 使用: OpenAI Chat Completions（multi-turn）
  */
@@ -16,22 +21,23 @@ import OpenAI from 'openai'
 import type { NodeContract, NodeContext } from '../nodeContract'
 import type { EnglishBlock } from '../types'
 import type { EmbedProvider } from '../providers/openaiEmbedProvider'
+import { batchTripletDistances } from '../utils/embedUtils'
 
 const MAX_COMPRESS_ATTEMPTS = 5
 
 /**
  * CPS がこれ未満のブロックは圧縮をスキップする。
  * 既にテキストが短すぎる（講義感が失われる）ブロックをさらに短縮しないための安全弁。
- * 例: 20秒のブロックで既に CPS=4.0 → 圧縮すると CPS=3 未満になる可能性
  */
 const MIN_CPS_TO_COMPRESS = 5.0
 
 /**
- * コサイン距離がこれを超えたら意味喪失とみなす。
+ * JA→EN_compressed コサイン距離がこれを超えたら意味喪失とみなしてフラグを立てる。
  * PoC: 平均距離 0.05〜0.12 程度、0.15 を閾値に設定。
  */
 const SEMANTIC_DISTANCE_THRESHOLD = 0.15
 
+// System prompt を先頭固定にすることで OpenAI のプロンプトキャッシュを活用する。
 const SYSTEM_PROMPT = `You are a professional subtitle editor specializing in compression.
 Your job is to shorten subtitle text so each line fits within the character limit.
 
@@ -78,22 +84,10 @@ function totalOverflow(text: string, maxChars: number): number {
   return text.split('\n').reduce((sum, l) => sum + Math.max(0, l.length - maxChars), 0)
 }
 
-function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
-  let dot = 0, normA = 0, normB = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
-  }
-  if (normA === 0 || normB === 0) return 1
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB))
-}
-
-/** LLM 出力から字幕テキストを正規化する（\n リテラルの正規化など） */
 function normalizeOutput(raw: string): string {
   return raw
     .trim()
-    .replace(/\\n/g, '\n')   // バックスラッシュ+n → 改行
+    .replace(/\\n/g, '\n')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
 }
@@ -116,6 +110,15 @@ export interface CompressEnOutput {
   readonly stats: CompressEnStats
 }
 
+// LLM ループの結果を一時保持する内部型
+interface LLMResult {
+  readonly idx: number
+  readonly jaText: string
+  readonly originalText: string
+  readonly bestText: string
+  readonly succeeded: boolean
+}
+
 export const compressEnNode: NodeContract<
   CompressEnInput,
   CompressEnOutput
@@ -132,7 +135,7 @@ export const compressEnNode: NodeContract<
 
     // 行長超過ブロックを特定し、低CPS スキップを分けてカウント
     const allViolatingIndices = blocks
-      .map((b, i) => i)
+      .map((_, i) => i)
       .filter(i => blocks[i].enText.split('\n').some(l => l.length > maxChars))
 
     const violatingIndices = allViolatingIndices.filter(i => {
@@ -161,10 +164,8 @@ export const compressEnNode: NodeContract<
     const { openaiApiKey, translationModel } = ctx.config
     const client = new OpenAI({ apiKey: openaiApiKey, dangerouslyAllowBrowser: true })
 
-    // mutable コピー（index アクセスで更新）
-    const result: EnglishBlock[] = [...blocks]
-    let compressedCount = 0
-    let flaggedCount = 0
+    // ── Phase 1: 全ブロックの LLM ループ（embed なし）──────────────────────
+    const llmResults: LLMResult[] = []
 
     for (const idx of violatingIndices) {
       const block = blocks[idx]
@@ -201,14 +202,12 @@ export const compressEnNode: NodeContract<
           break
         }
 
-        // 改善していれば bestText を更新
         const overflow = totalOverflow(currentText, maxChars)
         if (overflow < bestOverflow) {
           bestText = currentText
           bestOverflow = overflow
         }
 
-        // フィードバックを追加してリトライ
         messages.push({ role: 'assistant', content: assistantContent })
         messages.push({
           role: 'user',
@@ -216,30 +215,43 @@ export const compressEnNode: NodeContract<
         })
       }
 
-      // 意味喪失チェック（embedProvider が渡された場合のみ）
-      let translationFlagged = !succeeded
+      llmResults.push({ idx, jaText: block.jaText, originalText, bestText, succeeded })
+    }
 
-      if (succeeded && embedProvider) {
-        try {
-          const embeddings = await embedProvider.embed([originalText, bestText])
-          const similarity = cosineSimilarity(embeddings[0], embeddings[1])
-          const distance = 1 - similarity
-          if (distance > SEMANTIC_DISTANCE_THRESHOLD) {
-            translationFlagged = true
-          }
-        } catch {
-          // embed 失敗は無視（フラグは立てない）
-        }
+    // ── Phase 2: バッチ Embedding（1 回の API 呼び出しで全ブロック処理）────
+    let distances: ReadonlyArray<{ distAB: number; distBC: number; distAC: number }> | null = null
+    if (embedProvider && llmResults.length > 0) {
+      try {
+        const triplets = llmResults.map(r => [r.jaText, r.originalText, r.bestText] as const)
+        distances = await batchTripletDistances(triplets, (texts) => embedProvider.embed(texts))
+      } catch {
+        // embed 失敗は無視（フラグは succeeded ベースのみ）
       }
+    }
 
-      if (succeeded) compressedCount++
-      if (translationFlagged) flaggedCount++
+    // ── Phase 3: ブロック更新（フラグ・距離を反映）─────────────────────────
+    const result: EnglishBlock[] = [...blocks]
+    let compressedCount = 0
+    let flaggedCount = 0
 
-      result[idx] = {
-        ...block,
-        enText: bestText,
+    for (let i = 0; i < llmResults.length; i++) {
+      const r = llmResults[i]
+      const dist = distances?.[i]
+
+      // JA→EN_compressed 距離が閾値を超えたら意味喪失フラグ
+      const semanticFlag = dist != null && r.succeeded && dist.distAC > SEMANTIC_DISTANCE_THRESHOLD
+      const translationFlagged = !r.succeeded || semanticFlag
+
+      result[r.idx] = {
+        ...blocks[r.idx],
+        enText: r.bestText,
         translationFlagged,
+        // distAB = JA→EN_orig（translateEn の translationDistance: 0 を解消）
+        translationDistance: dist?.distAB ?? 0,
       }
+
+      if (r.succeeded) compressedCount++
+      if (translationFlagged) flaggedCount++
     }
 
     return {

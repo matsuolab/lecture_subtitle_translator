@@ -1,6 +1,39 @@
 import type { SubtitleBlock } from '@/types/subtitle'
 
 const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
+const VIDEO_SOURCE_KEY = 'matsuo-video-source-v1'
+
+// ─── videoSource の永続化 ───────────────────────────────────────────────────
+
+export interface VideoSourceState {
+  name: string
+  path?: string
+  fileId?: string
+}
+
+export function saveVideoSource(vs: VideoSourceState | null): void {
+  try {
+    if (vs === null) {
+      localStorage.removeItem(VIDEO_SOURCE_KEY)
+    } else {
+      localStorage.setItem(VIDEO_SOURCE_KEY, JSON.stringify(vs))
+    }
+  } catch {
+    // QuotaExceededError 等は無視
+  }
+}
+
+export function loadVideoSource(): VideoSourceState | null {
+  try {
+    const raw = localStorage.getItem(VIDEO_SOURCE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (typeof parsed.name !== 'string') return null
+    return parsed as VideoSourceState
+  } catch {
+    return null
+  }
+}
 
 // ─── localStorage（クラッシュ/誤リロード対策） ────────────────────────────
 

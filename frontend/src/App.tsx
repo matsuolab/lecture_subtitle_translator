@@ -20,8 +20,11 @@ import {
   importProjectJson,
   importSrt,
   exportSrt,
+  saveVideoSource,
+  loadVideoSource,
+  type VideoSourceState,
 } from '@/api/persistence'
-import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
+import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings, hydrateFromKeychain, saveSecrets } from '@/api/adminSettings'
 import { hasPipelineApi, runPipelineViaApi } from '@/api/pipelineClient'
 import { buildPipelineConfig } from '@/lib/pipeline/config'
 import { runPipeline } from '@/lib/pipeline/runner'
@@ -56,8 +59,21 @@ export default function App() {
   const importRef = useRef<HTMLInputElement>(null)
   const srtImportRef = useRef<HTMLInputElement>(null)
   const videoFileRef = useRef<HTMLInputElement>(null)
-  const [videoUrl, setVideoUrl] = useState<string | null>(null)
-  const [videoSource, setVideoSource] = useState<{ name: string; path?: string } | null>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(() => {
+    // 起動時: 前回保存した path があれば convertFileSrc で復元（Tauri 環境のみ）
+    if (typeof window !== 'undefined' && isTauri()) {
+      const saved = loadVideoSource()
+      if (saved?.path) {
+        try { return convertFileSrc(saved.path) } catch { /* ignore */ }
+      }
+    }
+    return null
+  })
+  const videoErrorRetried = useRef(false)
+  const [videoSource, setVideoSource] = useState<VideoSourceState | null>(() => {
+    if (typeof window !== 'undefined') return loadVideoSource()
+    return null
+  })
   const [isDragOverRight, setIsDragOverRight] = useState(false)
   const lastHtmlDropRef = useRef(0)
   const [pipelineRun, setPipelineRun] = useState<PipelineRunResult>({
@@ -68,6 +84,9 @@ export default function App() {
   const [pipelineHistory, setPipelineHistory] = useState<PipelineRunResult[]>([])
   const [pipelineStatusPinned, setPipelineStatusPinned] = useState(false)
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
+  // keychain からのセンシティブ値読み込みが完了したかどうか。
+  // false の間は save useEffect を抑制し、未ロード状態で空文字を keychain に書かないようにする。
+  const [secretsLoaded, setSecretsLoaded] = useState(false)
 
   // 編集中のドラフトテキスト（字幕オーバーレイのリアルタイム更新用）
   // useTransition でオーバーレイ更新を低優先度にしてエディタ入力を軽くする
@@ -143,12 +162,25 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
   }, [])
 
-  const { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata, onError: onVideoError } =
+  const { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata, onError: onVideoErrorRaw } =
     useVideoSync(blocks, videoUrl)
+
+  // 動画エラー時: path がある場合は convertFileSrc で1回だけ自動復元を試みる
+  const onVideoError = useCallback(() => {
+    onVideoErrorRaw()
+    if (!videoErrorRetried.current && videoSource?.path) {
+      videoErrorRetried.current = true
+      try {
+        setVideoUrl(convertFileSrc(videoSource.path))
+      } catch { /* ignore */ }
+    }
+  }, [onVideoErrorRaw, videoSource?.path])
 
   const loadVideoFile = useCallback((file: File) => {
     lastHtmlDropRef.current = Date.now()
-    setVideoSource({ name: file.name })
+    const fileId = `${file.name}-${file.size}-${file.lastModified}`
+    setVideoSource({ name: file.name, fileId })
+    videoErrorRetried.current = false
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return URL.createObjectURL(file)
@@ -157,7 +189,8 @@ export default function App() {
 
   const loadVideoPath = useCallback((path: string) => {
     const name = path.split(/[\\/]/).pop() ?? path
-    setVideoSource({ name, path })
+    setVideoSource({ name, path, fileId: path })
+    videoErrorRetried.current = false
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return convertFileSrc(path)
@@ -179,9 +212,30 @@ export default function App() {
 
   const sleep = useCallback((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)), [])
 
+  // 起動時に keychain からセンシティブ値を読み込んで adminSettings に反映する。
+  // 旧バージョンからの移行: localStorage に残っていたキーは
+  // 最初の saveAdminSettings() 呼び出しで localStorage から除去される。
   useEffect(() => {
+    hydrateFromKeychain()
+      .then(patch => {
+        if (Object.keys(patch).length > 0) {
+          setAdminSettings(prev => ({ ...prev, ...patch }))
+        }
+      })
+      .catch(() => {})
+      .finally(() => setSecretsLoaded(true))
+  }, [])
+
+  useEffect(() => {
+    if (!secretsLoaded) return
     saveAdminSettings(adminSettings)
-  }, [adminSettings])
+    saveSecrets(adminSettings).catch(() => {})
+  }, [adminSettings, secretsLoaded])
+
+  // videoSource を localStorage に永続化（動画消失対策）
+  useEffect(() => {
+    saveVideoSource(videoSource)
+  }, [videoSource])
 
   const updateAdminSettings = useCallback((patch: Partial<AdminSettings>) => {
     setAdminSettings(prev => ({ ...prev, ...patch }))
@@ -452,7 +506,7 @@ export default function App() {
               msg.startsWith('extractAudio') ? 'transcribe' :
               msg.startsWith('transcribe') ? 'transcribe' :
               msg.startsWith('correctJa') ? 'correct' :
-              msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('compressEn') || msg.startsWith('splitEn') ? 'translate' :
+              msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('expandEn') || msg.startsWith('formatLines') || msg.startsWith('compressEn') || msg.startsWith('splitEn') ? 'translate' :
               msg.startsWith('finalQA') ? 'subtitle' :
               'subtitle'
             ) as PipelineRunResult['step']
@@ -625,7 +679,12 @@ export default function App() {
     }
   }, [adminSettings, appendPipelineHistory, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, pipelineBlocksToSubtitleBlocks, reset, sleep])
 
-  const confirmAndLoadVideo = useCallback(async (doLoad: () => void) => {
+  const confirmAndLoadVideo = useCallback(async (doLoad: () => void, newFileId?: string) => {
+    // 同じファイルの再読み込みなら字幕を保持してそのまま切り替え（リセット確認不要）
+    if (newFileId && newFileId === videoSource?.fileId) {
+      doLoad()
+      return
+    }
     // 動画は必ず読み込む。字幕が存在する場合のみリセットするか確認する。
     doLoad()
     if (blocks.length > 0) {
@@ -634,14 +693,15 @@ export default function App() {
         : window.confirm('字幕データをリセットしますか？\nキャンセルを選ぶと字幕を保持したまま動画だけ切り替えます。')
       if (ok) reset([])
     }
-  }, [blocks.length, reset])
+  }, [blocks.length, reset, videoSource?.fileId])
 
   const handleVideoInput = useCallback((file: File) => {
-    confirmAndLoadVideo(() => loadVideoFile(file))
+    const fileId = `${file.name}-${file.size}-${file.lastModified}`
+    confirmAndLoadVideo(() => loadVideoFile(file), fileId)
   }, [confirmAndLoadVideo, loadVideoFile])
 
   const handleVideoPathInput = useCallback((path: string) => {
-    confirmAndLoadVideo(() => loadVideoPath(path))
+    confirmAndLoadVideo(() => loadVideoPath(path), path)
   }, [confirmAndLoadVideo, loadVideoPath])
 
   const handleOpenVideoDialog = useCallback(async () => {
@@ -652,7 +712,7 @@ export default function App() {
     })
     if (!selected) return
     const path = typeof selected === 'string' ? selected : selected
-    confirmAndLoadVideo(() => loadVideoPath(path))
+    confirmAndLoadVideo(() => loadVideoPath(path), path)
   }, [confirmAndLoadVideo, loadVideoPath])
 
   const handleRunPipelineFromReport = useCallback(async () => {
@@ -702,7 +762,7 @@ export default function App() {
         onProgress: (msg: string) => {
           const step = (
             msg.startsWith('correctJa') ? 'correct' :
-            msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('formatLines') || msg.startsWith('compressEn') || msg.startsWith('splitEn') ? 'translate' :
+            msg.startsWith('splitJa') || msg.startsWith('mergeShort') || msg.startsWith('translateEn') || msg.startsWith('expandEn') || msg.startsWith('formatLines') || msg.startsWith('compressEn') || msg.startsWith('splitEn') ? 'translate' :
             msg.startsWith('finalQA') ? 'subtitle' :
             'subtitle'
           ) as PipelineRunResult['step']
@@ -895,13 +955,20 @@ export default function App() {
   const currentTimeRef = useRef(currentTime)
   useEffect(() => { currentTimeRef.current = currentTime }, [currentTime])
 
-  // 変更のたびに debounce 自動保存（1秒後）
+  // アイドル時に自動保存（最大5秒以内に必ず実行）
+  // requestIdleCallback でメインスレッドをブロックしない
   useEffect(() => {
     setSaveStatus('saving')
-    const timerId = setTimeout(() => {
+    const doSave = () => {
       saveToLocalStorage(blocks)
       setSaveStatus('saved')
-    }, 1000)
+    }
+    if (typeof requestIdleCallback !== 'undefined') {
+      const handle = requestIdleCallback(doSave, { timeout: 5000 })
+      return () => cancelIdleCallback(handle)
+    }
+    // フォールバック（未対応環境）
+    const timerId = setTimeout(doSave, 1000)
     return () => clearTimeout(timerId)
   }, [blocks])
 
@@ -1280,7 +1347,7 @@ export default function App() {
             <input ref={videoFileRef} type="file" accept="video/*" onChange={handleLoadVideo} style={{ display: 'none' }} />
             <button
               className="flex items-center gap-1 ml-auto"
-              onClick={() => videoFileRef.current?.click()}
+              onClick={() => isTauri() ? handleOpenVideoDialog() : videoFileRef.current?.click()}
               style={{
                 fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
                 borderRadius: 5, border: `1px solid ${theme.panelBorder}`,

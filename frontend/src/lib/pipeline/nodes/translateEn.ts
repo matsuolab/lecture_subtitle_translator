@@ -17,7 +17,7 @@ Rules:
 - Output format: [N] <translation> (one per line, same numbering as input)
 - Keep translations concise and natural for subtitle reading
 - Preserve technical terms (Machine Learning, Deep Learning, etc.)
-- Each subtitle must be self-contained
+- Treat all numbered blocks as a continuous spoken discourse. Resolve pronouns and subjects across blocks as a human translator would when translating a full script — introduce explicit subjects when a referent is first mentioned or becomes ambiguous, use pronouns (he/she/they/it) otherwise. The subtitle sequence as a whole should feel like natural English speech.
 - Avoid filler phrases ("In this lecture,", "As I mentioned,", "First of all,")`
 
 function buildSystemPrompt(glossaryItems: readonly GlossaryItem[]): string {

@@ -1,4 +1,5 @@
 import type { PipelineReviewItem, PipelineRunResult } from '@/types/pipeline'
+import type { DiagnosticPattern } from '@/lib/pipeline/types'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 
@@ -18,6 +19,24 @@ function priorityBadge(priority: PipelineReviewItem['priority']): string {
   if (priority === 'should_review') return 'SHOULD'
   return 'AUTO'
 }
+
+// DiagnosticPattern の表示設定
+const PATTERN_META: Record<DiagnosticPattern, { label: string; color: string; fix: string }> = {
+  ok:               { label: '問題なし',         color: '#22c55e', fix: '—' },
+  verbose_en:       { label: '英訳冗長',          color: '#f97316', fix: 'compressEn' },
+  over_compressed:  { label: '過剰圧縮',          color: '#ef4444', fix: 'expandEn' },
+  long_segment:     { label: '長発話',            color: '#60a5fa', fix: 'splitLongBlock' },
+  slow_speech:      { label: 'ゆっくり発話',       color: '#6ee7b7', fix: '対処不要' },
+  short_duration:   { label: '分割しすぎ',        color: '#f59e0b', fix: 'mergeShort' },
+  merged_long:      { label: 'マージ後長ブロック', color: '#34d399', fix: 'フラグのみ' },
+  line_length_only: { label: '行長のみ',          color: '#94a3b8', fix: 'compressEn' },
+  proportional_ts:  { label: 'TS推定値',          color: '#a78bfa', fix: '手動確認' },
+}
+
+const PATTERN_ORDER: DiagnosticPattern[] = [
+  'ok', 'verbose_en', 'over_compressed', 'long_segment', 'slow_speech',
+  'short_duration', 'merged_long', 'line_length_only', 'proportional_ts',
+]
 
 export function SummaryTab({ runs, pipelineRun, onRerunFromTranscript }: SummaryTabProps) {
   const { theme } = useTheme()
@@ -52,6 +71,18 @@ export function SummaryTab({ runs, pipelineRun, onRerunFromTranscript }: Summary
     return t.reportStatusIdle
   }
 
+  // 最新ログから DiagnosticPattern 分布を計算
+  const latestLog = pipelineRun.log ?? runs.find(r => r.log)?.log
+  const diagCounts = latestLog
+    ? latestLog.finalBlocks.reduce<Record<string, number>>((acc, b) => {
+        const p = b.diagPattern ?? 'ok'
+        acc[p] = (acc[p] ?? 0) + 1
+        return acc
+      }, {})
+    : null
+  const totalBlocks = latestLog?.finalBlocks.length ?? 0
+  const flaggedBlocks = latestLog?.finalBlocks.filter(b => b.flagged).length ?? 0
+
   const card: React.CSSProperties = {
     border: `1px solid ${theme.panelBorder}`,
     borderRadius: 8,
@@ -62,43 +93,101 @@ export function SummaryTab({ runs, pipelineRun, onRerunFromTranscript }: Summary
 
   return (
     <>
-      {/* 現在の実行状態 */}
-      {pipelineRun.status !== 'idle' && (
+      {/* ── 診断パターン分布（最新実行） ── */}
+      {diagCounts && (
         <div style={card}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
-            直近の実行
-          </div>
-          <div style={{ fontSize: 11 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{
-                display: 'inline-block',
-                width: 7,
-                height: 7,
-                borderRadius: 999,
-                background:
-                  pipelineRun.status === 'running' ? '#f59e0b'
-                  : pipelineRun.status === 'success' ? '#22c55e'
-                  : '#ef4444',
-              }} />
-              <span style={{ color: theme.textSecondary, fontWeight: 600 }}>
-                {pipelineRun.status === 'running' ? '実行中'
-                  : pipelineRun.status === 'success' ? '完了'
-                  : '失敗'}
-              </span>
-              <span style={{ color: theme.textMuted }}>{pipelineRun.message}</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>
+              診断パターン分布
             </div>
-            {pipelineRun.metrics && (
-              <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 10, color: theme.textSecondary }}>
-                <span>CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%</span>
-                <span>42文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%</span>
-                <span>推定コスト: ${pipelineRun.metrics.cost.estimatedUsd.toFixed(6)}</span>
-                <span>処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s</span>
-              </div>
-            )}
+            <div style={{ fontSize: 10, color: theme.textMuted }}>
+              {totalBlocks}ブロック / 要確認: {flaggedBlocks}件（{totalBlocks > 0 ? ((flaggedBlocks / totalBlocks) * 100).toFixed(1) : 0}%）
+            </div>
           </div>
+
+          {/* パターンバー */}
+          <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 10, gap: 1 }}>
+            {PATTERN_ORDER.map(p => {
+              const count = diagCounts[p] ?? 0
+              if (count === 0) return null
+              const meta = PATTERN_META[p]
+              return (
+                <div
+                  key={p}
+                  title={`${meta.label}: ${count}件`}
+                  style={{
+                    flex: count,
+                    background: meta.color,
+                    opacity: 0.85,
+                  }}
+                />
+              )
+            })}
+          </div>
+
+          {/* パターンテーブル */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: '2px 8px', fontSize: 10, alignItems: 'center' }}>
+            {/* ヘッダー */}
+            <span style={{ color: theme.textMuted, fontWeight: 700 }}>パターン</span>
+            <span style={{ color: theme.textMuted, fontWeight: 700, textAlign: 'right' }}>件数</span>
+            <span style={{ color: theme.textMuted, fontWeight: 700, textAlign: 'right' }}>%</span>
+            <span style={{ color: theme.textMuted, fontWeight: 700 }}>自動対処</span>
+            {/* データ行 */}
+            {PATTERN_ORDER.map(p => {
+              const count = diagCounts[p] ?? 0
+              if (count === 0 && p === 'ok') return null  // ok が 0 なら表示不要
+              const meta = PATTERN_META[p]
+              const pct = totalBlocks > 0 ? ((count / totalBlocks) * 100).toFixed(1) : '0.0'
+              return (
+                <>
+                  <span key={`${p}-label`} style={{
+                    color: count > 0 ? meta.color : theme.textMuted,
+                    display: 'flex', alignItems: 'center', gap: 4,
+                  }}>
+                    <span style={{
+                      display: 'inline-block', width: 7, height: 7,
+                      borderRadius: 2, background: meta.color, opacity: count > 0 ? 0.9 : 0.3,
+                      flexShrink: 0,
+                    }} />
+                    {meta.label}
+                  </span>
+                  <span key={`${p}-count`} style={{
+                    color: count > 0 ? theme.textPrimary : theme.textMuted,
+                    fontWeight: count > 0 ? 700 : 400,
+                    textAlign: 'right',
+                    fontFamily: 'monospace',
+                  }}>{count}</span>
+                  <span key={`${p}-pct`} style={{
+                    color: theme.textMuted,
+                    textAlign: 'right',
+                    fontFamily: 'monospace',
+                  }}>{pct}%</span>
+                  <span key={`${p}-fix`} style={{ color: theme.textMuted }}>
+                    {meta.fix}
+                  </span>
+                </>
+              )
+            })}
+          </div>
+
+          {/* splitLongBlock 統計（あれば） */}
+          {latestLog?.splitLongBlockStats && latestLog.splitLongBlockStats.longSegments > 0 && (
+            <div style={{
+              marginTop: 8, padding: '4px 8px',
+              background: 'rgba(96,165,250,0.08)',
+              border: '1px solid rgba(96,165,250,0.2)',
+              borderRadius: 4, fontSize: 10, color: '#60a5fa',
+            }}>
+              splitLongBlock: {latestLog.splitLongBlockStats.splitBlocks}/{latestLog.splitLongBlockStats.longSegments}件 分割
+              → +{latestLog.splitLongBlockStats.newBlocks}ブロック生成
+              {latestLog.splitLongBlockStats.skipped > 0 &&
+                `  /  「、」なし スキップ: ${latestLog.splitLongBlockStats.skipped}件`}
+            </div>
+          )}
         </div>
       )}
 
+      {/* ── 統計サマリー ── */}
       <div style={card}>
         <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
           {t.reportSummary}
@@ -111,6 +200,7 @@ export function SummaryTab({ runs, pipelineRun, onRerunFromTranscript }: Summary
         </div>
       </div>
 
+      {/* ── レビューキュー ── */}
       <div style={card}>
         <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
           {t.reportReviewQueue}
@@ -154,6 +244,7 @@ export function SummaryTab({ runs, pipelineRun, onRerunFromTranscript }: Summary
         )}
       </div>
 
+      {/* ── 実行履歴 ── */}
       <div style={{ ...card, marginBottom: 0 }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
           {t.reportRecentRuns}
@@ -170,53 +261,55 @@ export function SummaryTab({ runs, pipelineRun, onRerunFromTranscript }: Summary
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColFinishedAt}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColCost}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColDuration}</th>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColQuality}</th>
+                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>要確認</th>
                   {onRerunFromTranscript && <th style={{ textAlign: 'left', padding: '6px 4px' }}>再実行</th>}
                 </tr>
               </thead>
               <tbody>
-                {runs.map((run, idx) => (
-                  <tr key={`${run.startedAt ?? 0}-${idx}`} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
-                    <td style={{ padding: '6px 4px', color: theme.textPrimary }}>{run.sourceName ?? '-'}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{statusLabel(run.status)}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{formatFinishedAt(run.finishedAt)}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
-                      {run.metrics ? `$${run.metrics.cost.estimatedUsd.toFixed(6)}` : '-'}
-                    </td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
-                      {run.metrics ? `${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : '-'}
-                    </td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
-                      {run.metrics
-                        ? `CPS ${(run.metrics.quality.cpsViolationRate * 100).toFixed(1)}% / 42字 ${(run.metrics.quality.overLengthRate * 100).toFixed(1)}%`
-                        : '-'}
-                    </td>
-                    {onRerunFromTranscript && (
-                      <td style={{ padding: '6px 4px' }}>
-                        {run.log?.transcribeOutput && run.log.transcribeOutput.length > 0 ? (
-                          <button
-                            onClick={() => onRerunFromTranscript(run)}
-                            title="WhisperXをスキップしてcorrectJa以降を再実行"
-                            style={{
-                              fontSize: 10,
-                              padding: '2px 8px',
-                              borderRadius: 4,
-                              border: `1px solid ${theme.panelBorder}`,
-                              background: theme.panelBg,
-                              color: theme.textSecondary,
-                              cursor: 'pointer',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            ▶ 書き起こし再利用
-                          </button>
-                        ) : (
-                          <span style={{ color: theme.textDisabled, fontSize: 10 }}>-</span>
-                        )}
+                {runs.map((run, idx) => {
+                  const flagged = run.log?.finalBlocks.filter(b => b.flagged).length
+                  const total   = run.log?.finalBlocks.length
+                  return (
+                    <tr key={`${run.startedAt ?? 0}-${idx}`} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
+                      <td style={{ padding: '6px 4px', color: theme.textPrimary }}>{run.sourceName ?? '-'}</td>
+                      <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{statusLabel(run.status)}</td>
+                      <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{formatFinishedAt(run.finishedAt)}</td>
+                      <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
+                        {run.metrics ? `$${run.metrics.cost.estimatedUsd.toFixed(6)}` : '-'}
                       </td>
-                    )}
-                  </tr>
-                ))}
+                      <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
+                        {run.metrics ? `${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : '-'}
+                      </td>
+                      <td style={{ padding: '6px 4px', color: flagged && flagged > 0 ? '#f59e0b' : theme.textSecondary }}>
+                        {total != null ? `${flagged}/${total}件` : '-'}
+                      </td>
+                      {onRerunFromTranscript && (
+                        <td style={{ padding: '6px 4px' }}>
+                          {run.log?.transcribeOutput && run.log.transcribeOutput.length > 0 ? (
+                            <button
+                              onClick={() => onRerunFromTranscript(run)}
+                              title="WhisperXをスキップしてcorrectJa以降を再実行"
+                              style={{
+                                fontSize: 10,
+                                padding: '2px 8px',
+                                borderRadius: 4,
+                                border: `1px solid ${theme.panelBorder}`,
+                                background: theme.panelBg,
+                                color: theme.textSecondary,
+                                cursor: 'pointer',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              ▶ 書き起こし再利用
+                            </button>
+                          ) : (
+                            <span style={{ color: theme.textDisabled, fontSize: 10 }}>-</span>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>

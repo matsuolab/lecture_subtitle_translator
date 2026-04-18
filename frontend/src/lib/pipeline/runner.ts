@@ -24,12 +24,14 @@ import { splitJaNode } from './nodes/splitJa'
 import { mergeShortNode } from './nodes/mergeShort'
 import { translateEnNode } from './nodes/translateEn'
 import { formatLinesNode } from './nodes/formatLines'
+import { expandEnNode } from './nodes/expandEn'
 import { compressEnNode } from './nodes/compressEn'
 import { splitEnNode } from './nodes/splitEn'
+import { splitLongBlockNode } from './nodes/splitLongBlock'
 import { finalQaNode } from './nodes/finalQA'
 import { exportSrtNode } from './nodes/exportSrt'
 import type { EmbedProvider } from './providers/openaiEmbedProvider'
-import type { CpsAttemptLog, CompressEnStats, PipelineRunLog } from '../../types/pipeline'
+import type { CpsAttemptLog, ExpandEnStats, CompressEnStats, SplitLongBlockStats, PipelineRunLog } from '../../types/pipeline'
 
 const MAX_SPLIT_ATTEMPTS = 3
 
@@ -135,9 +137,29 @@ export async function runPipeline(
   )
   runState = loopState
 
+  // ── Phase 2.5: splitLongBlock（long_segment を「、」で分割して再翻訳）──
+  const splitLongStart = Date.now()
+  const { blocks: splitLongBlocks, stats: splitLongStats } = await splitLongBlockNode.run(
+    { blocks, embedProvider: options.embedProvider },
+    ctx,
+  )
+  runState = appendTrace(runState, {
+    nodeId: 'splitLongBlock',
+    status: 'success',
+    durationMs: Date.now() - splitLongStart,
+    attempt: 1,
+    provider: 'openai',
+    model: ctx.config.translationModel,
+    tokensIn: 0,
+    tokensOut: 0,
+    summary: splitLongStats.longSegments > 0
+      ? `分割: ${splitLongStats.splitBlocks}/${splitLongStats.longSegments}件 → +${splitLongStats.newBlocks}ブロック スキップ: ${splitLongStats.skipped}件`
+      : 'long_segment なし',
+  }, 0)
+
   // ── Phase 3: finalQA ──
   const qaStart = Date.now()
-  const qaBlocks: readonly PipelineSubtitleBlock[] = await finalQaNode.run(blocks, ctx)
+  const qaBlocks: readonly PipelineSubtitleBlock[] = await finalQaNode.run(splitLongBlocks, ctx)
   runState = appendTrace(runState, {
     nodeId: 'finalQA',
     status: 'success',
@@ -183,6 +205,7 @@ export async function runPipeline(
     transcribeOutput: transcriptSegments,
     correctJaOutput: correctedSegments,
     cpsAttempts,
+    splitLongBlockStats: splitLongStats,
     finalBlocks: qaBlocks,
     nodeTraces: finalRunState.nodeTraces,
   }
@@ -231,9 +254,18 @@ export async function runPipelineFromCorrection(
   )
   runState = loopState
 
+  // splitLongBlock
+  const splitLongStart2 = Date.now()
+  const { blocks: splitLongBlocks2 } = await splitLongBlockNode.run({ blocks }, ctx)
+  runState = appendTrace(runState, {
+    nodeId: 'splitLongBlock', status: 'success',
+    durationMs: Date.now() - splitLongStart2,
+    attempt: 1, provider: 'openai', model: ctx.config.translationModel, tokensIn: 0, tokensOut: 0,
+  }, 0)
+
   // finalQA
   const qaStart = Date.now()
-  const qaBlocks = await finalQaNode.run(blocks, ctx)
+  const qaBlocks = await finalQaNode.run(splitLongBlocks2, ctx)
   runState = appendTrace(runState, {
     nodeId: 'finalQA', status: 'success',
     durationMs: Date.now() - qaStart,
@@ -323,9 +355,27 @@ async function runTranslateLoop(
       tokensOut: 0,
     }, 0)
 
+    // expandEn（over_compressed ブロックを JA 参照で完全文に拡張再翻訳）
+    const expandStart = Date.now()
+    const { blocks: expandedBlocks, stats: expandStats } = await expandEnNode.run(
+      { blocks: enBlocks, embedProvider },
+      ctx,
+    )
+    runState = appendTrace(runState, {
+      nodeId: 'expandEn',
+      status: 'success',
+      durationMs: Date.now() - expandStart,
+      attempt,
+      provider: 'openai',
+      model: ctx.config.translationModel,
+      tokensIn: 0,
+      tokensOut: 0,
+      summary: `拡張: ${expandStats.expanded}/${expandStats.overCompressed}件 フラグ: ${expandStats.flagged}件`,
+    }, 0)
+
     // formatLines
     const formatStart = Date.now()
-    const formattedBlocks: readonly EnglishBlock[] = await formatLinesNode.run(enBlocks, ctx)
+    const formattedBlocks: readonly EnglishBlock[] = await formatLinesNode.run(expandedBlocks, ctx)
     runState = appendTrace(runState, {
       nodeId: 'formatLines',
       status: 'success',
@@ -402,6 +452,8 @@ async function runTranslateLoop(
       splitHints,
       splitJaOutput: jaSentences,
       translateEnOutput: enBlocks,
+      expandEnOutput: expandedBlocks,
+      expandEnStats: expandStats,
       compressEnOutput: compressedBlocks,
       compressEnStats: compressStats,
       splitEnOutput: blocks,

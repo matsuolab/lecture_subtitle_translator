@@ -13,8 +13,14 @@ const DIAG_INFO: Record<DiagnosticPattern, { label: string; color: string; bg: s
   long_segment: {
     label: '長発話セグメント',
     color: '#60a5fa', bg: 'rgba(96,165,250,0.1)',
-    desc: 'duration > 10s かつ CPS < 4。WhisperXが長い息継ぎなし発話を1セグメントとして出力しました。ENテキストが短くなるのは自然です。',
-    action: '字幕が長時間表示されます。必要であれば手動でタイムスタンプを分割してください。',
+    desc: 'duration > 10s かつ CPS < 4。WhisperXが長い息継ぎなし発話を1セグメントとして出力しました。splitLongBlockで「、」分割を試みています。',
+    action: '「、」がなく自動分割不可の場合は手動でタイムスタンプを分割してください。',
+  },
+  slow_speech: {
+    label: 'ゆっくり発話',
+    color: '#6ee7b7', bg: 'rgba(110,231,183,0.1)',
+    desc: 'JA文字数 < 20文字 かつ duration ≥ 5s かつ CPS < 5。話者がゆっくり話している自然な状態です。',
+    action: '対処不要。自然な発話速度です。',
   },
   over_compressed: {
     label: '過剰圧縮',
@@ -65,26 +71,45 @@ function formatTime(sec: number): string {
   return `${m}:${s}`
 }
 
+const PATTERN_ORDER_DISPLAY: DiagnosticPattern[] = [
+  'verbose_en', 'over_compressed', 'long_segment', 'slow_speech',
+  'short_duration', 'merged_long', 'line_length_only', 'proportional_ts', 'ok',
+]
+
 export function BlockDetailTab({ log, activeBlockId }: BlockDetailTabProps) {
   const { theme } = useTheme()
   const [query, setQuery] = useState('')
   const [searched, setSearched] = useState(false)
+  const [selectedPattern, setSelectedPattern] = useState<DiagnosticPattern | null>(null)
 
   useEffect(() => {
     if (activeBlockId == null) return
     setQuery(String(activeBlockId))
     setSearched(true)
+    setSelectedPattern(null)
   }, [activeBlockId])
 
-  const search = () => setSearched(true)
+  const search = () => { setSearched(true); setSelectedPattern(null) }
 
   const normalizedQuery = query.trim().toLowerCase()
 
-  const matchingFinalBlocks = searched && normalizedQuery
+  const matchingFinalBlocks = searched && normalizedQuery && !selectedPattern
     ? log.finalBlocks.filter(b =>
         b.blockKey.toLowerCase() === normalizedQuery ||
         String(b.id) === normalizedQuery
       )
+    : []
+
+  // DiagnosticPattern 件数集計
+  const diagCounts = log.finalBlocks.reduce<Partial<Record<DiagnosticPattern, number>>>((acc, b) => {
+    const p = b.diagPattern ?? 'ok'
+    acc[p] = (acc[p] ?? 0) + 1
+    return acc
+  }, {})
+
+  // 選択パターンのブロック一覧
+  const patternBlocks = selectedPattern
+    ? log.finalBlocks.filter(b => (b.diagPattern ?? 'ok') === selectedPattern)
     : []
 
   const card: React.CSSProperties = {
@@ -118,6 +143,77 @@ export function BlockDetailTab({ log, activeBlockId }: BlockDetailTabProps) {
 
   return (
     <div>
+      {/* ── DiagnosticPattern フィルターチップ ── */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
+        {PATTERN_ORDER_DISPLAY.map(p => {
+          const count = diagCounts[p] ?? 0
+          if (count === 0) return null
+          const info = DIAG_INFO[p]
+          const isSelected = selectedPattern === p
+          return (
+            <button
+              key={p}
+              onClick={() => setSelectedPattern(isSelected ? null : p)}
+              style={{
+                fontSize: 10,
+                padding: '2px 8px',
+                borderRadius: 10,
+                border: `1px solid ${isSelected ? info.color : `${info.color}60`}`,
+                background: isSelected ? info.color : info.bg,
+                color: isSelected ? '#fff' : info.color,
+                cursor: 'pointer',
+                fontWeight: isSelected ? 700 : 400,
+              }}
+            >
+              {info.label} {count}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* ── パターン一覧ビュー ── */}
+      {selectedPattern && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: DIAG_INFO[selectedPattern].color, marginBottom: 6 }}>
+            {DIAG_INFO[selectedPattern].label} — {patternBlocks.length}件
+          </div>
+          <div style={{ fontSize: 10, color: theme.textSecondary, marginBottom: 8 }}>
+            {DIAG_INFO[selectedPattern].desc}
+          </div>
+          <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+            {patternBlocks.map(b => {
+              const dur = (b.end - b.start).toFixed(1)
+              return (
+                <button
+                  key={b.blockKey}
+                  onClick={() => { setQuery(String(b.id)); setSearched(true); setSelectedPattern(null) }}
+                  style={{
+                    width: '100%', textAlign: 'left', display: 'block',
+                    padding: '5px 8px', marginBottom: 3, borderRadius: 4,
+                    border: `1px solid ${theme.panelBorder}`,
+                    background: theme.cardBg, cursor: 'pointer',
+                    fontSize: 10,
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 2 }}>
+                    <span style={{ fontWeight: 700, color: theme.textPrimary }}>#{b.id}</span>
+                    <span style={{ color: theme.textMuted, fontFamily: 'monospace' }}>
+                      {formatTime(b.start)} → {formatTime(b.end)} ({dur}s)
+                    </span>
+                    <span style={{ color: b.cpsOk ? '#22c55e' : '#ef4444', fontWeight: 600 }}>
+                      CPS {b.cps.toFixed(1)}
+                    </span>
+                  </div>
+                  <div style={{ color: theme.textSecondary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {b.jaText}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* 検索欄 */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <input
@@ -143,13 +239,13 @@ export function BlockDetailTab({ log, activeBlockId }: BlockDetailTabProps) {
         </button>
       </div>
 
-      {!searched && (
+      {!searched && !selectedPattern && (
         <div style={{ fontSize: 11, color: theme.textMuted }}>
-          字幕エディタでブロックを選択すると自動で表示されます。
+          上のパターンチップでフィルタ、またはIDで検索してください。
         </div>
       )}
 
-      {searched && matchingFinalBlocks.length === 0 && (
+      {searched && !selectedPattern && matchingFinalBlocks.length === 0 && (
         <div style={{ fontSize: 11, color: theme.textMuted }}>
           ブロックが見つかりません: <strong>{query}</strong>
         </div>

@@ -41,6 +41,7 @@ export interface GlossaryItem {
 export type DiagnosticPattern =
   | 'short_duration'
   | 'long_segment'
+  | 'slow_speech'      // 話者がゆっくり話している自然現象。対処不要
   | 'over_compressed'
   | 'verbose_en'
   | 'proportional_ts'
@@ -52,6 +53,8 @@ export type QaViolationType =
   | 'cps'              // CPS > maxCps
   | 'cpsTooLow'        // CPS < MIN_CPS_LOW（テキストが短すぎる・字幕が長く表示されすぎる）
   | 'lineLength'       // 1行 > maxChars
+  | 'lineCount'        // 行数 > maxLines
+  | 'totalChars'       // 全行合計 > maxTotalChars
   | 'durationShort'    // duration < MIN_DURATION
   | 'durationLong'     // duration > MAX_DURATION
   | 'timestampUncertain'  // alignConfidence = proportional/merged

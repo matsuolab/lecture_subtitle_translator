@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import type { SubtitleBlock } from '@/types/subtitle'
 
 interface UseVideoSyncReturn {
@@ -64,10 +64,30 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
     setIsPlaying(false)
   }, [])
 
+  // blocks 変更時だけ軽量インデックスを構築（startTime/endTime/id のみ）
+  const blockTimeIndex = useMemo(
+    () => blocks.map(b => ({ start: b.startTime, end: b.endTime, id: b.id })),
+    [blocks],
+  )
+
+  // 毎フレーム: 軽量インデックスを二分探索してアクティブブロックを特定
   useEffect(() => {
-    const active = blocks.find(b => currentTime >= b.startTime && currentTime < b.endTime)
-    setActiveBlockId(active?.id ?? null)
-  }, [currentTime, blocks])
+    let lo = 0, hi = blockTimeIndex.length - 1
+    let found: number | null = null
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      const entry = blockTimeIndex[mid]
+      if (currentTime < entry.start) {
+        hi = mid - 1
+      } else if (currentTime >= entry.end) {
+        lo = mid + 1
+      } else {
+        found = entry.id
+        break
+      }
+    }
+    setActiveBlockId(found)
+  }, [currentTime, blockTimeIndex])
 
   return { videoRef, currentTime, duration, isPlaying, activeBlockId, seekTo, togglePlay, onTimeUpdate, onPlay, onPause, onLoadedMetadata, onError }
 }

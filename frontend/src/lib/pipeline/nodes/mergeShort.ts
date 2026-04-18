@@ -18,15 +18,16 @@
 import type { NodeContract, NodeContext } from '../nodeContract'
 import type { JapaneseSentenceBlock } from '../types'
 
-const MIN_DURATION      = 1.0   // 秒：推奨最短（Netflix/Amazon 共通）
-const MAX_DURATION      = 7.0   // 秒：推奨最長
-const MIN_JA_CHARS      = 8     // 文字：これ未満は意味単位として不完全
 const MAX_GAP_TO_MERGE  = 1.0   // 秒：これを超えるギャップは孤立扱い
 
-function shouldMerge(block: JapaneseSentenceBlock): boolean {
+function shouldMerge(
+  block: JapaneseSentenceBlock,
+  minDurationSec: number,
+  minJaChars: number,
+): boolean {
   const duration = block.end - block.start
   const jaChars  = block.jaText.replace(/\s/g, '').length
-  return duration < MIN_DURATION || jaChars < MIN_JA_CHARS
+  return duration < minDurationSec || jaChars < minJaChars
 }
 
 function mergeTwo(
@@ -66,6 +67,8 @@ export const mergeShortNode: NodeContract<
 
     if (input.length === 0) return input
 
+    const { minDurationSec, maxDurationSec, minJaChars } = ctx.config.timingConstraints
+
     const attempt = input[0]?.attempt ?? 1
     // 作業用配列（ミュータブル）
     const work: JapaneseSentenceBlock[] = [...input]
@@ -75,7 +78,7 @@ export const mergeShortNode: NodeContract<
     while (i < work.length) {
       const block = work[i]
 
-      if (!shouldMerge(block)) {
+      if (!shouldMerge(block, minDurationSec, minJaChars)) {
         work[i] = { ...block, id: idCounter++, blockKey: `a${attempt}s${idCounter - 1}` }
         i++
         continue
@@ -103,9 +106,9 @@ export const mergeShortNode: NodeContract<
       const durWithPrev = prevBlock ? (Math.max(block.end, prevBlock.end) - Math.min(block.start, prevBlock.start)) : Infinity
       const durWithNext = nextBlock ? (Math.max(block.end, nextBlock.end) - Math.min(block.start, nextBlock.start)) : Infinity
 
-      // まず MAX_DURATION 以内の候補を優先
-      const prevFits = prevOk && durWithPrev <= MAX_DURATION
-      const nextFits = nextOk && durWithNext <= MAX_DURATION
+      // まず maxDurationSec 以内の候補を優先
+      const prevFits = prevOk && durWithPrev <= maxDurationSec
+      const nextFits = nextOk && durWithNext <= maxDurationSec
 
       let mergeWithPrev: boolean
 
