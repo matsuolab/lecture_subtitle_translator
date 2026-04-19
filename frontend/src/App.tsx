@@ -14,6 +14,7 @@ import { TimelineBar } from '@/components/TimelineBar'
 import { useVideoSync } from '@/hooks/useVideoSync'
 import { useHistory } from '@/hooks/useHistory'
 import { useActionLog, snapBlock } from '@/hooks/useActionLog'
+import type { BlockState } from '@/hooks/useActionLog'
 import {
   saveToLocalStorage,
   loadFromLocalStorage,
@@ -55,6 +56,9 @@ export default function App() {
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
     useHistory<SubtitleBlock[]>(restored ?? [])
   const { logAction, resetSession, getLog } = useActionLog()
+  const toBlockState = useCallback((b: SubtitleBlock): BlockState => ({
+    id: b.id, startTime: b.startTime, endTime: b.endTime, source: b.source, target: b.target,
+  }), [])
   const [toast, setToast] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('subtitles')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
@@ -858,6 +862,7 @@ export default function App() {
     if (name.endsWith('.srt') || name.endsWith('.txt')) {
       try {
         const imported = await importSrt(file)
+        resetSession(file.name, imported.length, imported.map(toBlockState))
         reset(imported)
       } catch {
         alert(t.importSrtError)
@@ -910,6 +915,8 @@ export default function App() {
         }
         if (name.endsWith('.srt') || name.endsWith('.txt')) {
           const imported = await importSrt(await readTextFileAsFile(path))
+          const fileName = path.split(/[\\/]/).pop() ?? path
+          resetSession(fileName, imported.length, imported.map(toBlockState))
           reset(imported)
           return
         }
@@ -999,7 +1006,7 @@ export default function App() {
     if (!file) return
     try {
       const imported = await importSrt(file)
-      resetSession(file.name, imported.length)
+      resetSession(file.name, imported.length, imported.map(toBlockState))
       reset(imported)
     } catch {
       alert(t.importSrtError)
@@ -1534,7 +1541,7 @@ export default function App() {
                 <FolderOpen size={11} />SRT読込
               </button>
               <button onClick={async () => {
-                const path = await exportSrt(blocks, getLog())
+                const path = await exportSrt(blocks, getLog(blocks.map(toBlockState)))
                 if (path) setToast(`保存しました: ${path}`)
               }} title={t.exportSrtTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
@@ -1546,7 +1553,7 @@ export default function App() {
                 <FolderOpen size={11} />JSON読込
               </button>
               <button onClick={async () => {
-                const path = await exportProjectJson(blocks, getLog())
+                const path = await exportProjectJson(blocks, getLog(blocks.map(toBlockState)))
                 if (path) setToast(`保存しました: ${path}`)
               }} title={t.saveProjectTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>

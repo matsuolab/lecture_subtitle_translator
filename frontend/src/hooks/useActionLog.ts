@@ -48,10 +48,25 @@ export interface ActionEntry {
   file?: string
 }
 
+/** SRT読み込み時・SRT出力時のブロックスナップショット */
+export interface BlockState {
+  id: number
+  startTime: number
+  endTime: number
+  /** 英語原文（SRT に書き出される側） */
+  source: string
+  /** 日本語訳文（読み込み元または書き起こし出力） */
+  target: string
+}
+
 export interface SessionLog {
   version: 1
   startedAt: string
   loadedFile?: string
+  /** SRT読み込み時の全ブロック（JP + 元EN） */
+  initialBlocks: BlockState[]
+  /** SRT出力時の全ブロック（JP + 最終EN） — exportSrt 呼び出し時に付与 */
+  finalBlocks?: BlockState[]
   entries: ActionEntry[]
 }
 
@@ -90,6 +105,7 @@ export function useActionLog() {
   const entries = useRef<ActionEntry[]>([])
   const startMs = useRef(Date.now())
   const loadedFile = useRef<string | undefined>(undefined)
+  const initialBlocks = useRef<BlockState[]>([])
 
   const logAction = useCallback((
     op: ActionOp,
@@ -106,11 +122,16 @@ export function useActionLog() {
     })
   }, [])
 
-  /** SRT 読み込み時にセッションをリセットしてファイル名を記録 */
-  const resetSession = useCallback((fileName?: string, blockCount?: number) => {
+  /** SRT 読み込み時にセッションをリセット。全ブロックの初期状態（JP+EN）を保存する */
+  const resetSession = useCallback((
+    fileName?: string,
+    blockCount?: number,
+    blocks?: BlockState[],
+  ) => {
     entries.current = []
     startMs.current = Date.now()
     loadedFile.current = fileName
+    initialBlocks.current = blocks ?? []
     entries.current.push({
       t: 0,
       op: 'load_srt',
@@ -119,10 +140,16 @@ export function useActionLog() {
     })
   }, [])
 
-  const getLog = useCallback((): SessionLog => ({
+  /**
+   * セッションログを返す。
+   * @param finalBlocks SRT出力時の全ブロック状態（最終EN+JP）。省略時は finalBlocks なし。
+   */
+  const getLog = useCallback((finalBlocks?: BlockState[]): SessionLog => ({
     version: 1,
     startedAt: new Date(startMs.current).toISOString(),
     loadedFile: loadedFile.current,
+    initialBlocks: [...initialBlocks.current],
+    ...(finalBlocks !== undefined && { finalBlocks }),
     entries: [...entries.current],
   }), [])
 
