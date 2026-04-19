@@ -1,6 +1,6 @@
 {
   "productName": "subtitle-editor",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "identifier": "jp.matsuolab.subtitle-editor",
   "build": {
     "beforeDevCommand": "npm run dev",
