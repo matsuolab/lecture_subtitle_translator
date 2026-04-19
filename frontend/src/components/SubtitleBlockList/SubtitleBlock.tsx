@@ -165,10 +165,10 @@ const splitBtnStyle: React.CSSProperties = {
   fontWeight: 600,
 }
 
-function getCharLevel(lineLengths: number[]): 'ok' | 'warn' | 'error' {
+function getCharLevel(lineLengths: number[], maxChars: number): 'ok' | 'warn' | 'error' {
   const max = Math.max(...lineLengths, 0)
-  if (max > 42) return 'error'
-  if (max > 36) return 'warn'
+  if (max > maxChars) return 'error'
+  if (max > maxChars * 0.85) return 'warn'
   return 'ok'
 }
 
@@ -384,7 +384,7 @@ function SubtitleBlockInner({
 
   const sourceLines = block.source.split('\n')
   const liveLines = isEditing ? editText.split('\n') : sourceLines
-  const charLevel = getCharLevel(liveLines.map(l => l.length))
+  const charLevel = getCharLevel(liveLines.map(l => l.length), enMaxCharsPerLine)
   // 再生位置がこのブロック内にあるときだけ「再生位置で分割」を有効化
   const canSplitAtPlayhead = !isApproved && isCurrentlyPlaying
 
