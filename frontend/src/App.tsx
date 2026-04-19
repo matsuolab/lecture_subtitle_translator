@@ -1706,6 +1706,7 @@ export default function App() {
                 onDraftChange={handleDraftChange}
                 enMaxCharsPerLine={adminSettings.enMaxCharsPerLine}
                 enMaxLines={adminSettings.enMaxLines}
+                enMaxTotalChars={adminSettings.enMaxTotalChars}
                 enMaxCps={adminSettings.enMaxCps}
               />
             )}

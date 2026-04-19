@@ -27,6 +27,7 @@ interface SubtitleBlockListProps {
   onDraftChange: (id: number, text: string | null) => void
   enMaxCharsPerLine: number
   enMaxLines: number
+  enMaxTotalChars: number
   enMaxCps: number
 }
 
@@ -179,6 +180,7 @@ export function SubtitleBlockList({
   onDraftChange,
   enMaxCharsPerLine,
   enMaxLines,
+  enMaxTotalChars,
   enMaxCps,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -556,6 +558,7 @@ export function SubtitleBlockList({
               onDraftChange={onDraftChange}
               enMaxCharsPerLine={enMaxCharsPerLine}
               enMaxLines={enMaxLines}
+              enMaxTotalChars={enMaxTotalChars}
               enMaxCps={enMaxCps}
             />
           </div>

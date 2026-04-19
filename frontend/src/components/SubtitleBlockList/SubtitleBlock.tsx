@@ -30,6 +30,7 @@ interface SubtitleBlockProps {
   onDraftChange: (id: number, text: string | null) => void
   enMaxCharsPerLine: number
   enMaxLines: number
+  enMaxTotalChars: number
   enMaxCps: number
 }
 
@@ -195,6 +196,7 @@ function SubtitleBlockInner({
   onDraftChange,
   enMaxCharsPerLine,
   enMaxLines,
+  enMaxTotalChars,
   enMaxCps,
 }: SubtitleBlockProps) {
   const { theme } = useTheme()
@@ -385,6 +387,9 @@ function SubtitleBlockInner({
   const sourceLines = block.source.split('\n')
   const liveLines = isEditing ? editText.split('\n') : sourceLines
   const charLevel = getCharLevel(liveLines.map(l => l.length), enMaxCharsPerLine)
+  const lineCountOver = liveLines.length > enMaxLines
+  const totalChars = liveLines.reduce((s, l) => s + l.length, 0)
+  const totalCharsOver = totalChars > enMaxTotalChars
   // 再生位置がこのブロック内にあるときだけ「再生位置で分割」を有効化
   const canSplitAtPlayhead = !isApproved && isCurrentlyPlaying
 
@@ -774,6 +779,28 @@ function SubtitleBlockInner({
         }}>
           {liveLines.map(l => l.length).join(' / ')}字
         </span>
+        {lineCountOver && (
+          <span style={{
+            ...cpsBadgeStyle('error', theme),
+            padding: '2px 8px',
+            borderRadius: 999,
+            fontWeight: 700,
+            fontSize: 11,
+          }}>
+            {liveLines.length}行 ⚠
+          </span>
+        )}
+        {totalCharsOver && (
+          <span style={{
+            ...cpsBadgeStyle('error', theme),
+            padding: '2px 8px',
+            borderRadius: 999,
+            fontWeight: 700,
+            fontSize: 11,
+          }}>
+            計{totalChars}字 ⚠
+          </span>
+        )}
         {(missingTerms.length > 0 || ignoredMissingTerms.length > 0) && (
           <WarningBadge
             activeCount={missingTerms.length}
