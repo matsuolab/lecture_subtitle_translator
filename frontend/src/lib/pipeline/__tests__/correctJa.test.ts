@@ -32,6 +32,7 @@ function makeCtx(): NodeContext {
       correctionModel: 'gpt-4.1-nano',
       qualityThresholds: { correction: 0.15, translation: 0.25 },
     } as NodeContext['config'],
+    glossary: [],
     onProgress: vi.fn(),
     reportUsage: vi.fn(),
   }

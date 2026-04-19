@@ -6,6 +6,7 @@ import type { CorrectedSegment } from '../types'
 function makeCtx(): NodeContext {
   return {
     config: {} as NodeContext['config'],
+    glossary: [],
     onProgress: vi.fn(),
     reportUsage: vi.fn(),
   }

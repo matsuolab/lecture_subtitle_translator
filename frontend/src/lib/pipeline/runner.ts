@@ -31,7 +31,7 @@ import { splitLongBlockNode } from './nodes/splitLongBlock'
 import { finalQaNode } from './nodes/finalQA'
 import { exportSrtNode } from './nodes/exportSrt'
 import type { EmbedProvider } from './providers/openaiEmbedProvider'
-import type { CpsAttemptLog, ExpandEnStats, CompressEnStats, SplitLongBlockStats, PipelineRunLog } from '../../types/pipeline'
+import type { CpsAttemptLog, PipelineRunLog } from '../../types/pipeline'
 
 const MAX_SPLIT_ATTEMPTS = 3
 
@@ -312,7 +312,6 @@ async function runTranslateLoop(
   let runState = initialRunState
   let jaSentences = initialJaSentences
   let splitHints: SplitHint[] = []
-  let lastBlocks: PipelineInternalResult['subtitleBlocks'] = []
   // 最良attempt の結果を保持（violations が増加するリトライを無駄に使わない）
   let bestBlocks: PipelineInternalResult['subtitleBlocks'] = []
   let bestViolationCount = Infinity
@@ -419,8 +418,6 @@ async function runTranslateLoop(
       tokensIn: 0,
       tokensOut: 0,
     }, 0)
-
-    lastBlocks = blocks
 
     // 最良結果を更新（violations が少ない attempt を採用）
     if (violations.length < bestViolationCount) {

@@ -30,11 +30,11 @@ export interface QualityThresholds {
 // ---------------------------------------------------------------------------
 
 const SUBTITLE_DEFAULTS: Record<string, SubtitleConstraints> = {
-  _default: { maxChars: 40, maxCps: 15.0, maxRetry: 3 },
-  en:       { maxChars: 42, maxCps: 17.0, maxRetry: 3 },
-  ja:       { maxChars: 20, maxCps: 8.0,  maxRetry: 3 },
-  zh:       { maxChars: 16, maxCps: 7.0,  maxRetry: 3 },
-  ko:       { maxChars: 20, maxCps: 8.0,  maxRetry: 3 },
+  _default: { maxChars: 40, maxLines: 2, maxTotalChars: 84,  maxCps: 15.0, maxRetry: 3 },
+  en:       { maxChars: 42, maxLines: 2, maxTotalChars: 84,  maxCps: 17.0, maxRetry: 3 },
+  ja:       { maxChars: 20, maxLines: 2, maxTotalChars: 40,  maxCps: 8.0,  maxRetry: 3 },
+  zh:       { maxChars: 16, maxLines: 2, maxTotalChars: 32,  maxCps: 7.0,  maxRetry: 3 },
+  ko:       { maxChars: 20, maxLines: 2, maxTotalChars: 40,  maxCps: 8.0,  maxRetry: 3 },
 }
 
 export const DEFAULT_QUALITY_THRESHOLDS: QualityThresholds = {

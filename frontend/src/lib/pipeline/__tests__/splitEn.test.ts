@@ -8,6 +8,7 @@ function makeCtx(maxCps = 17, maxChars = 42): NodeContext {
     config: {
       subtitleConstraints: { maxCps, maxChars, maxRetry: 3 },
     } as NodeContext['config'],
+    glossary: [],
     onProgress: vi.fn(),
     reportUsage: vi.fn(),
   }
@@ -27,6 +28,7 @@ function makeBlock(
     enText,
     translationDistance: 0,
     translationFlagged: false,
+    alignConfidence: 'exact',
     attempt: 1,
     sourceSegmentIds: [],
     blockKey: `a1s${id}`,

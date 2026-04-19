@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, CheckCircle, AlertCircle, AlertTriangle } from 'lucide-react'
-import type { PipelineRunLog, CpsAttemptLog, PipelineNodeTrace, ExpandEnStats, SplitLongBlockStats } from '@/types/pipeline'
+import type { PipelineRunLog, CpsAttemptLog, PipelineNodeTrace } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 
 interface ExecutionLogTabProps {

@@ -50,6 +50,7 @@ export interface PipelineNodeTrace {
   provider: string
   model: string
   summary?: string
+  error?: string
 }
 
 export interface PipelineAuditReport {

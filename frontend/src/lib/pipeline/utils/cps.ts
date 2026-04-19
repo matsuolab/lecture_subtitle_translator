@@ -11,6 +11,13 @@ export function calcCps(charCount: number, durationSec: number): number {
 }
 
 /**
+ * CPS と文字数が両方制約内かどうかを返す。
+ */
+export function isCpsOk(charCount: number, durationSec: number, maxCps: number, maxChars: number): boolean {
+  return charCount <= maxChars && calcCps(charCount, durationSec) <= maxCps
+}
+
+/**
  * テキストと期間から CPS / 行長チェックを行う。
  *
  * charCount: 全文字数（\n を除く）→ CPS 計算に使用

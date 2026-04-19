@@ -102,7 +102,7 @@ export const splitLongBlockNode: NodeContract<SplitLongBlockInput, SplitLongBloc
 
   async run(input: SplitLongBlockInput, ctx: NodeContext): Promise<SplitLongBlockOutput> {
     const { blocks, embedProvider } = input
-    const { maxCps, maxChars } = ctx.config.subtitleConstraints
+    const { maxCps } = ctx.config.subtitleConstraints
 
     // 対象: duration > 10s AND CPS < 4
     const longSegmentIndices = blocks
