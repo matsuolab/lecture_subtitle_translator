@@ -67,6 +67,7 @@ export const en: LocaleStrings = {
         '① Load SRT / project  ② Review each block while playing the video  ③ Edit text and timing  ④ Approve when satisfied  ⑤ Export as SRT',
         'The project is auto-saved in the browser. JSON export and import are also available.',
         'You can review pipeline quality, cost, and run history in the Report tab after dropping a video.',
+        'Note: The WhisperX transcription pipeline is currently under development. All editor features are fully functional.',
       ],
     },
     {
@@ -74,7 +75,8 @@ export const en: LocaleStrings = {
       paragraphs: [
         'Each block is a single subtitle unit displayed on screen during a "start time – end time" interval. It holds both the source text and the translation.',
         'CPS (Characters Per Second) measures reading speed: character count ÷ display duration. Blocks are color-coded in three levels following Netflix subtitle guidelines.',
-        '🟢 Green (CPS ≤ 15): comfortable reading speed  🟡 Yellow (15–20): slightly fast, review recommended  🔴 Red (> 20): too fast, consider splitting',
+        '🟢 Green (CPS ≤ 17): comfortable reading speed  🟡 Yellow (17–25): slightly fast, review recommended  🔴 Red (> 25): too fast, consider splitting',
+        'CPS limit, max chars per line, and max lines can all be adjusted in Settings → Subtitle Quality Parameters.',
       ],
     },
     {
@@ -106,7 +108,7 @@ export const en: LocaleStrings = {
       category: 'Edit',
       items: [
         { keys: ['Click (source text)'], desc: 'Enter edit mode' },
-        { keys: ['Enter'], desc: 'Insert line break (42 chars per line recommended)' },
+        { keys: ['Enter'], desc: 'Insert line break (max chars per line adjustable in Settings)' },
         { keys: ['Ctrl', 'Enter'], desc: 'Save edit' },
         { keys: ['Esc'], desc: 'Cancel edit' },
         { keys: ['Shift', 'Enter'], desc: 'Split block at cursor' },

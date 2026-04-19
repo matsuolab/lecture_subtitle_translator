@@ -4,8 +4,5 @@ target/
 # 自動生成されるスキーマ
 gen/
 
-# アイコンはCIで生成（手元で生成した場合はコミット可）
-icons/
-
 # ffmpeg サイドカーバイナリ（npm run setup:ffmpeg で取得する）
 binaries/

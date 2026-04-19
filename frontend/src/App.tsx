@@ -13,6 +13,7 @@ import { SettingsTab } from '@/components/SettingsTab'
 import { TimelineBar } from '@/components/TimelineBar'
 import { useVideoSync } from '@/hooks/useVideoSync'
 import { useHistory } from '@/hooks/useHistory'
+import { useActionLog, snapBlock } from '@/hooks/useActionLog'
 import {
   saveToLocalStorage,
   loadFromLocalStorage,
@@ -53,6 +54,8 @@ export default function App() {
   const restored = loadFromLocalStorage()
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
     useHistory<SubtitleBlock[]>(restored ?? [])
+  const { logAction, resetSession, getLog } = useActionLog()
+  const [toast, setToast] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('subtitles')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
   const [restoredMsg, setRestoredMsg] = useState(restored !== null)
@@ -996,6 +999,7 @@ export default function App() {
     if (!file) return
     try {
       const imported = await importSrt(file)
+      resetSession(file.name, imported.length)
       reset(imported)
     } catch {
       alert(t.importSrtError)
@@ -1009,19 +1013,29 @@ export default function App() {
   }, [blocks, seekTo])
 
   const handleApprove = useCallback((id: number) => {
+    const block = blocks.find(b => b.id === id)
+    if (block) {
+      const next = block.status === 'approved' ? 'pending' : 'approved'
+      logAction('approve', { id, status: block.status }, { id, status: next })
+    }
     push(blocks.map(b => {
       if (b.id !== id) return b
       return { ...b, status: b.status === 'approved' ? 'pending' as const : 'approved' as const }
     }))
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blocks])
+  }, [blocks, logAction])
 
   const handleFlag = useCallback((id: number) => {
+    const block = blocks.find(b => b.id === id)
+    if (block) {
+      const next = block.status === 'flagged' ? 'pending' : 'flagged'
+      logAction('flag', { id, status: block.status }, { id, status: next })
+    }
     push(blocks.map(b => {
       if (b.id !== id) return b
       return { ...b, status: b.status === 'flagged' ? 'pending' as const : 'flagged' as const }
     }))
-  }, [blocks, push])
+  }, [blocks, push, logAction])
 
   const handleReSplit = useCallback((id: number) => {
     alert(t.reSplitAlert(id))
@@ -1085,10 +1099,11 @@ export default function App() {
     const ratio = textBefore.length / Math.max(1, textBefore.length + textAfter.length)
     const splitTime = block.startTime + (block.endTime - block.startTime) * ratio
     const [b1, b2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    logAction('split', snapBlock(block), [snapBlock(b1), snapBlock(b2)])
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
-  }, [blocks, push, makeSplitBlocks])
+  }, [blocks, push, makeSplitBlocks, logAction])
 
   /** 再生位置で分割: 時間は currentTime、テキストは時間比率に最近接の単語境界 */
   const handleSplitAtPlayhead = useCallback((id: number) => {
@@ -1100,10 +1115,11 @@ export default function App() {
     const ratio = (splitTime - block.startTime) / (block.endTime - block.startTime)
     const [textBefore, textAfter] = splitAtWordBoundary(block.source, Math.round(block.source.length * ratio))
     const [b1, b2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    logAction('split_playhead', snapBlock(block), [snapBlock(b1), snapBlock(b2)])
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
-  }, [blocks, push, splitAtWordBoundary, makeSplitBlocks])
+  }, [blocks, push, splitAtWordBoundary, makeSplitBlocks, logAction])
 
   /** 均等割り: 時間を2等分、テキストは中点に最近接の単語境界 */
   const handleEqualSplit = useCallback((id: number) => {
@@ -1113,10 +1129,11 @@ export default function App() {
     const splitTime = (block.startTime + block.endTime) / 2
     const [textBefore, textAfter] = splitAtWordBoundary(block.source, Math.round(block.source.length / 2))
     const [b1, b2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    logAction('split_equal', snapBlock(block), [snapBlock(b1), snapBlock(b2)])
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
-  }, [blocks, push, splitAtWordBoundary, makeSplitBlocks])
+  }, [blocks, push, splitAtWordBoundary, makeSplitBlocks, logAction])
 
   const handleMerge = useCallback((dragId: number, dropId: number) => {
     const dragIdx = blocks.findIndex(b => b.id === dragId)
@@ -1139,10 +1156,11 @@ export default function App() {
       status: 'pending',
       glossaryTerms: [...first.glossaryTerms, ...second.glossaryTerms],
     }
+    logAction('merge', [snapBlock(first), snapBlock(second)], snapBlock(merged))
     const next = blocks.filter((_, i) => i !== secondIdx)
     next[firstIdx] = merged
     push(next)
-  }, [blocks, push])
+  }, [blocks, push, logAction])
 
   // キーボードショートカット（handleMerge 定義後）
   useEffect(() => {
@@ -1203,12 +1221,15 @@ export default function App() {
   }, [undo, redo, activeBlockId, blocks, handleMerge, push])
 
   const handleUpdateTimes = useCallback((id: number, startTime: number, endTime: number) => {
+    const prev = blocks.find(b => b.id === id)
     push(blocks.map(b => {
       if (b.id !== id) return b
       const dur = Math.max(0.01, endTime - startTime)
-      return { ...b, startTime, endTime, cps: Math.round(b.charCount / dur * 10) / 10 }
+      const updated = { ...b, startTime, endTime, cps: Math.round(b.charCount / dur * 10) / 10 }
+      if (prev) logAction('adjust_time', snapBlock(prev), snapBlock(updated))
+      return updated
     }))
-  }, [blocks, push])
+  }, [blocks, push, logAction])
 
   const handleAdjustBoundary = useCallback((id1: number, id2: number, newTime: number) => {
     push(blocks.map(b => {
@@ -1225,8 +1246,14 @@ export default function App() {
   }, [blocks, push])
 
   const handleUpdateTarget = useCallback((id: number, text: string) => {
-    push(blocks.map(b => b.id !== id ? b : { ...b, target: text }))
-  }, [blocks, push])
+    const prev = blocks.find(b => b.id === id)
+    push(blocks.map(b => {
+      if (b.id !== id) return b
+      const updated = { ...b, target: text }
+      if (prev) logAction('edit_target', { id, target: prev.target }, { id, target: text })
+      return updated
+    }))
+  }, [blocks, push, logAction])
 
   /** ターゲット分割: targetBefore/After で2ブロックに分割。sourceは両方コピー */
   const handleSplitFromTarget = useCallback((id: number, targetBefore: string, targetAfter: string) => {
@@ -1255,18 +1282,22 @@ export default function App() {
       status: 'pending' as const,
       glossaryTerms: [],
     }
+    logAction('split_target', snapBlock(block), [snapBlock(b1), snapBlock(b2)])
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
-  }, [blocks, push])
+  }, [blocks, push, logAction])
 
   const handleUpdateSource = useCallback((id: number, text: string) => {
+    const prev = blocks.find(b => b.id === id)
     push(blocks.map(b => {
       if (b.id !== id) return b
       const duration = b.endTime - b.startTime
-      return { ...b, source: text, cps: Math.round(text.length / Math.max(0.1, duration) * 10) / 10, charCount: text.length }
+      const updated = { ...b, source: text, cps: Math.round(text.length / Math.max(0.1, duration) * 10) / 10, charCount: text.length }
+      if (prev) logAction('edit_source', snapBlock(prev), snapBlock(updated))
+      return updated
     }))
-  }, [blocks, push])
+  }, [blocks, push, logAction])
 
   const handleIgnoreWarning = useCallback((id: number, type: 'typo' | 'missing', key: string) => {
     push(blocks.map(b => {
@@ -1502,7 +1533,10 @@ export default function App() {
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <FolderOpen size={11} />SRT読込
               </button>
-              <button onClick={() => exportSrt(blocks)} title={t.exportSrtTitle}
+              <button onClick={async () => {
+                const path = await exportSrt(blocks, getLog())
+                if (path) setToast(`保存しました: ${path}`)
+              }} title={t.exportSrtTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <Download size={11} />SRT出力
               </button>
@@ -1511,7 +1545,10 @@ export default function App() {
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <FolderOpen size={11} />JSON読込
               </button>
-              <button onClick={() => exportProjectJson(blocks)} title={t.saveProjectTitle}
+              <button onClick={async () => {
+                const path = await exportProjectJson(blocks, getLog())
+                if (path) setToast(`保存しました: ${path}`)
+              }} title={t.saveProjectTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <Save size={11} />JSON保存
               </button>
@@ -1684,6 +1721,42 @@ export default function App() {
         </section>
 
       </main>
+
+      {/* 保存完了トースト */}
+      {toast && (
+        <SaveToast message={toast} onDismiss={() => setToast(null)} />
+      )}
+    </div>
+  )
+}
+
+function SaveToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onDismiss, 4000)
+    return () => clearTimeout(t)
+  }, [onDismiss])
+
+  return (
+    <div
+      onClick={onDismiss}
+      style={{
+        position: 'fixed',
+        bottom: 24,
+        right: 24,
+        maxWidth: 480,
+        padding: '10px 16px',
+        borderRadius: 8,
+        background: '#1a1a2e',
+        color: '#e2e8f0',
+        fontSize: 12,
+        lineHeight: 1.5,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        cursor: 'pointer',
+        zIndex: 9999,
+        wordBreak: 'break-all',
+      }}
+    >
+      ✓ {message}
     </div>
   )
 }

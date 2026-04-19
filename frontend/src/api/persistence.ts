@@ -1,7 +1,50 @@
 import type { SubtitleBlock } from '@/types/subtitle'
+import type { SessionLog } from '@/hooks/useActionLog'
 
 const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
 const VIDEO_SOURCE_KEY = 'matsuo-video-source-v1'
+
+// ─── Tauri 環境判定 ────────────────────────────────────────────────────────
+
+function isTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
+// ─── ネイティブ保存（Tauri）/ blob フォールバック ─────────────────────────
+
+/**
+ * Tauri 環境ではネイティブ保存ダイアログを使ってファイルを保存し、
+ * 保存先パスを返す。キャンセルされた場合は null を返す。
+ * ブラウザ環境では blob ダウンロードに落ちる（パスは null）。
+ */
+async function saveFileNative(
+  content: string,
+  defaultFilename: string,
+  filters: Array<{ name: string; extensions: string[] }>,
+): Promise<string | null> {
+  if (!isTauri()) {
+    downloadFile(content, defaultFilename, 'text/plain')
+    return null
+  }
+
+  try {
+    const { save } = await import('@tauri-apps/plugin-dialog')
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs')
+
+    const path = await save({
+      defaultPath: defaultFilename,
+      filters,
+    })
+    if (!path) return null
+
+    await writeTextFile(path, content)
+    return path
+  } catch {
+    // ダイアログが使えない場合は blob フォールバック
+    downloadFile(content, defaultFilename, 'text/plain')
+    return null
+  }
+}
 
 // ─── videoSource の永続化 ───────────────────────────────────────────────────
 
@@ -72,9 +115,27 @@ export function clearLocalStorage(): void {
 
 // ─── JSON プロジェクトファイル ─────────────────────────────────────────────
 
-export function exportProjectJson(blocks: SubtitleBlock[]): void {
-  const data = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), blocks }, null, 2)
-  downloadFile(data, 'subtitle-project.json', 'application/json')
+/**
+ * プロジェクトを JSON で保存する。
+ * Tauri ではネイティブダイアログ、ブラウザでは blob ダウンロード。
+ * アクションログがある場合は JSON に埋め込む。
+ * @returns 保存先パス（ブラウザ/キャンセル時は null）
+ */
+export async function exportProjectJson(
+  blocks: SubtitleBlock[],
+  actionLog?: SessionLog,
+): Promise<string | null> {
+  const payload: Record<string, unknown> = {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    blocks,
+  }
+  if (actionLog) payload.actionLog = actionLog
+
+  const data = JSON.stringify(payload, null, 2)
+  return saveFileNative(data, 'subtitle-project.json', [
+    { name: 'JSON', extensions: ['json'] },
+  ])
 }
 
 export function importProjectJson(file: File): Promise<SubtitleBlock[]> {
@@ -127,9 +188,7 @@ const TIMESTAMP_RE = /^(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[
 function isNextBlockStart(lines: string[], i: number): boolean {
   const cur = lines[i]?.trim() ?? ''
   const next = lines[i + 1]?.trim() ?? ''
-  // パターン: 現在行が数字のみ && 次行がタイムスタンプ
   if (/^\d+$/.test(cur) && TIMESTAMP_RE.test(next)) return true
-  // パターン: 現在行がタイムスタンプ（インデックスなし形式）
   if (TIMESTAMP_RE.test(cur)) return true
   return false
 }
@@ -141,15 +200,12 @@ function parseSrt(text: string): SubtitleBlock[] {
   let i = 0
 
   while (i < lines.length) {
-    // 空行をスキップ
     while (i < lines.length && !lines[i].trim()) i++
     if (i >= lines.length) break
 
-    // インデックス行をスキップ（数字のみ）
     if (/^\d+$/.test(lines[i].trim())) i++
     if (i >= lines.length) break
 
-    // タイムスタンプ行を探す
     const timeMatch = lines[i].trim().match(TIMESTAMP_RE)
     if (!timeMatch) { i++; continue }
 
@@ -157,12 +213,11 @@ function parseSrt(text: string): SubtitleBlock[] {
     const endTime   = srtTimeToSeconds(timeMatch[2])
     i++
 
-    // テキスト行を収集：空行 OR 次ブロックの始まりで停止
     const textLines: string[] = []
     while (i < lines.length) {
       const line = lines[i].trim()
-      if (!line) break  // 空行 → ブロック終端
-      if (isNextBlockStart(lines, i)) break  // 空行なしで次ブロックが始まる場合
+      if (!line) break
+      if (isNextBlockStart(lines, i)) break
       textLines.push(line)
       i++
     }
@@ -194,13 +249,38 @@ function parseSrt(text: string): SubtitleBlock[] {
 
 // ─── SRT エクスポート ──────────────────────────────────────────────────────
 
-export function exportSrt(blocks: SubtitleBlock[]): void {
+/**
+ * SRT をネイティブダイアログで保存する。
+ * アクションログがある場合、同じフォルダに <name>.actions.json を自動書き出しする。
+ * @returns 保存先パス（ブラウザ/キャンセル時は null）
+ */
+export async function exportSrt(
+  blocks: SubtitleBlock[],
+  actionLog?: SessionLog,
+): Promise<string | null> {
   const lines = blocks.map((block, i) => {
     const start = secondsToSrtTime(block.startTime)
     const end   = secondsToSrtTime(block.endTime)
     return `${i + 1}\n${start} --> ${end}\n${block.source}`
   })
-  downloadFile(lines.join('\n\n') + '\n', 'subtitles.srt', 'text/plain')
+  const srtContent = lines.join('\n\n') + '\n'
+
+  const srtPath = await saveFileNative(srtContent, 'subtitles.srt', [
+    { name: 'SRT', extensions: ['srt'] },
+  ])
+
+  // アクションログをサイドカーとして書き出す（Tauri のみ）
+  if (srtPath && actionLog) {
+    try {
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs')
+      const logPath = srtPath.replace(/\.srt$/i, '.actions.json')
+      await writeTextFile(logPath, JSON.stringify(actionLog, null, 2))
+    } catch {
+      // ログ書き出し失敗は無視（メインの SRT は保存済み）
+    }
+  }
+
+  return srtPath
 }
 
 // ─── 内部ユーティリティ ────────────────────────────────────────────────────
