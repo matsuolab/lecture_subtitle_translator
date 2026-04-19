@@ -28,6 +28,8 @@ interface SubtitleBlockProps {
   onEqualSplit: (id: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
+  enMaxCharsPerLine: number
+  enMaxLines: number
 }
 
 // ─── 警告バッジ共通コンポーネント ───────────────────────────────────────────
@@ -190,6 +192,8 @@ function SubtitleBlockInner({
   onEqualSplit,
   onIgnoreWarning,
   onDraftChange,
+  enMaxCharsPerLine,
+  enMaxLines,
 }: SubtitleBlockProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -506,11 +510,16 @@ function SubtitleBlockInner({
               <span key={i} style={{
                 fontSize: 10,
                 fontFamily: 'monospace',
-                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+                color: line.length > enMaxCharsPerLine ? '#ef4444' : line.length > enMaxCharsPerLine * 0.85 ? '#f59e0b' : theme.textMuted,
               }}>
-                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+                {i + 1}行: {line.length}字{line.length > enMaxCharsPerLine ? ' ⚠' : ''}
               </span>
             ))}
+            {editTargetText.split('\n').length > enMaxLines && (
+              <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#ef4444' }}>
+                {editTargetText.split('\n').length}行 ⚠ (最大{enMaxLines}行)
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 10, color: theme.textMuted, marginBottom: 4 }}>
             {t.targetEditHint}
@@ -588,11 +597,16 @@ function SubtitleBlockInner({
               <span key={i} style={{
                 fontSize: 10,
                 fontFamily: 'monospace',
-                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+                color: line.length > enMaxCharsPerLine ? '#ef4444' : line.length > enMaxCharsPerLine * 0.85 ? '#f59e0b' : theme.textMuted,
               }}>
-                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+                {i + 1}行: {line.length}字{line.length > enMaxCharsPerLine ? ' ⚠' : ''}
               </span>
             ))}
+            {editText.split('\n').length > enMaxLines && (
+              <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#ef4444' }}>
+                {editText.split('\n').length}行 ⚠ (最大{enMaxLines}行)
+              </span>
+            )}
           </div>
           {editTypoCandidates.length > 0 && (
             <div style={{

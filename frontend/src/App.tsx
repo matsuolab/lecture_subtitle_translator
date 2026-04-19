@@ -1703,6 +1703,8 @@ export default function App() {
                 onUpdateTimes={handleUpdateTimes}
                 onIgnoreWarning={handleIgnoreWarning}
                 onDraftChange={handleDraftChange}
+                enMaxCharsPerLine={adminSettings.enMaxCharsPerLine}
+                enMaxLines={adminSettings.enMaxLines}
               />
             )}
             {!isResizing && activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}

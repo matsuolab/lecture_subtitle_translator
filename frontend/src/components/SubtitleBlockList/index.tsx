@@ -25,6 +25,8 @@ interface SubtitleBlockListProps {
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
+  enMaxCharsPerLine: number
+  enMaxLines: number
 }
 
 interface BoundaryDrag {
@@ -174,6 +176,8 @@ export function SubtitleBlockList({
   onUpdateTimes,
   onIgnoreWarning,
   onDraftChange,
+  enMaxCharsPerLine,
+  enMaxLines,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -548,6 +552,8 @@ export function SubtitleBlockList({
               onUpdateTimes={onUpdateTimes}
               onIgnoreWarning={onIgnoreWarning}
               onDraftChange={onDraftChange}
+              enMaxCharsPerLine={enMaxCharsPerLine}
+              enMaxLines={enMaxLines}
             />
           </div>
           {idx < displayBlocks.length - 1 && (() => {
