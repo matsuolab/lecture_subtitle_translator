@@ -1,6 +1,6 @@
 [package]
 name = "subtitle-editor"
-version = "0.3.1"
+version = "0.3.2"
 description = "Subtitle Editor"
 authors = []
 edition = "2021"
