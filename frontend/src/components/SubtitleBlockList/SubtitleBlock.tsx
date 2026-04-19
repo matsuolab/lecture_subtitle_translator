@@ -30,6 +30,7 @@ interface SubtitleBlockProps {
   onDraftChange: (id: number, text: string | null) => void
   enMaxCharsPerLine: number
   enMaxLines: number
+  enMaxCps: number
 }
 
 // ─── 警告バッジ共通コンポーネント ───────────────────────────────────────────
@@ -194,6 +195,7 @@ function SubtitleBlockInner({
   onDraftChange,
   enMaxCharsPerLine,
   enMaxLines,
+  enMaxCps,
 }: SubtitleBlockProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -274,7 +276,7 @@ function SubtitleBlockInner({
   const liveCps = isEditing
     ? Math.round((editText.length / Math.max(0.01, block.endTime - block.startTime)) * 10) / 10
     : block.cps
-  const cpsLevel = getCpsLevel(liveCps)
+  const cpsLevel = getCpsLevel(liveCps, enMaxCps)
 
   // 時間編集開始時にフォーカス
   useEffect(() => {

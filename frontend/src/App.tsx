@@ -1438,6 +1438,7 @@ export default function App() {
             onBlockSelect={handleBlockSelect}
             onAdjustBoundary={handleAdjustBoundary}
             trackHeight={timelineH}
+            enMaxCps={adminSettings.enMaxCps}
           />
         </section>
 
@@ -1705,6 +1706,7 @@ export default function App() {
                 onDraftChange={handleDraftChange}
                 enMaxCharsPerLine={adminSettings.enMaxCharsPerLine}
                 enMaxLines={adminSettings.enMaxLines}
+                enMaxCps={adminSettings.enMaxCps}
               />
             )}
             {!isResizing && activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}

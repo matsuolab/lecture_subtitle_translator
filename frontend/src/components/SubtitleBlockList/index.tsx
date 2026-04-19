@@ -27,6 +27,7 @@ interface SubtitleBlockListProps {
   onDraftChange: (id: number, text: string | null) => void
   enMaxCharsPerLine: number
   enMaxLines: number
+  enMaxCps: number
 }
 
 interface BoundaryDrag {
@@ -178,6 +179,7 @@ export function SubtitleBlockList({
   onDraftChange,
   enMaxCharsPerLine,
   enMaxLines,
+  enMaxCps,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -554,6 +556,7 @@ export function SubtitleBlockList({
               onDraftChange={onDraftChange}
               enMaxCharsPerLine={enMaxCharsPerLine}
               enMaxLines={enMaxLines}
+              enMaxCps={enMaxCps}
             />
           </div>
           {idx < displayBlocks.length - 1 && (() => {
@@ -621,7 +624,7 @@ export function SubtitleBlockList({
           >
             {/* 各ブロックをCPS色でストライプ表示：問題あるほど目立つ */}
             {displayBlocks.map((b, i) => {
-              const level = getCpsLevel(b.cps)
+              const level = getCpsLevel(b.cps, enMaxCps)
               const color = level === 'ok'
                 ? theme.cpsBadgeOk[0]
                 : level === 'warn'

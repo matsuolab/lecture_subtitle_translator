@@ -31,9 +31,9 @@ export interface SubtitleBlock {
 
 export type CpsLevel = 'ok' | 'warn' | 'error'
 
-export function getCpsLevel(cps: number): CpsLevel {
-  if (cps <= 15) return 'ok'
-  if (cps <= 18) return 'warn'
+export function getCpsLevel(cps: number, maxCps = 17): CpsLevel {
+  if (cps <= maxCps * 0.88) return 'ok'
+  if (cps <= maxCps) return 'warn'
   return 'error'
 }
 
