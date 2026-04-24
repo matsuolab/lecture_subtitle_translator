@@ -12,6 +12,8 @@ import { SettingsTab } from '@/components/SettingsTab'
 import { TimelineBar } from '@/components/TimelineBar'
 import { useVideoSync } from '@/hooks/useVideoSync'
 import { useHistory } from '@/hooks/useHistory'
+import { useUpdateCheck } from '@/hooks/useUpdateCheck'
+import { UpdateBanner } from '@/components/UpdateBanner'
 import {
   saveToLocalStorage,
   loadFromLocalStorage,
@@ -21,7 +23,7 @@ import {
   exportSrt,
 } from '@/api/persistence'
 import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
-import { hasPipelineApi, runPipelineViaApi } from '@/api/pipelineClient'
+import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/pipelineClient'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineReviewItem, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
@@ -37,6 +39,8 @@ export default function App() {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
   const { glossary, importEntries } = useGlossary()
+  const updateInfo = useUpdateCheck()
+  const [updateDismissed, setUpdateDismissed] = useState(false)
   const restored = loadFromLocalStorage()
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
     useHistory<SubtitleBlock[]>(restored ?? [])
@@ -58,6 +62,10 @@ export default function App() {
   const [pipelineHistory, setPipelineHistory] = useState<PipelineRunResult[]>([])
   const [pipelineStatusPinned, setPipelineStatusPinned] = useState(false)
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
+  const [serviceCheck, setServiceCheck] = useState<{ status: 'idle' | 'checking' | 'success' | 'error'; message: string }>({
+    status: 'idle',
+    message: 'サービス接続は未確認です',
+  })
 
   // 編集中のドラフトテキスト（字幕オーバーレイのリアルタイム更新用）
   // useTransition でオーバーレイ更新を低優先度にしてエディタ入力を軽くする
@@ -179,7 +187,21 @@ export default function App() {
 
   const resetAdminSettings = useCallback(() => {
     setAdminSettings(getDefaultAdminSettings())
+    setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
   }, [])
+
+  const handleServiceCheck = useCallback(async () => {
+    setServiceCheck({ status: 'checking', message: '接続確認中...' })
+    const result = await testServiceConnection(adminSettings)
+    setServiceCheck({
+      status: result.ok ? 'success' : 'error',
+      message: result.message,
+    })
+  }, [adminSettings])
+
+  useEffect(() => {
+    setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
+  }, [adminSettings.serviceMode, adminSettings.serviceUrl, adminSettings.serviceAuthToken])
 
   const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
     const totalBlocks = Math.max(1, generated.length)
@@ -959,6 +981,10 @@ export default function App() {
       color: theme.textPrimary,
       fontFamily: '"Inter", "Noto Sans JP", sans-serif',
     }}>
+      {/* 更新通知バナー */}
+      {updateInfo?.available && !updateDismissed && (
+        <UpdateBanner update={updateInfo} onDismiss={() => setUpdateDismissed(true)} />
+      )}
       {/* 復元通知 */}
       {restoredMsg && (
         <div style={{
@@ -1311,8 +1337,10 @@ export default function App() {
             {!isResizing && activeTab === 'settings' && (
               <SettingsTab
                 adminSettings={adminSettings}
+                serviceCheck={serviceCheck}
                 onAdminSettingsChange={updateAdminSettings}
                 onAdminSettingsReset={resetAdminSettings}
+                onServiceCheck={handleServiceCheck}
               />
             )}
           </div>
@@ -1322,5 +1350,8 @@ export default function App() {
     </div>
   )
 }
+
+
+
 
 

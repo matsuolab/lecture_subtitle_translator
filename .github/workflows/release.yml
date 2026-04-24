@@ -79,6 +79,8 @@ jobs:
 
       - name: Build Tauri app (portable)
         working-directory: frontend
+        env:
+          VITE_APP_VERSION: ${{ github.ref_name }}
         run: npx @tauri-apps/cli build
 
       # 配布用にリネームしてリリースにアップロード
