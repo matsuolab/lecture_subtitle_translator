@@ -24,7 +24,7 @@ npm run dev
 npm run tauri:dev
 ```
 
-## ビルド（EXE）
+## ビルド（Portable）
 
 ```bash
 npm run tauri:build
@@ -32,7 +32,9 @@ npm run tauri:build
 
 出力先:
 
-- `src-tauri/target/release/subtitle-editor.exe`
+- Windows: `src-tauri/target/release/subtitle-editor.exe`
+- macOS app bundle: `src-tauri/target/release/bundle/macos/*.app`
+- Linux AppImage: `src-tauri/target/release/bundle/appimage/*.AppImage`
 
 ## 使い方メモ
 
@@ -45,5 +47,6 @@ npm run tauri:build
 ## 開発メモ
 
 - Tauriビルド版でローカル動画を再生するため、`src-tauri/tauri.conf.json` で `assetProtocol` を有効化
+- Linux AppImage でも動画再生しやすくするため、`bundle.linux.appimage.bundleMediaFramework` を有効化
 - Windows EXE でHTML5 D&Dが取りこぼされるケースに備えて、`onDragDropEvent` のフォールバックを実装
 - 用語集インポートは `GlossaryContext.importEntries` で map インデックス化し、大量エントリ時の更新コストを削減

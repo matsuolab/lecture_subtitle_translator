@@ -15,16 +15,16 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: frontend/src-tauri/target/release/subtitle-editor.exe
             asset: subtitle-editor-windows-x64.exe
+            build_args: --no-bundle
 
           - os: macos-latest
-            artifact: frontend/src-tauri/target/release/subtitle-editor
-            asset: subtitle-editor-macos-arm64
+            asset: subtitle-editor-macos-arm64.app.zip
+            build_args: --bundles app
 
           - os: ubuntu-22.04
-            artifact: frontend/src-tauri/target/release/subtitle-editor
-            asset: subtitle-editor-linux-x64
+            asset: subtitle-editor-linux-x64.AppImage
+            build_args: --bundles appimage
 
     runs-on: ${{ matrix.os }}
 
@@ -81,12 +81,34 @@ jobs:
         working-directory: frontend
         env:
           VITE_APP_VERSION: ${{ github.ref_name }}
-        run: npx @tauri-apps/cli build
+        run: npx @tauri-apps/cli build -- ${{ matrix.build_args }}
 
-      # 配布用にリネームしてリリースにアップロード
-      - name: Prepare artifact
+      - name: Prepare Windows artifact
+        if: matrix.os == 'windows-latest'
         shell: bash
-        run: cp "${{ matrix.artifact }}" "${{ matrix.asset }}"
+        run: cp "frontend/src-tauri/target/release/subtitle-editor.exe" "${{ matrix.asset }}"
+
+      - name: Prepare macOS artifact
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          app_path="$(find frontend/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "macOS app bundle not found"
+            exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "${{ matrix.asset }}"
+
+      - name: Prepare Linux artifact
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          appimage_path="$(find frontend/src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)"
+          if [[ -z "$appimage_path" ]]; then
+            echo "AppImage not found"
+            exit 1
+          fi
+          cp "$appimage_path" "${{ matrix.asset }}"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
