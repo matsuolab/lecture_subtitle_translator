@@ -39,7 +39,7 @@ export default function App() {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
   const { glossary, importEntries } = useGlossary()
-  const updateInfo = useUpdateCheck()
+  const { updateInfo, manualCheck, lastAutoCheckDate, triggerManualCheck } = useUpdateCheck()
   const [updateDismissed, setUpdateDismissed] = useState(false)
   const restored = loadFromLocalStorage()
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
@@ -1338,9 +1338,12 @@ export default function App() {
               <SettingsTab
                 adminSettings={adminSettings}
                 serviceCheck={serviceCheck}
+                manualUpdateCheck={manualCheck}
+                lastAutoCheckDate={lastAutoCheckDate}
                 onAdminSettingsChange={updateAdminSettings}
                 onAdminSettingsReset={resetAdminSettings}
                 onServiceCheck={handleServiceCheck}
+                onManualUpdateCheck={triggerManualCheck}
               />
             )}
           </div>

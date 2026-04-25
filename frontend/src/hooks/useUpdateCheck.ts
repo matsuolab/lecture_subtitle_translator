@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 const REPO = 'matsuolab/lecture_subtitle_translator'
 const CACHE_DATE_KEY = 'update_check_last_date'
@@ -10,6 +10,22 @@ export interface UpdateCheckResult {
   releaseUrl: string
   downloadUrl: string | null
   assetName: string | null
+}
+
+export interface ManualCheckState {
+  status: 'idle' | 'checking' | 'up_to_date' | 'available' | 'error'
+  latestVersion: string | null
+  releaseUrl: string | null
+  downloadUrl: string | null
+  errorMessage: string | null
+  checkedAt: string | null
+}
+
+export interface UseUpdateCheckReturn {
+  updateInfo: UpdateCheckResult | null
+  manualCheck: ManualCheckState
+  lastAutoCheckDate: string | null
+  triggerManualCheck: () => void
 }
 
 interface GitHubAsset {
@@ -48,18 +64,52 @@ function detectAssetName(): string | null {
   return null
 }
 
-export function useUpdateCheck(): UpdateCheckResult | null {
-  const [result, setResult] = useState<UpdateCheckResult | null>(null)
+interface FetchReleaseError {
+  httpStatus: number
+}
+
+class FetchReleaseHttpError extends Error {
+  readonly httpStatus: number
+  constructor({ httpStatus }: FetchReleaseError) {
+    const label = httpStatus === 404
+      ? '404（リリース未作成またはリポジトリ非公開）'
+      : httpStatus === 403
+        ? '403（APIレート制限）'
+        : `HTTP ${httpStatus}`
+    super(label)
+    this.httpStatus = httpStatus
+  }
+}
+
+async function fetchLatestRelease(): Promise<GitHubRelease> {
+  const token = import.meta.env.VITE_GITHUB_TOKEN as string | undefined
+  const headers: Record<string, string> = { Accept: 'application/vnd.github+json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers })
+  if (!res.ok) throw new FetchReleaseHttpError({ httpStatus: res.status })
+  return res.json() as Promise<GitHubRelease>
+}
+
+export function useUpdateCheck(): UseUpdateCheckReturn {
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
+  const [manualCheck, setManualCheck] = useState<ManualCheckState>({
+    status: 'idle',
+    latestVersion: null,
+    releaseUrl: null,
+    downloadUrl: null,
+    errorMessage: null,
+    checkedAt: null,
+  })
+  const [lastAutoCheckDate, setLastAutoCheckDate] = useState<string | null>(
+    () => localStorage.getItem(CACHE_DATE_KEY)
+  )
 
   useEffect(() => {
     const currentVersion = import.meta.env.VITE_APP_VERSION as string | undefined
-    // 開発ビルド（バージョン未設定）はチェックしない
     if (!currentVersion || currentVersion === '0.0.0') return
 
     const dismissedVersion = localStorage.getItem(DISMISSED_KEY)
     const lastCheckDate = localStorage.getItem(CACHE_DATE_KEY)
-
-    // 同日は再チェックしない
     if (lastCheckDate === todayString()) return
 
     const controller = new AbortController()
@@ -69,12 +119,13 @@ export function useUpdateCheck(): UpdateCheckResult | null {
       signal: controller.signal,
     })
       .then(res => {
-        if (!res.ok) return null
+        if (!res.ok) throw new FetchReleaseHttpError({ httpStatus: res.status })
         return res.json() as Promise<GitHubRelease>
       })
       .then(data => {
-        if (!data) return
-        localStorage.setItem(CACHE_DATE_KEY, todayString())
+        const today = todayString()
+        localStorage.setItem(CACHE_DATE_KEY, today)
+        setLastAutoCheckDate(today)
         const latestVersion = data.tag_name
         if (!isNewer(latestVersion, currentVersion)) return
         if (dismissedVersion === latestVersion) return
@@ -84,7 +135,7 @@ export function useUpdateCheck(): UpdateCheckResult | null {
           ? data.assets.find(a => a.name === targetName) ?? null
           : null
 
-        setResult({
+        setUpdateInfo({
           available: true,
           latestVersion,
           releaseUrl: data.html_url,
@@ -92,12 +143,72 @@ export function useUpdateCheck(): UpdateCheckResult | null {
           assetName: asset?.name ?? null,
         })
       })
-      .catch(() => {
-        // ネットワークエラー・レートリミットは無視
-      })
+      .catch(() => {})
 
     return () => controller.abort()
   }, [])
 
-  return result
+  const triggerManualCheck = useCallback(() => {
+    const currentVersion = import.meta.env.VITE_APP_VERSION as string | undefined
+    setManualCheck({
+      status: 'checking',
+      latestVersion: null,
+      releaseUrl: null,
+      downloadUrl: null,
+      errorMessage: null,
+      checkedAt: null,
+    })
+
+    fetchLatestRelease()
+      .then(data => {
+        const checkedAt = new Date().toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+        const latestVersion = data.tag_name
+        const targetName = detectAssetName()
+        const asset = targetName
+          ? data.assets.find(a => a.name === targetName) ?? null
+          : null
+        const downloadUrl = asset?.browser_download_url ?? null
+
+        if (!currentVersion || currentVersion === '0.0.0' || !isNewer(latestVersion, currentVersion)) {
+          setManualCheck({
+            status: 'up_to_date',
+            latestVersion,
+            releaseUrl: data.html_url,
+            downloadUrl,
+            errorMessage: null,
+            checkedAt,
+          })
+        } else {
+          setManualCheck({
+            status: 'available',
+            latestVersion,
+            releaseUrl: data.html_url,
+            downloadUrl,
+            errorMessage: null,
+            checkedAt,
+          })
+          setUpdateInfo({
+            available: true,
+            latestVersion,
+            releaseUrl: data.html_url,
+            downloadUrl,
+            assetName: asset?.name ?? null,
+          })
+        }
+      })
+      .catch((err: unknown) => {
+        const checkedAt = new Date().toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+        const errorMessage = err instanceof Error ? err.message : 'ネットワークエラー'
+        setManualCheck({
+          status: 'error',
+          latestVersion: null,
+          releaseUrl: null,
+          downloadUrl: null,
+          errorMessage,
+          checkedAt,
+        })
+      })
+  }, [])
+
+  return { updateInfo, manualCheck, lastAutoCheckDate, triggerManualCheck }
 }

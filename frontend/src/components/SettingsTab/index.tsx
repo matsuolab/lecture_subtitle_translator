@@ -4,6 +4,7 @@ import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import type { ManualCheckState } from '@/hooks/useUpdateCheck'
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -13,9 +14,12 @@ type ServiceCheckState = {
 type SettingsTabProps = {
   adminSettings: AdminSettings
   serviceCheck: ServiceCheckState
+  manualUpdateCheck: ManualCheckState
+  lastAutoCheckDate: string | null
   onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
   onAdminSettingsReset: () => void
   onServiceCheck: () => void
+  onManualUpdateCheck: () => void
 }
 
 const serviceModeOptions: Array<{ value: ServiceMode; label: string }> = [
@@ -26,12 +30,16 @@ const serviceModeOptions: Array<{ value: ServiceMode; label: string }> = [
 export function SettingsTab({
   adminSettings,
   serviceCheck,
+  manualUpdateCheck,
+  lastAutoCheckDate,
   onAdminSettingsChange,
   onAdminSettingsReset,
   onServiceCheck,
+  onManualUpdateCheck,
 }: SettingsTabProps) {
   const { theme, setThemeId } = useTheme()
   const { strings: t, setLocaleId } = useLocale()
+  const currentVersion = (import.meta.env.VITE_APP_VERSION as string | undefined) || null
 
   const serviceUrlPlaceholder = adminSettings.serviceMode === 'managed_service'
     ? 'https://service.example.com'
@@ -91,6 +99,73 @@ export function SettingsTab({
             </div>
           </OptionCard>
         ))}
+      </Section>
+
+      <Section title="アプリ情報" theme={theme}>
+        <FieldCard theme={theme}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>バージョン</div>
+              <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
+                {currentVersion && currentVersion !== '0.0.0' ? currentVersion : '開発ビルド'}
+              </div>
+              <div style={{ fontSize: 10, color: theme.textSecondary, marginTop: 4 }}>
+                {manualUpdateCheck.checkedAt
+                  ? `最終確認: ${manualUpdateCheck.checkedAt}`
+                  : lastAutoCheckDate
+                    ? `最終確認: ${lastAutoCheckDate}（起動時）`
+                    : '未確認'}
+              </div>
+            </div>
+            <button
+              onClick={onManualUpdateCheck}
+              disabled={manualUpdateCheck.status === 'checking'}
+              style={{
+                padding: '8px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textPrimary,
+                cursor: manualUpdateCheck.status === 'checking' ? 'wait' : 'pointer',
+                fontSize: 12,
+                fontWeight: 600,
+                flexShrink: 0,
+              }}
+            >
+              {manualUpdateCheck.status === 'checking' ? '確認中...' : 'アップデートを確認'}
+            </button>
+          </div>
+          {manualUpdateCheck.status !== 'idle' && manualUpdateCheck.status !== 'checking' && (
+            <div style={{
+              fontSize: 11,
+              color: manualUpdateCheck.status === 'up_to_date'
+                ? '#22c55e'
+                : manualUpdateCheck.status === 'available'
+                  ? '#f59e0b'
+                  : '#ef4444',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              flexWrap: 'wrap',
+            }}>
+              {manualUpdateCheck.status === 'up_to_date' && (
+                <>最新版です（{manualUpdateCheck.latestVersion}）</>
+              )}
+              {manualUpdateCheck.status === 'available' && (
+                <>
+                  {manualUpdateCheck.latestVersion} が利用可能です。
+                  {manualUpdateCheck.downloadUrl
+                    ? <a href={manualUpdateCheck.downloadUrl} target="_blank" rel="noreferrer" style={{ color: '#f59e0b', fontWeight: 700 }}>ダウンロード</a>
+                    : <a href={manualUpdateCheck.releaseUrl ?? '#'} target="_blank" rel="noreferrer" style={{ color: '#f59e0b', fontWeight: 700 }}>リリースページ</a>
+                  }
+                </>
+              )}
+              {manualUpdateCheck.status === 'error' && (
+                <>{manualUpdateCheck.errorMessage}</>
+              )}
+            </div>
+          )}
+        </FieldCard>
       </Section>
 
       <Section title={t.settingsAdminTitle} theme={theme}>

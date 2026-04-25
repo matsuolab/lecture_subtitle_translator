@@ -81,6 +81,7 @@ jobs:
         working-directory: frontend
         env:
           VITE_APP_VERSION: ${{ github.ref_name }}
+          VITE_GITHUB_TOKEN: ${{ secrets.RELEASE_CHECK_TOKEN }}
         run: npx @tauri-apps/cli build -- ${{ matrix.build_args }}
 
       - name: Prepare Windows artifact
