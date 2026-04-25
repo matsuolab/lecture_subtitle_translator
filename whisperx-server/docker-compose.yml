@@ -1,0 +1,35 @@
+services:
+  whisperx:
+    build: .
+    image: whisperx-server:local
+    ports:
+      - "8000:8000"
+    environment:
+      # GPU が使えない場合は cpu に変更（精度・速度が落ちる）
+      WHISPERX_DEVICE: cuda
+      # VRAM が少ない場合は int8 に変更（12GB VRAM なら float16 で動作）
+      WHISPERX_COMPUTE_TYPE: float16
+      # VRAM が少ない場合は 4 に下げる
+      WHISPERX_BATCH_SIZE: "8"
+      # モデルは Dockerfile のベースイメージ（large-v3-ja）にキャッシュ済み
+      WHISPERX_MODEL: large-v3
+    volumes:
+      # モデルキャッシュを永続化（コンテナ再起動時の再ダウンロードを防ぐ）
+      - whisperx_cache:/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # モデルロードに時間がかかるため長めに設定
+
+volumes:
+  whisperx_cache:

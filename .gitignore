@@ -14,6 +14,7 @@ poc/.env
 poc/results/
 poc/step2_pipeline/output/
 poc/step2_pipeline/.env
+poc/step2_pipeline/glossary.json
 poc/step2_pipeline/**/__pycache__/
 
 # Audio/video files
