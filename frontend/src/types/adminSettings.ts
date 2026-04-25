@@ -1,7 +1,10 @@
 export type TranslationProvider = 'openai' | 'gemini' | 'deepl' | 'local'
+export type ServiceMode = 'managed_service' | 'legacy_pipeline'
 
 export interface AdminSettings {
-  pipelineApiUrl: string
+  serviceMode: ServiceMode
+  serviceUrl: string
+  serviceAuthToken: string
   hfToken: string
   openaiApiKey: string
   geminiApiKey: string

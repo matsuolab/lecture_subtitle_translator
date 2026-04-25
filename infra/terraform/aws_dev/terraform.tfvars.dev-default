@@ -1,0 +1,39 @@
+project_name                 = "matsuo-subtitle-pipeline"
+environment                  = "dev"
+aws_region                   = "ap-northeast-1"
+managed_service_bearer_token = "replace-me"
+
+private_subnet_ids = [
+  "subnet-0d1bd97c8b33666b1",
+  "subnet-06a3749e32f8af246",
+  "subnet-0e78c1433062fb0cc"
+]
+
+batch_security_group_ids = [
+  "sg-091e82d3fecf4c823"
+]
+
+# Temporary dev fallback while GPU quotas are 0 in ap-northeast-1.
+# The same worker image has been validated locally with device=cpu / compute_type=int8.
+batch_ec2_image_type    = "ECS_AL2023"
+batch_instance_types      = ["m7i.xlarge"]
+batch_ondemand_max_vcpus = 4
+batch_vcpus              = 2
+batch_memory             = 12288
+batch_gpu_count          = 0
+batch_root_volume_size_gb = 100
+batch_image_pull_behavior = "prefer-cached"
+whisperx_device          = "cpu"
+whisperx_model           = "large-v3"
+whisperx_language        = "ja"
+whisperx_compute_type    = "int8"
+whisperx_batch_size      = 1
+
+# Keep Lambda outside the VPC in the first dev rollout so it can reach
+# Secrets Manager, S3, and Batch APIs without adding NAT or VPC endpoints.
+lambda_subnet_ids = []
+
+lambda_security_group_ids = []
+
+lambda_package_path = "../../../dist/lambda/backend.zip"
+

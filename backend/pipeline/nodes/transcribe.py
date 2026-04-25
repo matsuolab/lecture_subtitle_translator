@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .base import BaseStubNode
 from .text_utils import split_ja_sentences
+from .whisperx_embedded import transcribe_embedded
 from ..contracts import RunState
 
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
@@ -52,10 +53,21 @@ class TranscribeNode(BaseStubNode):
 
         if audio_path:
             runtime_settings = state.data.get("runtime_settings") or {}
+            whisperx_backend = str(
+                runtime_settings.get("whisperx_execution_backend")
+                or os.getenv("WHISPERX_EXECUTION_BACKEND", "")
+            ).strip().lower()
             image = str(
                 runtime_settings.get("whisperx_docker_image")
-                or os.getenv("WHISPERX_DOCKER_IMAGE", "ghcr.io/jim60105/whisperx:large-v3-ja")
-            )
+                or os.getenv("WHISPERX_DOCKER_IMAGE", "")
+            ).strip()
+            if not whisperx_backend and strict_external:
+                whisperx_backend = "docker"
+            if not whisperx_backend and image:
+                whisperx_backend = "docker"
+            if whisperx_backend == "docker" and not image:
+                image = "ghcr.io/jim60105/whisperx:large-v3-ja"
+
             hf_token = str(runtime_settings.get("hf_token") or os.getenv("HF_TOKEN", ""))
             batch_size = int(os.getenv("WHISPERX_BATCH_SIZE", "8"))
             compute_type = str(os.getenv("WHISPERX_COMPUTE_TYPE", "float16"))
@@ -63,36 +75,49 @@ class TranscribeNode(BaseStubNode):
             timeout = int(os.getenv("WHISPERX_TIMEOUT", "3600"))
             model_size = str(os.getenv("WHISPERX_MODEL", "large-v3"))
             language = str(os.getenv("WHISPERX_LANGUAGE", "ja"))
+            device = str(os.getenv("WHISPERX_DEVICE", "cuda"))
 
-            log.info("[transcribe] Docker WhisperX 開始: image=%s audio=%s", image, audio_path)
-            t0 = time.perf_counter()
-            try:
-                segments = _run_docker_whisperx(
-                    audio_path=Path(str(audio_path)),
-                    image=image,
-                    hf_token=hf_token,
-                    batch_size=batch_size,
-                    compute_type=compute_type,
-                    cache_volume=cache_volume,
-                    timeout=timeout,
-                    model_size=model_size,
-                    language=language,
-                )
-                elapsed = time.perf_counter() - t0
-                self.provider = "docker-whisperx"
-                self.model = image.split(":")[-1] if ":" in image else image
-                log.info("[transcribe] 完了: segments=%d elapsed=%.1fs", len(segments), elapsed)
-                return self.success(
-                    {"transcript_segments": segments},
-                    {"segments": len(segments), "seeded": False, "external_used": True, "audio_path": str(audio_path)},
-                )
-            except Exception as exc:
-                elapsed = time.perf_counter() - t0
-                log.error("[transcribe] 失敗 (%.1fs): %s", elapsed, exc)
-                if strict_external or not allow_fallback:
-                    self.provider = "docker-whisperx"
-                    self.model = image.split(":")[-1] if ":" in image else image
-                    return self.failure([f"docker whisperx failed: {exc}"], {"external_used": True})
+            if whisperx_backend:
+                log.info("[transcribe] WhisperX 開始: backend=%s audio=%s", whisperx_backend, audio_path)
+                t0 = time.perf_counter()
+                try:
+                    if whisperx_backend in {"embedded", "inprocess", "native"}:
+                        segments = transcribe_embedded(
+                            Path(str(audio_path)),
+                            model_size=model_size,
+                            language=language,
+                            batch_size=batch_size,
+                            compute_type=compute_type,
+                            device=device,
+                        )
+                        self.provider = "embedded-whisperx"
+                        self.model = model_size
+                    else:
+                        segments = _run_docker_whisperx(
+                            audio_path=Path(str(audio_path)),
+                            image=image,
+                            hf_token=hf_token,
+                            batch_size=batch_size,
+                            compute_type=compute_type,
+                            cache_volume=cache_volume,
+                            timeout=timeout,
+                            model_size=model_size,
+                            language=language,
+                        )
+                        self.provider = "docker-whisperx"
+                        self.model = image.split(":")[-1] if ":" in image else image
+                    elapsed = time.perf_counter() - t0
+                    log.info("[transcribe] 完了: provider=%s segments=%d elapsed=%.1fs", self.provider, len(segments), elapsed)
+                    return self.success(
+                        {"transcript_segments": segments},
+                        {"segments": len(segments), "seeded": False, "external_used": True, "audio_path": str(audio_path)},
+                    )
+                except Exception as exc:
+                    elapsed = time.perf_counter() - t0
+                    log.error("[transcribe] 失敗 (%.1fs): %s", elapsed, exc)
+                    if strict_external or not allow_fallback:
+                        provider_name = "embedded whisperx" if whisperx_backend in {"embedded", "inprocess", "native"} else "docker whisperx"
+                        return self.failure([f"{provider_name} failed: {exc}"], {"external_used": True})
 
         if not allow_fallback:
             return self.failure(["audio_path is required for production transcription"], {"external_used": False})
@@ -295,3 +320,6 @@ def _parse_whisperx_json(data: dict) -> list[dict]:
             }
         )
     return segments
+
+
+

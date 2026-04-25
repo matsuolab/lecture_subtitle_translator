@@ -1,8 +1,8 @@
+import { readFile } from '@tauri-apps/plugin-fs'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace } from '@/types/pipeline'
 import type { SubtitleBlock } from '@/types/subtitle'
 
-// バックエンドAPIレスポンスの型定義
 interface BackendTranslatedSegment {
   id?: number
   start?: number
@@ -46,7 +46,7 @@ interface BackendAudit {
   node_traces?: BackendNodeTrace[]
 }
 
-interface BackendPipelineResult {
+interface LegacyPipelineResult {
   state?: {
     data?: {
       translated_segments?: BackendTranslatedSegment[]
@@ -56,11 +56,44 @@ interface BackendPipelineResult {
   audit?: BackendAudit
 }
 
-const ENV_API_BASE = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
-
-export function hasPipelineApi(settings: AdminSettings): boolean {
-  return resolveApiBase(settings).length > 0
+interface ManagedUploadResponse {
+  upload_url?: string
+  url?: string
+  upload_method?: string
+  method?: string
+  upload_headers?: Record<string, string>
+  headers?: Record<string, string>
+  object_key?: string
+  input_key?: string
 }
+
+interface ManagedJobStartResponse {
+  job_id?: string
+  id?: string
+}
+
+interface ManagedJobStatusResponse {
+  job_id?: string
+  id?: string
+  status?: string
+  current_step?: string
+  current_node?: string
+  completed_steps?: string[]
+  completed_nodes?: string[]
+  total_steps?: number
+  total_nodes?: number
+  step_elapsed_sec?: number
+  node_elapsed_sec?: number
+  error?: string
+}
+
+interface ManagedPipelineResult {
+  translated_segments?: BackendTranslatedSegment[]
+  subtitle_blocks?: BackendSubtitleBlock[]
+  audit?: BackendAudit
+}
+
+const ENV_API_BASE = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
 export interface PipelineApiRunResult {
   blocks: SubtitleBlock[]
@@ -77,8 +110,37 @@ export interface PipelineRunProgress {
   nodeElapsedSec: number | null
 }
 
-function resolveApiBase(settings: AdminSettings): string {
-  return settings.pipelineApiUrl.trim().replace(/\/$/, '') || ENV_API_BASE
+export interface ManagedServiceConfig {
+  service: string
+  version: string
+  upload: {
+    strategy: string
+    max_size_bytes?: number
+  }
+  jobs: {
+    workflow: string
+  }
+}
+
+export interface ServiceConnectionCheck {
+  ok: boolean
+  message: string
+  config?: ManagedServiceConfig
+}
+
+export function hasConfiguredService(settings: AdminSettings): boolean {
+  return resolveServiceBase(settings).length > 0
+}
+
+export const hasPipelineApi = hasConfiguredService
+
+function resolveServiceBase(settings: AdminSettings): string {
+  return settings.serviceUrl.trim().replace(/\/$/, '') || ENV_API_BASE
+}
+
+function buildAuthHeaders(settings: AdminSettings): Record<string, string> {
+  const token = settings.serviceAuthToken.trim()
+  return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
@@ -87,9 +149,27 @@ function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T>
   ) as Partial<T>
 }
 
-function toSubtitleBlocks(result: BackendPipelineResult): SubtitleBlock[] {
-  const translated: BackendTranslatedSegment[] = result?.state?.data?.translated_segments ?? []
-  const subtitleRows: BackendSubtitleBlock[] = result?.state?.data?.subtitle_blocks ?? []
+function toResultEnvelope(result: LegacyPipelineResult | ManagedPipelineResult): LegacyPipelineResult {
+  if ('state' in result) {
+    return result
+  }
+
+  const managedResult = result as ManagedPipelineResult
+  return {
+    state: {
+      data: {
+        translated_segments: managedResult.translated_segments ?? [],
+        subtitle_blocks: managedResult.subtitle_blocks ?? [],
+      },
+    },
+    audit: managedResult.audit,
+  }
+}
+
+function toSubtitleBlocks(result: LegacyPipelineResult | ManagedPipelineResult): SubtitleBlock[] {
+  const normalized = toResultEnvelope(result)
+  const translated: BackendTranslatedSegment[] = normalized?.state?.data?.translated_segments ?? []
+  const subtitleRows: BackendSubtitleBlock[] = normalized?.state?.data?.subtitle_blocks ?? []
   if (translated.length === 0) return []
 
   return translated.map((row, idx) => {
@@ -112,8 +192,9 @@ function toSubtitleBlocks(result: BackendPipelineResult): SubtitleBlock[] {
   })
 }
 
-function toTraces(result: BackendPipelineResult): PipelineNodeTrace[] {
-  const rows: BackendNodeTrace[] = result?.audit?.node_traces ?? []
+function toTraces(result: LegacyPipelineResult | ManagedPipelineResult): PipelineNodeTrace[] {
+  const normalized = toResultEnvelope(result)
+  const rows: BackendNodeTrace[] = normalized?.audit?.node_traces ?? []
   return rows.map((row) => ({
     nodeId: String(row.node_id),
     status: row.status === 'failure' ? 'failure' : 'success',
@@ -125,8 +206,9 @@ function toTraces(result: BackendPipelineResult): PipelineNodeTrace[] {
   }))
 }
 
-function toAudit(result: BackendPipelineResult): PipelineAuditReport {
-  const audit: BackendAudit = result?.audit ?? {}
+function toAudit(result: LegacyPipelineResult | ManagedPipelineResult): PipelineAuditReport {
+  const normalized = toResultEnvelope(result)
+  const audit: BackendAudit = normalized?.audit ?? {}
   const reviewItems = (audit.review_items ?? []).map((item: BackendReviewItem) => ({
     id: String(item.id),
     nodeId: String(item.node_id),
@@ -145,48 +227,134 @@ function toAudit(result: BackendPipelineResult): PipelineAuditReport {
     shouldReviewCount: Number(audit.should_review_count ?? 0),
     autoPassCount: Number(audit.auto_pass_count ?? 0),
     reviewItems,
-    nodeTraces: toTraces(result),
+    nodeTraces: toTraces(normalized),
   }
 }
 
-async function pollStatus(apiBase: string, runId: string, onProgress?: (p: PipelineRunProgress) => void): Promise<void> {
-  const INTERVAL_MS = 2000
-  const MAX_WAIT_MS = 60 * 60 * 1000  // 1時間
+function normalizeProgressStatus(status: string | undefined): PipelineRunProgress['status'] {
+  switch (status) {
+    case 'queued':
+    case 'running':
+    case 'success':
+    case 'failed':
+    case 'cancelled':
+      return status
+    case 'succeeded':
+      return 'success'
+    case 'canceled':
+      return 'cancelled'
+    default:
+      return 'running'
+  }
+}
 
-  const deadline = Date.now() + MAX_WAIT_MS
+async function pollLegacyStatus(apiBase: string, runId: string, settings: AdminSettings, onProgress?: (p: PipelineRunProgress) => void): Promise<void> {
+  const intervalMs = 2000
+  const deadline = Date.now() + 60 * 60 * 1000
+  const authHeaders = buildAuthHeaders(settings)
+
   while (Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, INTERVAL_MS))
-    const res = await fetch(`${apiBase}/api/pipeline/runs/${runId}`)
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+    const res = await fetch(`${apiBase}/api/pipeline/runs/${runId}`, {
+      headers: authHeaders,
+    })
     if (!res.ok) throw new Error(`status poll failed: ${res.status}`)
     const data = await res.json()
 
-    if (onProgress) {
-      onProgress({
-        runId,
-        status: data.status,
-        currentNode: data.current_node ?? null,
-        completedNodes: data.completed_nodes ?? [],
-        totalNodes: data.total_nodes ?? 0,
-        nodeElapsedSec: data.node_elapsed_sec ?? null,
-      })
-    }
+    onProgress?.({
+      runId,
+      status: normalizeProgressStatus(data.status),
+      currentNode: data.current_node ?? null,
+      completedNodes: data.completed_nodes ?? [],
+      totalNodes: data.total_nodes ?? 0,
+      nodeElapsedSec: data.node_elapsed_sec ?? null,
+    })
 
     if (data.status === 'success' || data.status === 'failed' || data.status === 'cancelled') return
   }
+
   throw new Error('pipeline polling timed out (1h)')
 }
 
-export async function runPipelineViaApi(
+async function pollManagedStatus(apiBase: string, jobId: string, settings: AdminSettings, onProgress?: (p: PipelineRunProgress) => void): Promise<void> {
+  const intervalMs = 2000
+  const deadline = Date.now() + 60 * 60 * 1000
+  const authHeaders = buildAuthHeaders(settings)
+
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+    const res = await fetch(`${apiBase}/v1/jobs/${jobId}`, {
+      headers: authHeaders,
+    })
+    if (!res.ok) throw new Error(`managed job poll failed: ${res.status}`)
+    const data: ManagedJobStatusResponse = await res.json()
+    const status = normalizeProgressStatus(data.status)
+
+    onProgress?.({
+      runId: String(data.job_id ?? data.id ?? jobId),
+      status,
+      currentNode: data.current_step ?? data.current_node ?? null,
+      completedNodes: data.completed_steps ?? data.completed_nodes ?? [],
+      totalNodes: Number(data.total_steps ?? data.total_nodes ?? 0),
+      nodeElapsedSec: data.step_elapsed_sec ?? data.node_elapsed_sec ?? null,
+    })
+
+    if (status === 'success' || status === 'failed' || status === 'cancelled') {
+      if (status === 'failed' && data.error) {
+        throw new Error(`managed job failed: ${data.error}`)
+      }
+      return
+    }
+  }
+
+  throw new Error('managed service polling timed out (1h)')
+}
+
+async function uploadSourceToManagedService(apiBase: string, sourceName: string, sourcePath: string, settings: AdminSettings): Promise<string> {
+  const authHeaders = buildAuthHeaders(settings)
+  const uploadTargetRes = await fetch(`${apiBase}/v1/uploads`, {
+    method: 'POST',
+    headers: {
+      ...authHeaders,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      filename: sourceName,
+    }),
+  })
+
+  if (!uploadTargetRes.ok) {
+    throw new Error(`upload target request failed: ${uploadTargetRes.status}`)
+  }
+
+  const uploadTarget: ManagedUploadResponse = await uploadTargetRes.json()
+  const uploadUrl = uploadTarget.upload_url ?? uploadTarget.url
+  const objectKey = uploadTarget.object_key ?? uploadTarget.input_key
+  if (!uploadUrl || !objectKey) {
+    throw new Error('managed upload target response is missing upload URL or object key')
+  }
+
+  const fileBytes = await readFile(sourcePath)
+  const uploadRes = await fetch(uploadUrl, {
+    method: (uploadTarget.upload_method ?? uploadTarget.method ?? 'PUT').toUpperCase(),
+    headers: uploadTarget.upload_headers ?? uploadTarget.headers ?? {},
+    body: new Uint8Array(fileBytes),
+  })
+
+  if (!uploadRes.ok) {
+    throw new Error(`file upload failed: ${uploadRes.status}`)
+  }
+
+  return objectKey
+}
+
+async function runLegacyPipeline(
+  apiBase: string,
   sourceName: string,
   settings: AdminSettings,
   sourcePath?: string,
   onProgress?: (p: PipelineRunProgress) => void,
 ): Promise<PipelineApiRunResult> {
-  const apiBase = resolveApiBase(settings)
-  if (!apiBase) {
-    throw new Error('pipeline API URL is not configured')
-  }
-
   const runtimeSettings = compactRecord({
     translation_provider: settings.translationProvider,
     openai_api_key: settings.openaiApiKey.trim(),
@@ -198,7 +366,10 @@ export async function runPipelineViaApi(
 
   const startRes = await fetch(`${apiBase}/api/pipeline/runs`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      ...buildAuthHeaders(settings),
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
       workflow: 'drop_first_with_quality_v1',
       source_name: sourceName,
@@ -220,18 +391,163 @@ export async function runPipelineViaApi(
   const started = await startRes.json()
   const runId = String(started.run_id)
 
-  await pollStatus(apiBase, runId, onProgress)
+  await pollLegacyStatus(apiBase, runId, settings, onProgress)
 
-  const resultRes = await fetch(`${apiBase}/api/pipeline/runs/${runId}/result`)
+  const resultRes = await fetch(`${apiBase}/api/pipeline/runs/${runId}/result`, {
+    headers: buildAuthHeaders(settings),
+  })
   if (!resultRes.ok) {
     throw new Error(`pipeline result failed: ${resultRes.status}`)
   }
-  const result: BackendPipelineResult = await resultRes.json()
+  const result: LegacyPipelineResult = await resultRes.json()
 
   return {
     blocks: toSubtitleBlocks(result),
     traces: toTraces(result),
     audit: toAudit(result),
+  }
+}
+
+async function runManagedPipeline(
+  apiBase: string,
+  sourceName: string,
+  settings: AdminSettings,
+  sourcePath?: string,
+  onProgress?: (p: PipelineRunProgress) => void,
+): Promise<PipelineApiRunResult> {
+  if (!sourcePath) {
+    throw new Error('managed service mode requires a local source file path')
+  }
+
+  const inputKey = await uploadSourceToManagedService(apiBase, sourceName, sourcePath, settings)
+  const runtimeSettings = compactRecord({
+    translation_provider: settings.translationProvider,
+    openai_api_key: settings.openaiApiKey.trim(),
+    gemini_api_key: settings.geminiApiKey.trim(),
+    deepl_api_key: settings.deeplApiKey.trim(),
+    openai_compatible_base_url: settings.openaiCompatibleBaseUrl.trim(),
+    hf_token: settings.hfToken.trim(),
+  })
+
+  const startRes = await fetch(`${apiBase}/v1/jobs`, {
+    method: 'POST',
+    headers: {
+      ...buildAuthHeaders(settings),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      source_name: sourceName,
+      input_key: inputKey,
+      workflow: 'drop_first_with_quality_v1',
+      runtime_settings: runtimeSettings,
+      execution_mode: 'production',
+    }),
+  })
+  if (!startRes.ok) {
+    throw new Error(`managed job start failed: ${startRes.status}`)
+  }
+  const started: ManagedJobStartResponse = await startRes.json()
+  const jobId = String(started.job_id ?? started.id ?? '')
+  if (!jobId) {
+    throw new Error('managed job start response is missing job id')
+  }
+
+  await pollManagedStatus(apiBase, jobId, settings, onProgress)
+
+  const resultRes = await fetch(`${apiBase}/v1/jobs/${jobId}/result`, {
+    headers: buildAuthHeaders(settings),
+  })
+  if (!resultRes.ok) {
+    throw new Error(`managed job result failed: ${resultRes.status}`)
+  }
+  const result: ManagedPipelineResult = await resultRes.json()
+
+  return {
+    blocks: toSubtitleBlocks(result),
+    traces: toTraces(result),
+    audit: toAudit(result),
+  }
+}
+
+export async function runPipelineViaService(
+  sourceName: string,
+  settings: AdminSettings,
+  sourcePath?: string,
+  onProgress?: (p: PipelineRunProgress) => void,
+): Promise<PipelineApiRunResult> {
+  const apiBase = resolveServiceBase(settings)
+  if (!apiBase) {
+    throw new Error('service URL is not configured')
+  }
+
+  if (settings.serviceMode === 'managed_service') {
+    return runManagedPipeline(apiBase, sourceName, settings, sourcePath, onProgress)
+  }
+
+  return runLegacyPipeline(apiBase, sourceName, settings, sourcePath, onProgress)
+}
+
+export const runPipelineViaApi = runPipelineViaService
+
+export async function fetchManagedServiceConfig(settings: AdminSettings): Promise<ManagedServiceConfig> {
+  const apiBase = resolveServiceBase(settings)
+  if (!apiBase) {
+    throw new Error('service URL is not configured')
+  }
+
+  const response = await fetch(`${apiBase}/v1/service-config`, {
+    headers: buildAuthHeaders(settings),
+  })
+  if (!response.ok) {
+    throw new Error(`service config request failed: ${response.status}`)
+  }
+
+  const json = await response.json() as ManagedServiceConfig
+  return {
+    service: String(json.service ?? 'unknown'),
+    version: String(json.version ?? 'unknown'),
+    upload: {
+      strategy: String(json.upload?.strategy ?? 'unknown'),
+      max_size_bytes: json.upload?.max_size_bytes,
+    },
+    jobs: {
+      workflow: String(json.jobs?.workflow ?? 'unknown'),
+    },
+  }
+}
+
+export async function testServiceConnection(settings: AdminSettings): Promise<ServiceConnectionCheck> {
+  try {
+    if (settings.serviceMode === 'managed_service') {
+      const config = await fetchManagedServiceConfig(settings)
+      return {
+        ok: true,
+        message: `Connected: ${config.service} ${config.version}`,
+        config,
+      }
+    }
+
+    const apiBase = resolveServiceBase(settings)
+    if (!apiBase) {
+      throw new Error('service URL is not configured')
+    }
+
+    const response = await fetch(`${apiBase}/health`, {
+      headers: buildAuthHeaders(settings),
+    })
+    if (!response.ok) {
+      throw new Error(`health check failed: ${response.status}`)
+    }
+
+    return {
+      ok: true,
+      message: 'Connected: legacy pipeline health OK',
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : 'service connection failed',
+    }
   }
 }
 
