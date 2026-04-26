@@ -57,25 +57,9 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      # アイコンをPythonで生成してtauri iconで全サイズ展開
       - name: Generate icons
         working-directory: frontend
-        run: |
-          python3 -c "
-          import struct, zlib, os
-          def chunk(t, d):
-              return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t+d)&0xffffffff)
-          def make_png(w, h):
-              raw = b''.join(b'\x00' + bytes([99, 102, 241] * w) for _ in range(h))
-              return (b'\x89PNG\r\n\x1a\n'
-                      + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
-                      + chunk(b'IDAT', zlib.compress(raw))
-                      + chunk(b'IEND', b''))
-          os.makedirs('src-tauri/icons', exist_ok=True)
-          open('src-tauri/icons/source.png', 'wb').write(make_png(1024, 1024))
-          print('Source icon created (1024x1024 indigo)')
-          "
-          npx @tauri-apps/cli icon src-tauri/icons/source.png
+        run: npx @tauri-apps/cli icon src-tauri/app-icon.png
 
       - name: Build Tauri app (portable)
         working-directory: frontend

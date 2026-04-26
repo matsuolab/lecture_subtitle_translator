@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "pretauri:dev": "node -e \"require('kill-port')(5173).then(()=>process.exit(0)).catch(()=>process.exit(0))\"",
+    "pretauri:dev": "node -e \"require('kill-port')(5173).then(()=>process.exit(0)).catch(()=>process.exit(0))\" && node -e \"const fs=require('fs');if(!fs.existsSync('src-tauri/icons/icon.ico')){const {execSync}=require('child_process');execSync('npx tauri icon src-tauri/app-icon.png',{stdio:'inherit'})}\"",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },
