@@ -284,7 +284,7 @@ async fn transcribe_local(audio_path: String, language: String) -> Result<serde_
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Value, String> {
+fn run_whisperx_cli(audio_path: &str, _language: &str) -> Result<serde_json::Value, String> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -307,12 +307,9 @@ fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Valu
         "-v", &audio_mount,
         "-v", &output_mount,
         GHCR_WHISPERX_IMAGE,
+        "--",              // /bin/sh -c "whisperx $@" の $0 に食われるダミー
         "/audio/input.wav",
-        "--model", "large-v3",
-        "--language", language,
         "--output_format", "json",
-        "--batch_size", "8",
-        "--compute_type", "float16",
         "--output_dir", "/output",
     ]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
