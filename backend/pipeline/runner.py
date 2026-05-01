@@ -61,12 +61,14 @@ class DAGRunner:
 
             final_status = "failure"
             final_issues: list[str] = []
+            final_result = None
 
             for attempt in range(1, spec.max_attempts + 1):
                 started = time.perf_counter()
                 error_text: str | None = None
                 try:
                     result = node.run(state)
+                    final_result = result
                     final_status = result.status
                     final_issues = list(result.issues)
                     if result.updates:
@@ -75,6 +77,7 @@ class DAGRunner:
                         state.schema_version = node.contract.output_schema_version
                 except Exception as exc:  # pragma: no cover - defensive
                     result = None
+                    final_result = None
                     final_status = "failure"
                     final_issues = ["exception"]
                     error_text = str(exc)
@@ -103,7 +106,14 @@ class DAGRunner:
                     continue
                 break
 
-            next_node = self._resolve_next(workflow.get_edges(current), final_status)
+            if (
+                final_status == "failure"
+                and final_result is not None
+                and final_result.metrics.get("retryable") is False
+            ):
+                next_node = None
+            else:
+                next_node = self._resolve_next(workflow.get_edges(current), final_status)
             if next_node is None:
                 if final_status == "success":
                     state.mark_success(current)

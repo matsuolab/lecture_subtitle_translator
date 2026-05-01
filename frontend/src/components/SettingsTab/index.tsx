@@ -3,21 +3,50 @@ import { themes } from '@/themes'
 import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
-import type { AdminSettings, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+
+type ServiceCheckState = {
+  status: 'idle' | 'checking' | 'success' | 'error'
+  message: string
+}
 
 type SettingsTabProps = {
   adminSettings: AdminSettings
+  serviceCheck: ServiceCheckState
   onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
   onAdminSettingsReset: () => void
+  onServiceCheck: () => void
 }
+
+const serviceModeOptions: Array<{ value: ServiceMode; label: string }> = [
+  { value: 'managed_service', label: 'AWS / リモート実行' },
+  { value: 'legacy_pipeline', label: 'このPCで実行' },
+]
 
 export function SettingsTab({
   adminSettings,
+  serviceCheck,
   onAdminSettingsChange,
   onAdminSettingsReset,
+  onServiceCheck,
 }: SettingsTabProps) {
   const { theme, setThemeId } = useTheme()
   const { strings: t, setLocaleId } = useLocale()
+  const currentVersion = (import.meta.env.VITE_APP_VERSION as string | undefined) || null
+
+  const serviceUrlPlaceholder = adminSettings.serviceMode === 'managed_service'
+    ? 'https://service.example.com'
+    : 'http://127.0.0.1:8000'
+
+  const serviceHelpText = adminSettings.serviceMode === 'managed_service'
+    ? '音声アップロード、ジョブ投入、結果取得を行う managed service の公開 URL を指定します。'
+    : 'このPC上でローカル実行します。必要な書き起こしサービスはアプリが自動で起動します。'
+
+  const serviceCheckColor = serviceCheck.status === 'success'
+    ? '#22c55e'
+    : serviceCheck.status === 'error'
+      ? '#ef4444'
+      : theme.textSecondary
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
@@ -65,15 +94,84 @@ export function SettingsTab({
         ))}
       </Section>
 
+      <Section title="アプリ情報" theme={theme}>
+        <FieldCard theme={theme}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>バージョン</div>
+            <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
+              {currentVersion && currentVersion !== '0.0.0' ? currentVersion : '開発ビルド'}
+            </div>
+          </div>
+        </FieldCard>
+      </Section>
+
       <Section title={t.settingsAdminTitle} theme={theme}>
         <FieldCard theme={theme}>
-          <Field
+          <ModeSelectField
             theme={theme}
-            label={t.settingsPipelineApiUrl}
-            value={adminSettings.pipelineApiUrl}
-            placeholder={t.settingsPipelineApiUrlPlaceholder}
-            onChange={(value) => onAdminSettingsChange({ pipelineApiUrl: value })}
+            label="実行先"
+            value={adminSettings.serviceMode}
+            onChange={(value) => onAdminSettingsChange({ serviceMode: value })}
+            options={serviceModeOptions}
           />
+          {adminSettings.serviceMode === 'managed_service' ? (
+            <>
+              <Field
+                theme={theme}
+                label="Service URL"
+                value={adminSettings.serviceUrl}
+                placeholder={serviceUrlPlaceholder}
+                onChange={(value) => onAdminSettingsChange({ serviceUrl: value })}
+              />
+              <Field
+                theme={theme}
+                label="Service Auth Token"
+                value={adminSettings.serviceAuthToken}
+                placeholder="Bearer token or API token"
+                type="password"
+                onChange={(value) => onAdminSettingsChange({ serviceAuthToken: value })}
+              />
+            </>
+          ) : (
+            <div style={{
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.panelBg,
+              color: theme.textSecondary,
+              fontSize: 12,
+              lineHeight: 1.6,
+            }}>
+              ローカル実行に必要なサービスはアプリが自動で起動します。
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            {serviceHelpText}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button
+              onClick={onServiceCheck}
+              disabled={serviceCheck.status === 'checking'}
+              style={{
+                padding: '8px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textPrimary,
+                cursor: serviceCheck.status === 'checking' ? 'wait' : 'pointer',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              {serviceCheck.status === 'checking' ? 'Checking...' : '接続テスト'}
+            </button>
+            <span style={{ fontSize: 11, color: serviceCheckColor }}>
+              {serviceCheck.message}
+            </span>
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
           <Field
             theme={theme}
             label={t.settingsHfToken}
@@ -94,7 +192,6 @@ export function SettingsTab({
               { value: 'openai', label: t.settingsTranslatorProviderOpenAi },
               { value: 'gemini', label: t.settingsTranslatorProviderGemini },
               { value: 'deepl', label: t.settingsTranslatorProviderDeepL },
-              { value: 'local', label: t.settingsTranslatorProviderLocal },
             ]}
           />
           <Field
@@ -270,6 +367,43 @@ function SelectField({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value as TranslationProvider)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+        }}
+      >
+        {options.map(option => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function ModeSelectField({
+  theme,
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  theme: Theme
+  label: string
+  value: ServiceMode
+  onChange: (value: ServiceMode) => void
+  options: Array<{ value: ServiceMode; label: string }>
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as ServiceMode)}
         style={{
           width: '100%',
           padding: '10px 12px',

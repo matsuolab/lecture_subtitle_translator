@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .bootstrap import build_default_registry
+from .results import build_result_payload
 from .runner import DAGRunner
-from .workflows import drop_first_v1, drop_first_with_quality_v1
+from .workflows import drop_first_v1, drop_first_with_quality_v1, managed_transcript_v1
 
 RunLifecycleStatus = Literal["queued", "running", "success", "failed", "cancelled"]
-_SECRET_KEYS = {"openai_api_key", "gemini_api_key", "deepl_api_key", "anthropic_api_key"}
 
 log = logging.getLogger(__name__)
 
@@ -21,12 +21,10 @@ class StoredRun:
     run_id: str
     status: RunLifecycleStatus
     request: dict[str, Any]
-    # 進行状況
     current_node: str | None = None
     completed_nodes: list[str] = field(default_factory=list)
     total_nodes: int = 0
     node_started_at: float | None = None
-    # 完了後
     state: Any | None = None
 
 
@@ -44,7 +42,12 @@ class PipelineService:
         schema_version = str(payload.get("schema_version", "1.0"))
         max_total_steps = int(payload.get("max_total_steps", 200))
 
-        workflow = drop_first_v1() if workflow_name == "drop_first_v1" else drop_first_with_quality_v1()
+        if workflow_name == "drop_first_v1":
+            workflow = drop_first_v1()
+        elif workflow_name == "managed_transcript_v1":
+            workflow = managed_transcript_v1()
+        else:
+            workflow = drop_first_with_quality_v1()
 
         initial_data.setdefault("source_name", payload.get("source_name", "unknown.mp4"))
         initial_data.setdefault("max_cps", 99.0)
@@ -142,87 +145,12 @@ class PipelineService:
         if not run or not run.state:
             return None
 
-        state = run.state
-        traces = [
-            {
-                "node_id": rec.node_id,
-                "attempt": rec.attempt,
-                "status": rec.status,
-                "duration_ms": rec.duration_ms,
-                "provider": rec.provider,
-                "model": rec.model,
-                "issues": rec.issues,
-                "metrics": rec.metrics,
-                "error": rec.error,
-            }
-            for rec in state.records
-        ]
-
-        review_items: list[dict[str, Any]] = []
-        for i, rec in enumerate(state.records):
-            if rec.status == "failure":
-                review_items.append({
-                    "id": f"fail-{rec.node_id}-{i}",
-                    "node_id": rec.node_id,
-                    "reason": rec.error or ", ".join(rec.issues) or "node failed",
-                    "priority": "must_review",
-                    "score": 0.0,
-                })
-
-            if rec.node_id == "semantic_check":
-                score = float(rec.metrics.get("score", 1.0))
-                threshold = float(rec.metrics.get("threshold", 0.85))
-                review_items.append({
-                    "id": f"semantic-{i}",
-                    "node_id": "semantic_check",
-                    "reason": f"semantic score={score:.2f}, threshold={threshold:.2f}",
-                    "priority": "must_review" if score < threshold else ("should_review" if score < 0.92 else "auto_pass"),
-                    "score": score,
-                })
-
-            if rec.node_id == "terminology_check":
-                miss = int(rec.metrics.get("miss_count", 0))
-                review_items.append({
-                    "id": f"term-{i}",
-                    "node_id": "terminology_check",
-                    "reason": "terminology misses found" if miss > 0 else "terminology ok",
-                    "priority": "must_review" if miss > 0 else "auto_pass",
-                    "score": 0.2 if miss > 0 else 0.98,
-                })
-
-            if rec.node_id == "cps_guard":
-                v = int(rec.metrics.get("violation_count", 0))
-                review_items.append({
-                    "id": f"cps-{i}",
-                    "node_id": "cps_guard",
-                    "reason": f"cps violations={v}",
-                    "priority": "must_review" if v > 0 else "auto_pass",
-                    "score": 0.1 if v > 0 else 0.99,
-                })
-
-        must_review = sum(1 for item in review_items if item["priority"] == "must_review")
-        should_review = sum(1 for item in review_items if item["priority"] == "should_review")
-        auto_pass = sum(1 for item in review_items if item["priority"] == "auto_pass")
-
-        return {
-            "run_id": run_id,
-            "status": run.status,
-            "workflow": run.request.get("workflow", "drop_first_with_quality_v1"),
-            "state": {
-                "schema_version": state.schema_version,
-                "final_node": state.final_node,
-                "error": state.error,
-                "data": _sanitize_state_data(state.data),
-                "records": traces,
-            },
-            "audit": {
-                "must_review_count": must_review,
-                "should_review_count": should_review,
-                "auto_pass_count": auto_pass,
-                "review_items": review_items,
-                "node_traces": traces,
-            },
-        }
+        return build_result_payload(
+            run_id=run_id,
+            status=run.status,
+            workflow=str(run.request.get("workflow", "drop_first_with_quality_v1")),
+            state=run.state,
+        )
 
     def cancel_run(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -238,17 +166,3 @@ class PipelineService:
 def _new_run_id() -> str:
     import uuid
     return str(uuid.uuid4())
-
-
-def _sanitize_state_data(data: dict[str, Any]) -> dict[str, Any]:
-    sanitized = dict(data)
-    runtime_settings = sanitized.get("runtime_settings")
-    if isinstance(runtime_settings, dict):
-        safe_runtime_settings: dict[str, Any] = {}
-        for key, value in runtime_settings.items():
-            if key in _SECRET_KEYS and value:
-                safe_runtime_settings[key] = "***"
-            else:
-                safe_runtime_settings[key] = value
-        sanitized["runtime_settings"] = safe_runtime_settings
-    return sanitized

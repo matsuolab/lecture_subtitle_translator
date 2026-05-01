@@ -24,7 +24,7 @@ function priorityBadge(priority: PipelineReviewItem['priority']): string {
 export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }: ReportTabProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
-  const isRunning = pipelineRun.status === 'running'
+  const isRunning = pipelineRun.status === 'queued' || pipelineRun.status === 'running'
 
   const successRuns = runs.filter(r => r.status === 'success')
   const measuredRuns = runs.filter(r => r.metrics)
@@ -51,6 +51,7 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }:
   const statusLabel = (status: PipelineRunResult['status']) => {
     if (status === 'success') return t.reportStatusSuccess
     if (status === 'error') return t.reportStatusError
+    if (status === 'queued') return '待機中'
     if (status === 'running') return t.reportStatusRunning
     return t.reportStatusIdle
   }
@@ -105,17 +106,23 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline }:
                 height: 7,
                 borderRadius: 999,
                 background:
-                  pipelineRun.status === 'running' ? '#f59e0b'
+                  pipelineRun.status === 'queued' || pipelineRun.status === 'running' ? '#f59e0b'
                   : pipelineRun.status === 'success' ? '#22c55e'
                   : '#ef4444',
               }} />
               <span style={{ color: theme.textSecondary, fontWeight: 600 }}>
-                {pipelineRun.status === 'running' ? '実行中'
+                {pipelineRun.status === 'queued' ? '待機中'
+                  : pipelineRun.status === 'running' ? '実行中'
                   : pipelineRun.status === 'success' ? '完了'
                   : '失敗'}
               </span>
               <span style={{ color: theme.textMuted }}>{pipelineRun.message}</span>
             </div>
+            {pipelineRun.runId && (
+              <div style={{ marginTop: 4, fontSize: 10, color: theme.textSecondary }}>
+                job_id: <code style={{ fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>{pipelineRun.runId}</code>
+              </div>
+            )}
             {pipelineRun.metrics && (
               <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 10, color: theme.textSecondary }}>
                 <span>CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%</span>
