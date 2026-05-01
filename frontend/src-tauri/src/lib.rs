@@ -294,8 +294,11 @@ fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Valu
     fs::create_dir_all(&output_dir)
         .map_err(|e| format!("failed to create temp output dir: {e}"))?;
 
-    let audio_mount = format!("{}:/audio/input.wav:ro", audio_path);
-    let output_mount = format!("{}:/output", output_dir.display());
+    // Windows パスのバックスラッシュをフォワードスラッシュに変換（Docker Desktop WSL2対応）
+    let audio_host = audio_path.replace('\\', "/");
+    let output_host = output_dir.display().to_string().replace('\\', "/");
+    let audio_mount = format!("{audio_host}:/audio/input.wav:ro");
+    let output_mount = format!("{output_host}:/output");
 
     let mut command = Command::new("docker");
     command.args([
