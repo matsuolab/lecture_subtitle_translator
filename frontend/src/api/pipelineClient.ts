@@ -836,12 +836,12 @@ export async function testServiceConnection(settings: AdminSettings): Promise<Se
       }
     }
 
-    await ensureLocalTranscriptServiceWithConsent(settings, apiBase)
-    const json = await fetchLocalWhisperxHealth(apiBase)
-    assertLocalWhisperxHealth(apiBase, json)
+    if (!isTauri()) {
+      throw new Error('ローカルWhisperX転写はTauriデスクトップアプリでのみ利用可能です')
+    }
     return {
       ok: true,
-      message: `Connected: local WhisperX ${String(json.model)}`,
+      message: 'Docker経由でローカルWhisperX転写を使用します（ghcr.io/jim60105/whisperx:large-v3-ja）',
     }
   } catch (error) {
     return {
