@@ -839,10 +839,8 @@ export async function testServiceConnection(settings: AdminSettings): Promise<Se
     if (!isTauri()) {
       throw new Error('ローカルWhisperX転写はTauriデスクトップアプリでのみ利用可能です')
     }
-    return {
-      ok: true,
-      message: 'Docker経由でローカルWhisperX転写を使用します（ghcr.io/jim60105/whisperx:large-v3-ja）',
-    }
+    const message = await invoke<string>('check_local_whisperx')
+    return { ok: true, message }
   } catch (error) {
     return {
       ok: false,
