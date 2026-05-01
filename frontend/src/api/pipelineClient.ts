@@ -584,7 +584,9 @@ async function runLocalTranscriptPipeline(
     totalNodes: 0,
     nodeElapsedSec: null,
   })
-  const audioPath = await invoke<string>('extract_audio', { videoPath: sourceInput.path })
+  const audioPath = await invoke<string>('extract_audio', { videoPath: sourceInput.path }).catch(
+    (e: unknown) => { throw new Error(`音声抽出失敗: ${String(e)}`) },
+  )
 
   onProgress?.({
     runId: 'local-transcript',
@@ -599,7 +601,7 @@ async function runLocalTranscriptPipeline(
   const whisperxPayload = await invoke<LocalWhisperxTranscriptResponse>('transcribe_local', {
     audioPath,
     language: 'ja',
-  })
+  }).catch((e: unknown) => { throw new Error(`転写失敗: ${String(e)}`) })
   const result = normalizeLocalTranscriptResult(whisperxPayload)
   const managedTraces = toManagedMetadataTraces(result).map((trace) =>
     trace.nodeId === 'transcribe' ? { ...trace, durationMs: Date.now() - t0, model: 'whisperx-local' } : trace,
