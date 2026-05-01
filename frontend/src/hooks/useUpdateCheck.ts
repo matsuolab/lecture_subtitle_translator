@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 const REPO = 'matsuolab/lecture_subtitle_translator'
 const CACHE_DATE_KEY = 'update_check_last_date'
 const DISMISSED_KEY = 'update_dismissed_version'
+const UPDATE_CHECK_ENABLED = false
 
 export interface UpdateCheckResult {
   available: boolean
@@ -13,7 +14,7 @@ export interface UpdateCheckResult {
 }
 
 export interface ManualCheckState {
-  status: 'idle' | 'checking' | 'up_to_date' | 'available' | 'error'
+  status: 'idle' | 'checking' | 'up_to_date' | 'available' | 'error' | 'disabled'
   latestVersion: string | null
   releaseUrl: string | null
   downloadUrl: string | null
@@ -93,11 +94,11 @@ async function fetchLatestRelease(): Promise<GitHubRelease> {
 export function useUpdateCheck(): UseUpdateCheckReturn {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [manualCheck, setManualCheck] = useState<ManualCheckState>({
-    status: 'idle',
+    status: UPDATE_CHECK_ENABLED ? 'idle' : 'disabled',
     latestVersion: null,
     releaseUrl: null,
     downloadUrl: null,
-    errorMessage: null,
+    errorMessage: UPDATE_CHECK_ENABLED ? null : '自動更新チェックは一時停止中です',
     checkedAt: null,
   })
   const [lastAutoCheckDate, setLastAutoCheckDate] = useState<string | null>(
@@ -105,6 +106,7 @@ export function useUpdateCheck(): UseUpdateCheckReturn {
   )
 
   useEffect(() => {
+    if (!UPDATE_CHECK_ENABLED) return
     const currentVersion = import.meta.env.VITE_APP_VERSION as string | undefined
     if (!currentVersion || currentVersion === '0.0.0') return
 
@@ -149,6 +151,18 @@ export function useUpdateCheck(): UseUpdateCheckReturn {
   }, [])
 
   const triggerManualCheck = useCallback(() => {
+    if (!UPDATE_CHECK_ENABLED) {
+      setManualCheck({
+        status: 'disabled',
+        latestVersion: null,
+        releaseUrl: null,
+        downloadUrl: null,
+        errorMessage: '自動更新チェックは一時停止中です',
+        checkedAt: null,
+      })
+      return
+    }
+
     const currentVersion = import.meta.env.VITE_APP_VERSION as string | undefined
     setManualCheck({
       status: 'checking',

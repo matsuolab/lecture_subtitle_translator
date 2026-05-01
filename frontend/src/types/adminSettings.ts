@@ -11,4 +11,5 @@ export interface AdminSettings {
   deeplApiKey: string
   openaiCompatibleBaseUrl: string
   translationProvider: TranslationProvider
+  translationModel?: string
 }

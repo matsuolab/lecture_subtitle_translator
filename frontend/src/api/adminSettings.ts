@@ -3,6 +3,7 @@ import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/ad
 const STORAGE_KEY = 'subtitle-editor.admin-settings.v3'
 const ENV_SERVICE_URL = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 const ENV_HF_TOKEN = (import.meta.env.VITE_HF_TOKEN as string | undefined) ?? ''
+const DEFAULT_LOCAL_TRANSCRIPT_API_BASE = 'http://127.0.0.1:8000'
 
 const DEFAULT_SERVICE_MODE: ServiceMode = 'legacy_pipeline'
 const DEFAULT_TRANSLATION_PROVIDER: TranslationProvider = 'openai'
@@ -10,7 +11,7 @@ const DEFAULT_TRANSLATION_PROVIDER: TranslationProvider = 'openai'
 export function getDefaultAdminSettings(): AdminSettings {
   return {
     serviceMode: DEFAULT_SERVICE_MODE,
-    serviceUrl: ENV_SERVICE_URL,
+    serviceUrl: ENV_SERVICE_URL || DEFAULT_LOCAL_TRANSCRIPT_API_BASE,
     serviceAuthToken: '',
     hfToken: ENV_HF_TOKEN,
     openaiApiKey: '',
@@ -28,9 +29,13 @@ function normalizeServiceMode(value: unknown): ServiceMode {
 }
 
 function normalizeTranslationProvider(value: unknown): TranslationProvider {
-  return value === 'openai' || value === 'gemini' || value === 'deepl' || value === 'local'
-    ? value
-    : DEFAULT_TRANSLATION_PROVIDER
+  if (value === 'openai' || value === 'gemini' || value === 'deepl') {
+    return value
+  }
+  if (value === 'local') {
+    return DEFAULT_TRANSLATION_PROVIDER
+  }
+  return DEFAULT_TRANSLATION_PROVIDER
 }
 
 export function normalizeAdminSettings(value: unknown): AdminSettings {

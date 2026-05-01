@@ -13,21 +13,29 @@ batch_security_group_ids = [
   "sg-091e82d3fecf4c823"
 ]
 
-# Temporary dev fallback while GPU quotas are 0 in ap-northeast-1.
-# The same worker image has been validated locally with device=cpu / compute_type=int8.
-batch_ec2_image_type    = "ECS_AL2023"
-batch_instance_types      = ["m7i.xlarge"]
+# Production-path dev rollout: keep the same Batch/GPU route used in the target design.
+batch_ec2_image_type      = "ECS_AL2023_NVIDIA"
+batch_instance_types      = ["g4dn.xlarge"]
 batch_ondemand_max_vcpus = 4
+batch_gpu_spot_max_vcpus = 4
+batch_gpu_ondemand_max_vcpus = 4
 batch_vcpus              = 2
 batch_memory             = 12288
-batch_gpu_count          = 0
-batch_root_volume_size_gb = 100
+batch_gpu_count          = 1
+batch_root_volume_size_gb = 150
+batch_custom_ami_id = "ami-0c1d51ced451f9ec0"
+batch_worker_image_reference = "699092320766.dkr.ecr.ap-northeast-1.amazonaws.com/matsuo-subtitle-pipeline-dev-worker@sha256:c85ecf6a773d451bde7fa25e3fbb24f84c69d85636c79fe0371c2e3cf5c6d41d"
 batch_image_pull_behavior = "prefer-cached"
-whisperx_device          = "cpu"
+whisperx_device          = "cuda"
 whisperx_model           = "large-v3"
 whisperx_language        = "ja"
-whisperx_compute_type    = "int8"
-whisperx_batch_size      = 1
+whisperx_compute_type    = "float16"
+whisperx_batch_size      = 4
+batch_include_cpu_fallback = false
+
+# custom AMI / digest fixed route examples:
+# batch_custom_ami_id = "ami-0c1d51ced451f9ec0"
+# batch_worker_image_reference = "699092320766.dkr.ecr.ap-northeast-1.amazonaws.com/matsuo-subtitle-pipeline-dev-worker@sha256:c85ecf6a773d451bde7fa25e3fbb24f84c69d85636c79fe0371c2e3cf5c6d41d"
 
 # Keep Lambda outside the VPC in the first dev rollout so it can reach
 # Secrets Manager, S3, and Batch APIs without adding NAT or VPC endpoints.

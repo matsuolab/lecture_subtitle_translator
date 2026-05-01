@@ -56,3 +56,13 @@ def drop_first_with_quality_v1() -> WorkflowDefinition:
         nodes=nodes,
         edges=edges,
     )
+
+
+def managed_transcript_v1() -> WorkflowDefinition:
+    nodes = {
+        "transcribe": NodeSpec(id="transcribe", implementation_key="transcribe", max_visits=2),
+    }
+    edges = {
+        "transcribe": [],
+    }
+    return WorkflowDefinition(name="managed_transcript_v1", start_node="transcribe", nodes=nodes, edges=edges)

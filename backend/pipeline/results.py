@@ -110,3 +110,42 @@ def build_result_payload(run_id: str, status: str, workflow: str, state: RunStat
             "node_traces": traces,
         },
     }
+
+
+def build_word_timestamps(transcript_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    words: list[dict[str, Any]] = []
+    for segment in transcript_segments:
+        segment_words = segment.get("words")
+        if not isinstance(segment_words, list):
+            continue
+        for word in segment_words:
+            if not isinstance(word, dict):
+                continue
+            words.append({
+                "word": str(word.get("word", "")),
+                "start": float(word.get("start", 0.0)),
+                "end": float(word.get("end", 0.0)),
+                "score": float(word.get("score", 1.0)),
+            })
+    return words
+
+
+def build_transcript_job_result(result: dict[str, Any], *, job_id: str) -> dict[str, Any]:
+    state = result.get("state", {})
+    state_data = state.get("data", {})
+    transcript_segments = state_data.get("transcript_segments", [])
+    audit = result.get("audit", {})
+    metadata = {
+        "workflow": result.get("workflow"),
+        "schema_version": state.get("schema_version"),
+        "final_node": state.get("final_node"),
+        "error": state.get("error"),
+        "node_traces": audit.get("node_traces", []),
+    }
+    return {
+        "job_id": job_id,
+        "status": result.get("status"),
+        "transcript_segments": transcript_segments,
+        "words": build_word_timestamps(transcript_segments if isinstance(transcript_segments, list) else []),
+        "metadata": metadata,
+    }

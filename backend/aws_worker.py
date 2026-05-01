@@ -10,9 +10,9 @@ from typing import Any
 import boto3
 
 from .pipeline.bootstrap import build_default_registry
-from .pipeline.results import build_result_payload
+from .pipeline.results import build_transcript_job_result
 from .pipeline.runner import DAGRunner
-from .pipeline.workflows import drop_first_v1, drop_first_with_quality_v1
+from .pipeline.workflow import Edge, NodeSpec, WorkflowDefinition
 
 
 def main() -> None:
@@ -33,27 +33,24 @@ def main() -> None:
 
     s3.download_file(input_bucket, payload["input_key"], str(input_path))
 
-    workflow_name = payload.get("workflow", "drop_first_with_quality_v1")
-    workflow = drop_first_v1() if workflow_name == "drop_first_v1" else drop_first_with_quality_v1()
+    workflow = _managed_transcript_workflow()
     initial_data: dict[str, Any] = {
         "source_name": payload["source_name"],
-        "source_media_path": str(input_path),
-        "max_cps": 99,
-        "glossary_terms": payload.get("glossary_terms", []),
-        "runtime_settings": payload.get("runtime_settings", {}),
+        "audio_path": str(input_path),
         "execution_mode": payload.get("execution_mode", "production"),
         "allow_transcribe_fallback": False,
     }
-    if payload.get("semantic_score_override") is not None:
-        initial_data["semantic_score_override"] = payload["semantic_score_override"]
 
     runner = DAGRunner(build_default_registry())
     completed_steps: list[str] = []
+    active_step: str | None = None
 
     def on_node_start(node_id: str) -> None:
+        nonlocal active_step
         public_step = _to_public_step(node_id)
-        if public_step not in completed_steps:
-            completed_steps.append(public_step)
+        if active_step and active_step not in completed_steps:
+            completed_steps.append(active_step)
+        active_step = public_step
         _update_job(
             ddb,
             jobs_table,
@@ -67,13 +64,44 @@ def main() -> None:
     state = runner.run(
         workflow,
         initial_data=initial_data,
-        max_total_steps=int(payload.get("max_total_steps", 200)),
+        max_total_steps=16,
         schema_version=str(payload.get("schema_version", "1.0")),
         on_node_start=on_node_start,
     )
+    final_public_step = _to_public_step(state.final_node) if state.final_node else active_step
+    if final_public_step and final_public_step not in completed_steps:
+        completed_steps.append(final_public_step)
 
     final_status = "success" if state.status == "success" else "failed"
-    result_payload = build_result_payload(job_id, final_status, workflow.name, state)
+    result_payload = build_transcript_job_result(
+        {
+            "status": final_status,
+            "workflow": workflow.name,
+            "state": {
+                "schema_version": state.schema_version,
+                "final_node": state.final_node,
+                "error": state.error,
+                "data": state.data,
+            },
+            "audit": {
+                "node_traces": [
+                    {
+                        "node_id": rec.node_id,
+                        "attempt": rec.attempt,
+                        "status": rec.status,
+                        "duration_ms": rec.duration_ms,
+                        "provider": rec.provider,
+                        "model": rec.model,
+                        "issues": rec.issues,
+                        "metrics": rec.metrics,
+                        "error": rec.error,
+                    }
+                    for rec in state.records
+                ]
+            },
+        },
+        job_id=job_id,
+    )
     result_key = f"{result_prefix}{job_id}.json"
     s3.put_object(
         Bucket=result_bucket,
@@ -86,7 +114,7 @@ def main() -> None:
         jobs_table,
         job_id,
         status=final_status,
-        current_step="completed" if final_status == "success" else "failed",
+        current_step=final_public_step or "queued",
         completed_steps=completed_steps,
         result_key=result_key,
         error=state.error,
@@ -95,16 +123,19 @@ def main() -> None:
 
 def _to_public_step(node_id: str) -> str:
     mapping = {
-        "extract_audio": "extract_audio",
         "transcribe": "transcribe",
-        "correct": "correct",
-        "translate": "translate",
-        "semantic_check": "translate",
-        "terminology_check": "translate",
-        "subtitle": "subtitle",
-        "cps_guard": "subtitle",
     }
     return mapping.get(node_id, node_id)
+
+
+def _managed_transcript_workflow() -> WorkflowDefinition:
+    nodes = {
+        "transcribe": NodeSpec(id="transcribe", implementation_key="transcribe", max_visits=2),
+    }
+    edges = {
+        "transcribe": [],
+    }
+    return WorkflowDefinition(name="managed_transcript_v1", start_node="transcribe", nodes=nodes, edges=edges)
 
 
 def _update_job(

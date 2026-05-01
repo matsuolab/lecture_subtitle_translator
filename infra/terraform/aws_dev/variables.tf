@@ -33,6 +33,16 @@ variable "batch_ondemand_max_vcpus" {
   default = 4
 }
 
+variable "batch_gpu_spot_max_vcpus" {
+  type    = number
+  default = 4
+}
+
+variable "batch_gpu_ondemand_max_vcpus" {
+  type    = number
+  default = 4
+}
+
 variable "batch_vcpus" {
   type    = number
   default = 2
@@ -51,6 +61,16 @@ variable "batch_gpu_count" {
 variable "batch_root_volume_size_gb" {
   type    = number
   default = 100
+}
+
+variable "batch_custom_ami_id" {
+  type    = string
+  default = ""
+}
+
+variable "batch_worker_image_reference" {
+  type    = string
+  default = ""
 }
 
 variable "batch_image_pull_behavior" {
@@ -104,5 +124,10 @@ variable "lambda_security_group_ids" {
 variable "lambda_package_path" {
   type    = string
   default = "../../../dist/lambda/backend.zip"
+}
+
+variable "batch_include_cpu_fallback" {
+  type    = bool
+  default = false
 }
 

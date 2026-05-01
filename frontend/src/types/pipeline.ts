@@ -1,6 +1,9 @@
+import type { SubtitleBlock } from './subtitle'
+import type { TranscriptSegment } from '@/lib/pipeline/types'
+
 export type PipelineStep = 'idle' | 'transcribe' | 'correct' | 'translate' | 'subtitle' | 'done'
 
-export type PipelineStatus = 'idle' | 'running' | 'success' | 'error'
+export type PipelineStatus = 'idle' | 'queued' | 'running' | 'success' | 'error'
 
 export interface PipelineQualityMetrics {
   totalBlocks: number
@@ -50,13 +53,41 @@ export interface PipelineAuditReport {
   nodeTraces: PipelineNodeTrace[]
 }
 
+export interface PipelineProgressEvent {
+  at: number
+  status: PipelineStatus
+  step: PipelineStep
+  message: string
+  runId?: string
+  currentNode?: string | null
+  completedNodes?: string[]
+  totalNodes?: number
+  nodeElapsedSec?: number | null
+}
+
+export interface PipelineRunDebug {
+  sourceMedia?: {
+    name: string
+    path?: string
+    mode?: string
+  }
+  settingsSnapshot?: Record<string, unknown>
+  initialBlocks?: SubtitleBlock[]
+  finalBlocks?: SubtitleBlock[]
+  progressEvents: PipelineProgressEvent[]
+  transcriptSegments?: TranscriptSegment[]
+  transcriptMetadata?: Record<string, unknown>
+}
+
 export interface PipelineRunResult {
   status: PipelineStatus
   step: PipelineStep
   message: string
+  runId?: string
   sourceName?: string
   startedAt?: number
   finishedAt?: number
   metrics?: PipelineRunMetrics
   audit?: PipelineAuditReport
+  debug?: PipelineRunDebug
 }

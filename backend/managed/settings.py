@@ -22,7 +22,7 @@ class ManagedServiceSettings:
     backend_mode: str = "local"
     service_name: str = "subtitle-managed-service"
     service_version: str = "0.3.0"
-    default_workflow: str = "drop_first_with_quality_v1"
+    default_workflow: str = "managed_transcript_v1"
     max_upload_size_bytes: int = 5 * 1024 * 1024 * 1024
     auth_mode: str = "none"
     bearer_token: str | None = None
@@ -46,7 +46,7 @@ class ManagedServiceSettings:
             backend_mode=_env("MANAGED_SERVICE_BACKEND", "local") or "local",
             service_name=_env("MANAGED_SERVICE_NAME", "subtitle-managed-service") or "subtitle-managed-service",
             service_version=_env("MANAGED_SERVICE_VERSION", "0.3.0") or "0.3.0",
-            default_workflow=_env("MANAGED_SERVICE_DEFAULT_WORKFLOW", "drop_first_with_quality_v1") or "drop_first_with_quality_v1",
+            default_workflow=_env("MANAGED_SERVICE_DEFAULT_WORKFLOW", "managed_transcript_v1") or "managed_transcript_v1",
             max_upload_size_bytes=int(_env("MANAGED_SERVICE_MAX_UPLOAD_SIZE_BYTES", str(5 * 1024 * 1024 * 1024)) or str(5 * 1024 * 1024 * 1024)),
             auth_mode=auth_mode,
             bearer_token=bearer_token,

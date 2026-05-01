@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .managed import build_managed_services
+from .pipeline.nodes.translate import validate_runtime_translation_settings
 from .pipeline.service import PipelineService
 
 logging.basicConfig(
@@ -66,13 +67,9 @@ class CreateUploadRequest(BaseModel):
 class CreateJobRequest(BaseModel):
     source_name: str = Field(default="unknown.mp4")
     input_key: str
-    workflow: str = Field(default="drop_first_with_quality_v1")
-    runtime_settings: dict[str, Any] = Field(default_factory=dict)
+    workflow: str = Field(default="managed_transcript_v1")
     execution_mode: str = Field(default="production")
-    glossary_terms: list[dict[str, Any]] = Field(default_factory=list)
-    semantic_score_override: float | None = None
     schema_version: str = Field(default="1.0")
-    max_total_steps: int = Field(default=200)
 
 
 @app.get("/health")
@@ -117,12 +114,8 @@ def create_job(req: CreateJobRequest, request: Request) -> dict[str, Any]:
             source_name=req.source_name,
             input_key=req.input_key,
             workflow=req.workflow,
-            runtime_settings=req.runtime_settings,
             execution_mode=req.execution_mode,
-            glossary_terms=req.glossary_terms,
-            semantic_score_override=req.semantic_score_override,
             schema_version=req.schema_version,
-            max_total_steps=req.max_total_steps,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -156,6 +149,9 @@ def get_job_result(job_id: str, request: Request) -> dict[str, Any]:
 
 @app.post("/api/pipeline/runs")
 def start_run(req: StartRunRequest) -> dict[str, Any]:
+    validation_error = validate_runtime_translation_settings(req.initial_data.get("runtime_settings"))
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
     return service.start_run(req.model_dump())
 
 

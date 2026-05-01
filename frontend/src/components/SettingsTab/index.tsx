@@ -4,7 +4,6 @@ import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
-import type { ManualCheckState } from '@/hooks/useUpdateCheck'
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -14,28 +13,22 @@ type ServiceCheckState = {
 type SettingsTabProps = {
   adminSettings: AdminSettings
   serviceCheck: ServiceCheckState
-  manualUpdateCheck: ManualCheckState
-  lastAutoCheckDate: string | null
   onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
   onAdminSettingsReset: () => void
   onServiceCheck: () => void
-  onManualUpdateCheck: () => void
 }
 
 const serviceModeOptions: Array<{ value: ServiceMode; label: string }> = [
-  { value: 'managed_service', label: 'Managed Service (AWS/Azure 互換)' },
-  { value: 'legacy_pipeline', label: 'Legacy Pipeline API' },
+  { value: 'managed_service', label: 'AWS / リモート実行' },
+  { value: 'legacy_pipeline', label: 'このPCで実行' },
 ]
 
 export function SettingsTab({
   adminSettings,
   serviceCheck,
-  manualUpdateCheck,
-  lastAutoCheckDate,
   onAdminSettingsChange,
   onAdminSettingsReset,
   onServiceCheck,
-  onManualUpdateCheck,
 }: SettingsTabProps) {
   const { theme, setThemeId } = useTheme()
   const { strings: t, setLocaleId } = useLocale()
@@ -43,11 +36,11 @@ export function SettingsTab({
 
   const serviceUrlPlaceholder = adminSettings.serviceMode === 'managed_service'
     ? 'https://service.example.com'
-    : t.settingsPipelineApiUrlPlaceholder
+    : 'http://127.0.0.1:8000'
 
   const serviceHelpText = adminSettings.serviceMode === 'managed_service'
     ? '音声アップロード、ジョブ投入、結果取得を行う managed service の公開 URL を指定します。'
-    : '既存の /api/pipeline/runs 系エンドポイントを提供するバックエンド URL を指定します。'
+    : 'このPC上でローカル実行します。必要な書き起こしサービスはアプリが自動で起動します。'
 
   const serviceCheckColor = serviceCheck.status === 'success'
     ? '#22c55e'
@@ -103,68 +96,12 @@ export function SettingsTab({
 
       <Section title="アプリ情報" theme={theme}>
         <FieldCard theme={theme}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>バージョン</div>
-              <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
-                {currentVersion && currentVersion !== '0.0.0' ? currentVersion : '開発ビルド'}
-              </div>
-              <div style={{ fontSize: 10, color: theme.textSecondary, marginTop: 4 }}>
-                {manualUpdateCheck.checkedAt
-                  ? `最終確認: ${manualUpdateCheck.checkedAt}`
-                  : lastAutoCheckDate
-                    ? `最終確認: ${lastAutoCheckDate}（起動時）`
-                    : '未確認'}
-              </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>バージョン</div>
+            <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
+              {currentVersion && currentVersion !== '0.0.0' ? currentVersion : '開発ビルド'}
             </div>
-            <button
-              onClick={onManualUpdateCheck}
-              disabled={manualUpdateCheck.status === 'checking'}
-              style={{
-                padding: '8px 12px',
-                borderRadius: 8,
-                border: `1px solid ${theme.panelBorder}`,
-                background: theme.panelBg,
-                color: theme.textPrimary,
-                cursor: manualUpdateCheck.status === 'checking' ? 'wait' : 'pointer',
-                fontSize: 12,
-                fontWeight: 600,
-                flexShrink: 0,
-              }}
-            >
-              {manualUpdateCheck.status === 'checking' ? '確認中...' : 'アップデートを確認'}
-            </button>
           </div>
-          {manualUpdateCheck.status !== 'idle' && manualUpdateCheck.status !== 'checking' && (
-            <div style={{
-              fontSize: 11,
-              color: manualUpdateCheck.status === 'up_to_date'
-                ? '#22c55e'
-                : manualUpdateCheck.status === 'available'
-                  ? '#f59e0b'
-                  : '#ef4444',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              flexWrap: 'wrap',
-            }}>
-              {manualUpdateCheck.status === 'up_to_date' && (
-                <>最新版です（{manualUpdateCheck.latestVersion}）</>
-              )}
-              {manualUpdateCheck.status === 'available' && (
-                <>
-                  {manualUpdateCheck.latestVersion} が利用可能です。
-                  {manualUpdateCheck.downloadUrl
-                    ? <a href={manualUpdateCheck.downloadUrl} target="_blank" rel="noreferrer" style={{ color: '#f59e0b', fontWeight: 700 }}>ダウンロード</a>
-                    : <a href={manualUpdateCheck.releaseUrl ?? '#'} target="_blank" rel="noreferrer" style={{ color: '#f59e0b', fontWeight: 700 }}>リリースページ</a>
-                  }
-                </>
-              )}
-              {manualUpdateCheck.status === 'error' && (
-                <>{manualUpdateCheck.errorMessage}</>
-              )}
-            </div>
-          )}
         </FieldCard>
       </Section>
 
@@ -172,26 +109,42 @@ export function SettingsTab({
         <FieldCard theme={theme}>
           <ModeSelectField
             theme={theme}
-            label="Execution Service"
+            label="実行先"
             value={adminSettings.serviceMode}
             onChange={(value) => onAdminSettingsChange({ serviceMode: value })}
             options={serviceModeOptions}
           />
-          <Field
-            theme={theme}
-            label="Service URL"
-            value={adminSettings.serviceUrl}
-            placeholder={serviceUrlPlaceholder}
-            onChange={(value) => onAdminSettingsChange({ serviceUrl: value })}
-          />
-          <Field
-            theme={theme}
-            label="Service Auth Token"
-            value={adminSettings.serviceAuthToken}
-            placeholder="Bearer token or API token"
-            type="password"
-            onChange={(value) => onAdminSettingsChange({ serviceAuthToken: value })}
-          />
+          {adminSettings.serviceMode === 'managed_service' ? (
+            <>
+              <Field
+                theme={theme}
+                label="Service URL"
+                value={adminSettings.serviceUrl}
+                placeholder={serviceUrlPlaceholder}
+                onChange={(value) => onAdminSettingsChange({ serviceUrl: value })}
+              />
+              <Field
+                theme={theme}
+                label="Service Auth Token"
+                value={adminSettings.serviceAuthToken}
+                placeholder="Bearer token or API token"
+                type="password"
+                onChange={(value) => onAdminSettingsChange({ serviceAuthToken: value })}
+              />
+            </>
+          ) : (
+            <div style={{
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.panelBg,
+              color: theme.textSecondary,
+              fontSize: 12,
+              lineHeight: 1.6,
+            }}>
+              ローカル実行に必要なサービスはアプリが自動で起動します。
+            </div>
+          )}
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
             {serviceHelpText}
           </div>
@@ -239,7 +192,6 @@ export function SettingsTab({
               { value: 'openai', label: t.settingsTranslatorProviderOpenAi },
               { value: 'gemini', label: t.settingsTranslatorProviderGemini },
               { value: 'deepl', label: t.settingsTranslatorProviderDeepL },
-              { value: 'local', label: t.settingsTranslatorProviderLocal },
             ]}
           />
           <Field

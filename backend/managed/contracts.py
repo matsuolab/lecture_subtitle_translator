@@ -74,12 +74,8 @@ class JobOrchestrator(Protocol):
         source_name: str,
         input_key: str,
         workflow: str,
-        runtime_settings: dict[str, Any],
         execution_mode: str,
-        glossary_terms: list[dict[str, Any]],
-        semantic_score_override: float | None,
         schema_version: str,
-        max_total_steps: int,
     ) -> ManagedJobHandle: ...
 
     def get_job_status(self, job_id: str) -> dict[str, Any] | None: ...

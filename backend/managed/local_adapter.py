@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..pipeline.service import PipelineService
+from ..pipeline.results import build_transcript_job_result
 from .contracts import ManagedAdapter, ManagedJobHandle, ManagedServiceConfig, ManagedUploadTarget
 from .settings import ManagedServiceSettings
 
@@ -85,12 +86,8 @@ class LocalManagedAdapter(ManagedAdapter):
         source_name: str,
         input_key: str,
         workflow: str,
-        runtime_settings: dict[str, Any],
         execution_mode: str,
-        glossary_terms: list[dict[str, Any]],
-        semantic_score_override: float | None,
         schema_version: str,
-        max_total_steps: int,
     ) -> ManagedJobHandle:
         stored = self._get_upload(input_key)
         if not stored:
@@ -100,22 +97,16 @@ class LocalManagedAdapter(ManagedAdapter):
 
         initial_data: dict[str, Any] = {
             "source_name": source_name,
-            "source_media_path": str(stored.path),
-            "max_cps": 99,
-            "glossary_terms": glossary_terms,
-            "runtime_settings": runtime_settings,
+            "audio_path": str(stored.path),
             "execution_mode": execution_mode,
             "allow_transcribe_fallback": False,
         }
-        if semantic_score_override is not None:
-            initial_data["semantic_score_override"] = semantic_score_override
 
         payload = {
             "workflow": workflow,
             "source_name": source_name,
             "initial_data": initial_data,
             "schema_version": schema_version,
-            "max_total_steps": max_total_steps,
         }
         started = self.pipeline_service.start_run(payload)
         run_id = str(started["run_id"])
@@ -144,14 +135,7 @@ class LocalManagedAdapter(ManagedAdapter):
         result = self.pipeline_service.get_result(job_id)
         if not result:
             return None
-        state_data = result.get("state", {}).get("data", {})
-        return {
-            "job_id": job_id,
-            "status": result.get("status"),
-            "translated_segments": state_data.get("translated_segments", []),
-            "subtitle_blocks": state_data.get("subtitle_blocks", []),
-            "audit": result.get("audit", {}),
-        }
+        return build_transcript_job_result(result, job_id=job_id)
 
     def _get_upload(self, upload_id: str) -> StoredUpload | None:
         with self._upload_lock:

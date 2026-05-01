@@ -1,5 +1,7 @@
 locals {
   prefix = "${var.project_name}-${var.environment}"
+  use_batch_custom_ami = trimspace(var.batch_custom_ami_id) != ""
+  batch_worker_image_reference = trimspace(var.batch_worker_image_reference) != "" ? var.batch_worker_image_reference : "${aws_ecr_repository.worker.repository_url}:latest"
   common_tags = {
     Project     = var.project_name
     Environment = var.environment
@@ -9,6 +11,23 @@ locals {
 resource "aws_s3_bucket" "input" {
   bucket = "${local.prefix}-input"
   tags   = local.common_tags
+}
+
+resource "aws_s3_bucket_cors_configuration" "input" {
+  bucket = aws_s3_bucket.input.id
+
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["PUT", "GET", "HEAD"]
+    allowed_origins = [
+      "http://127.0.0.1:5173",
+      "http://localhost:5173",
+      "http://tauri.localhost",
+      "https://tauri.localhost",
+    ]
+    expose_headers = ["ETag"]
+    max_age_seconds = 300
+  }
 }
 
 resource "aws_s3_bucket" "result" {
@@ -192,6 +211,7 @@ resource "aws_iam_role_policy" "batch_job_role" {
 
 resource "aws_launch_template" "batch_worker" {
   name_prefix = "${local.prefix}-batch-worker-"
+  image_id    = local.use_batch_custom_ami ? var.batch_custom_ami_id : null
 
   block_device_mappings {
     device_name = "/dev/xvda"
@@ -243,13 +263,22 @@ resource "aws_batch_compute_environment" "gpu" {
   compute_resources {
     type                = "SPOT"
     allocation_strategy = "SPOT_CAPACITY_OPTIMIZED"
-    max_vcpus           = 0
+    max_vcpus           = var.batch_gpu_spot_max_vcpus
     min_vcpus           = 0
     desired_vcpus       = 0
     instance_type       = ["g4dn.xlarge"]
     subnets             = var.private_subnet_ids
     security_group_ids  = var.batch_security_group_ids
     instance_role       = aws_iam_instance_profile.batch_instance_profile.arn
+
+    ec2_configuration {
+      image_type = "ECS_AL2023_NVIDIA"
+    }
+
+    launch_template {
+      launch_template_id = aws_launch_template.batch_worker.id
+      version            = "$Latest"
+    }
   }
 
   depends_on = [aws_iam_role_policy_attachment.batch_service_role]
@@ -266,7 +295,7 @@ resource "aws_batch_compute_environment" "gpu_ondemand" {
   compute_resources {
     type                = "EC2"
     allocation_strategy = "BEST_FIT_PROGRESSIVE"
-    max_vcpus           = 0
+    max_vcpus           = var.batch_gpu_ondemand_max_vcpus
     min_vcpus           = 0
     desired_vcpus       = 0
     instance_type       = ["g4dn.xlarge"]
@@ -276,6 +305,11 @@ resource "aws_batch_compute_environment" "gpu_ondemand" {
 
     ec2_configuration {
       image_type = "ECS_AL2023_NVIDIA"
+    }
+
+    launch_template {
+      launch_template_id = aws_launch_template.batch_worker.id
+      version            = "$Latest"
     }
   }
 
@@ -356,7 +390,20 @@ resource "aws_batch_job_queue" "queue" {
 
   compute_environment_order {
     order               = 1
-    compute_environment = aws_batch_compute_environment.cpu_ondemand.arn
+    compute_environment = aws_batch_compute_environment.gpu_ondemand.arn
+  }
+
+  compute_environment_order {
+    order               = 2
+    compute_environment = aws_batch_compute_environment.gpu.arn
+  }
+
+  dynamic "compute_environment_order" {
+    for_each = var.batch_include_cpu_fallback ? [1] : []
+    content {
+      order               = 3
+      compute_environment = aws_batch_compute_environment.cpu_ondemand.arn
+    }
   }
 
   tags = local.common_tags
@@ -369,7 +416,7 @@ resource "aws_batch_job_definition" "worker" {
   platform_capabilities = ["EC2"]
 
   container_properties = jsonencode({
-    image            = "${aws_ecr_repository.worker.repository_url}:latest"
+    image            = local.batch_worker_image_reference
     command          = ["python", "-m", "backend.aws_worker"]
     executionRoleArn = aws_iam_role.batch_execution_role.arn
     jobRoleArn       = aws_iam_role.batch_job_role.arn
@@ -432,6 +479,18 @@ resource "aws_lambda_function" "managed_api" {
 resource "aws_apigatewayv2_api" "managed" {
   name          = "${local.prefix}-managed-api"
   protocol_type = "HTTP"
+  cors_configuration {
+    allow_headers = ["authorization", "content-type", "accept", "origin", "x-requested-with"]
+    allow_methods = ["GET", "POST", "PUT", "OPTIONS"]
+    allow_origins = [
+      "http://127.0.0.1:5173",
+      "http://localhost:5173",
+      "http://tauri.localhost",
+      "https://tauri.localhost",
+    ]
+    expose_headers = ["content-type"]
+    max_age        = 300
+  }
   tags          = local.common_tags
 }
 

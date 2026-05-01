@@ -69,7 +69,6 @@ def test_managed_upload_and_job_flow() -> None:
             "source_name": "lecture.wav",
             "input_key": upload_payload["object_key"],
             "execution_mode": "dev",
-            "runtime_settings": {},
         },
     )
     assert start_response.status_code == 200
@@ -78,12 +77,20 @@ def test_managed_upload_and_job_flow() -> None:
 
     status_payload = _wait_for_job(client, start_payload["job_id"])
     assert status_payload["status"] == "success"
+    assert status_payload["current_step"] is None
+    assert status_payload["completed_steps"] == ["transcribe"]
 
     result_response = client.get(f"/v1/jobs/{start_payload['job_id']}/result")
     assert result_response.status_code == 200
     result_payload = result_response.json()
-    assert isinstance(result_payload["translated_segments"], list)
-    assert "audit" in result_payload
+    assert isinstance(result_payload["transcript_segments"], list)
+    assert result_payload["transcript_segments"]
+    assert isinstance(result_payload["words"], list)
+    assert "metadata" in result_payload
+    metadata = result_payload["metadata"]
+    assert metadata["workflow"] == "managed_transcript_v1"
+    traces = metadata["node_traces"]
+    assert [trace["node_id"] for trace in traces] == ["transcribe"]
 
 
 def test_managed_job_rejects_missing_upload() -> None:

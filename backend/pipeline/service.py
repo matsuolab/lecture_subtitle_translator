@@ -9,7 +9,7 @@ from typing import Any, Literal
 from .bootstrap import build_default_registry
 from .results import build_result_payload
 from .runner import DAGRunner
-from .workflows import drop_first_v1, drop_first_with_quality_v1
+from .workflows import drop_first_v1, drop_first_with_quality_v1, managed_transcript_v1
 
 RunLifecycleStatus = Literal["queued", "running", "success", "failed", "cancelled"]
 
@@ -42,7 +42,12 @@ class PipelineService:
         schema_version = str(payload.get("schema_version", "1.0"))
         max_total_steps = int(payload.get("max_total_steps", 200))
 
-        workflow = drop_first_v1() if workflow_name == "drop_first_v1" else drop_first_with_quality_v1()
+        if workflow_name == "drop_first_v1":
+            workflow = drop_first_v1()
+        elif workflow_name == "managed_transcript_v1":
+            workflow = managed_transcript_v1()
+        else:
+            workflow = drop_first_with_quality_v1()
 
         initial_data.setdefault("source_name", payload.get("source_name", "unknown.mp4"))
         initial_data.setdefault("max_cps", 99.0)

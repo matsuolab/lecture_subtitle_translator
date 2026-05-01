@@ -1,6 +1,13 @@
 import time
+from unittest.mock import patch
 
 from backend.pipeline.service import PipelineService
+
+_STUB_TRANSLATE = "backend.pipeline.nodes.translate._translate_segments_with_openai_compatible"
+
+
+def _stub_en(texts: list[str], *_args, **_kwargs) -> list[str]:
+    return [f"Translation {i + 1}" for i in range(len(texts))]
 
 
 def _wait_for_finish(svc: PipelineService, run_id: str, timeout: float = 10.0) -> dict:
@@ -17,23 +24,27 @@ def _wait_for_finish(svc: PipelineService, run_id: str, timeout: float = 10.0) -
 def test_service_start_status_result() -> None:
     svc = PipelineService()
 
-    started = svc.start_run({
-        "workflow": "drop_first_with_quality_v1",
-        "source_name": "lecture.mp4",
-        "initial_data": {
-            "execution_mode": "dev",
-            "allow_transcribe_fallback": True,
-            "transcript_text": "これはテストです。次の文です。",
-            "max_cps": 99.0,
-            "glossary_terms": [],
-            "semantic_score_override": 0.9,
-        },
-    })
+    # Patch must stay active for background thread execution
+    with patch(_STUB_TRANSLATE, side_effect=_stub_en):
+        started = svc.start_run({
+            "workflow": "drop_first_with_quality_v1",
+            "source_name": "lecture.mp4",
+            "initial_data": {
+                "execution_mode": "dev",
+                "allow_transcribe_fallback": True,
+                "transcript_text": "これはテストです。次の文です。",
+                "max_cps": 99.0,
+                "glossary_terms": [],
+                "semantic_score_override": 0.9,
+                "runtime_settings": {"translation_provider": "openai", "openai_api_key": "sk-test"},
+            },
+        })
 
-    run_id = started["run_id"]
-    assert started["status"] == "queued"
+        run_id = started["run_id"]
+        assert started["status"] == "queued"
 
-    status = _wait_for_finish(svc, run_id)
+        status = _wait_for_finish(svc, run_id)
+
     assert status["status"] == "success"
 
     result = svc.get_result(run_id)

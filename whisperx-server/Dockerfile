@@ -13,10 +13,13 @@ FROM ghcr.io/jim60105/whisperx:large-v3-ja
 
 USER root
 
-# pip はベースイメージで削除されているため ensurepip で復活させる
-# その後 FastAPI 関連パッケージのみ追加インストール
+ARG WHISPERX_SERVER_VERSION=dev
+ENV WHISPERX_SERVER_VERSION=${WHISPERX_SERVER_VERSION}
+
+# pip はベースイメージで PATH 上に見えないため ensurepip で復活させ、
+# CLI 名ではなく `python -m pip` で FastAPI 関連だけ追加する
 RUN python -m ensurepip --upgrade && \
-    pip install --no-cache-dir \
+    python -m pip install --no-cache-dir \
         fastapi==0.115.0 \
         uvicorn[standard]==0.30.6 \
         python-multipart==0.0.9

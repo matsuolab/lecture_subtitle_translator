@@ -61,12 +61,8 @@ class AwsManagedAdapter(ManagedAdapter):
         source_name: str,
         input_key: str,
         workflow: str,
-        runtime_settings: dict[str, Any],
         execution_mode: str,
-        glossary_terms: list[dict[str, Any]],
-        semantic_score_override: float | None,
         schema_version: str,
-        max_total_steps: int,
     ) -> ManagedJobHandle:
         job_id = str(uuid.uuid4())
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -91,12 +87,8 @@ class AwsManagedAdapter(ManagedAdapter):
                 "source_name": source_name,
                 "input_key": input_key,
                 "workflow": workflow,
-                "runtime_settings": runtime_settings,
                 "execution_mode": execution_mode,
-                "glossary_terms": glossary_terms,
-                "semantic_score_override": semantic_score_override,
                 "schema_version": schema_version,
-                "max_total_steps": max_total_steps,
                 "result_bucket": self.settings.aws_result_bucket,
                 "result_prefix": self.settings.aws_result_prefix,
                 "jobs_table": self.settings.aws_jobs_table,
@@ -139,6 +131,7 @@ class AwsManagedAdapter(ManagedAdapter):
             "status": item.get("status", {}).get("S", "queued"),
             "current_step": item.get("current_step", {}).get("S"),
             "completed_steps": completed_steps,
+            "total_steps": 1,
             "result_key": item.get("result_key", {}).get("S"),
             "error": item.get("error", {}).get("S"),
             "created_at": item.get("created_at", {}).get("S"),

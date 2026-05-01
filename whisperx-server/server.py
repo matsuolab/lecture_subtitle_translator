@@ -22,7 +22,7 @@ ghcr.io/jim60105/whisperx:large-v3-ja をベースにした FastAPI ラッパー
 
 注意点（調査ログ 20260403_whisperx_docker_architecture.md より）:
 - words[].start / end は NaN のとき JSON から省略される → パーサーでスキップ必要
-- 日本語は return_char_level_alignments=True で文字レベルのアライメントを使う
+- 現在の WhisperX イメージ実装では `return_char_level_alignments` 非対応のため渡さない
 - --vad_method silero はイメージキャッシュ済みのため起動が速い
 - HuggingFace Token は --diarize なしなら不要
 """
@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import tempfile
 import uuid
+import hashlib
 from pathlib import Path
 
 import whisperx
@@ -45,6 +46,13 @@ DEVICE = os.getenv("WHISPERX_DEVICE", "cuda")
 COMPUTE_TYPE = os.getenv("WHISPERX_COMPUTE_TYPE", "float16")  # VRAM不足時は int8
 MODEL_SIZE = os.getenv("WHISPERX_MODEL", "large-v3")
 BATCH_SIZE = int(os.getenv("WHISPERX_BATCH_SIZE", "8"))       # VRAM不足時は 4
+
+
+def _compute_server_version() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+
+
+SERVER_VERSION = _compute_server_version()
 
 # ---------------------------------------------------------------------------
 # アプリ初期化
@@ -64,7 +72,10 @@ app.add_middleware(
 # large-v3-ja タグはモデルキャッシュ済みなのでダウンロードは発生しない
 # ---------------------------------------------------------------------------
 
-print(f"[startup] モデルロード中: {MODEL_SIZE} / device={DEVICE} / compute={COMPUTE_TYPE}")
+print(
+    f"[startup] モデルロード中: {MODEL_SIZE} / device={DEVICE} / "
+    f"compute={COMPUTE_TYPE} / version={SERVER_VERSION}"
+)
 _whisper_model = whisperx.load_model(
     MODEL_SIZE,
     DEVICE,
@@ -100,6 +111,7 @@ def health() -> dict:
         "model": MODEL_SIZE,
         "device": DEVICE,
         "compute_type": COMPUTE_TYPE,
+        "server_version": SERVER_VERSION,
     }
 
 
@@ -131,17 +143,19 @@ async def transcribe(
         )
 
         # 単語レベルアライメント
-        # 日本語は文字レベルのアライメントが必要（スペースがないため）
         try:
             align_model, metadata = _get_align_model(language)
-            is_cjk = language in ("ja", "zh", "ko")
             result = whisperx.align(
                 result["segments"],
                 align_model,
                 metadata,
                 audio,
                 DEVICE,
-                return_char_level_alignments=is_cjk,
+            )
+            aligned_words = sum(len(seg.get("words", [])) for seg in result.get("segments", []))
+            print(
+                f"[align] success language={language} "
+                f"segments={len(result.get('segments', []))} words={aligned_words}"
             )
         except Exception as align_err:
             # アライメント失敗時は書き起こし結果のみで返す（タイムスタンプ精度は落ちる）
