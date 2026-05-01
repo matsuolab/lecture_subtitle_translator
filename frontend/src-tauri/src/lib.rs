@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io,
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -8,8 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tauri::{Manager, State};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -24,7 +22,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             ensure_local_legacy_backend_ready,
-            ensure_local_whisperx_ready,
+            transcribe_local,
             extract_audio,
         ])
         .on_window_event(|window, event| {
@@ -60,21 +58,11 @@ fn configure_webview2_user_data_dir() {
     env::set_var("WEBVIEW2_USER_DATA_FOLDER", user_data_dir);
 }
 
+const GHCR_WHISPERX_IMAGE: &str = "ghcr.io/jim60105/whisperx:large-v3-ja";
+
 #[derive(Default)]
 struct LocalBackendState {
     child: Mutex<Option<Child>>,
-    whisperx_started_by_app: Mutex<bool>,
-}
-
-const LOCAL_WHISPERX_IMAGE: &str = "whisperx-server:local";
-const LOCAL_WHISPERX_SETUP_REQUIRED: &str = "LOCAL_WHISPERX_SETUP_REQUIRED";
-const LOCAL_WHISPERX_REBUILD_REQUIRED: &str = "LOCAL_WHISPERX_REBUILD_REQUIRED";
-
-#[derive(Debug, Deserialize)]
-struct WhisperxHealthResponse {
-    status: Option<String>,
-    #[serde(default)]
-    server_version: Option<String>,
 }
 
 impl LocalBackendState {
@@ -83,13 +71,6 @@ impl LocalBackendState {
             if let Some(mut child) = guard.take() {
                 let _ = child.kill();
                 let _ = child.wait();
-            }
-        }
-
-        if let Ok(mut started_by_app) = self.whisperx_started_by_app.lock() {
-            if *started_by_app {
-                let _ = stop_local_whisperx_container();
-                *started_by_app = false;
             }
         }
     }
@@ -204,60 +185,6 @@ fn is_port_open(endpoint: SocketAddr) -> bool {
     TcpStream::connect_timeout(&endpoint, Duration::from_millis(400)).is_ok()
 }
 
-fn fetch_http_health(endpoint: SocketAddr) -> Option<WhisperxHealthResponse> {
-    let mut stream = match TcpStream::connect_timeout(&endpoint, Duration::from_millis(500)) {
-        Ok(stream) => stream,
-        Err(_) => return None,
-    };
-
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-
-    let request = format!(
-        "GET /health HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-        endpoint.ip(),
-        endpoint.port()
-    );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return None;
-    }
-
-    let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
-        return None;
-    }
-
-    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
-        return None;
-    }
-
-    let (_, body) = response.split_once("\r\n\r\n")?;
-    serde_json::from_str(body).ok()
-}
-
-fn is_http_health_ready(endpoint: SocketAddr) -> bool {
-    fetch_http_health(endpoint)
-        .and_then(|health| health.status)
-        .as_deref()
-        == Some("ok")
-}
-
-fn wait_until_http_health_ready(endpoint: SocketAddr, timeout: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if is_http_health_ready(endpoint) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    Err(format!(
-        "local transcript service did not become healthy within {}s on http://{}:{}/health",
-        timeout.as_secs(),
-        endpoint.ip(),
-        endpoint.port()
-    ))
-}
-
 fn open_log_file(path: &Path) -> io::Result<std::fs::File> {
     OpenOptions::new()
         .create(true)
@@ -265,179 +192,10 @@ fn open_log_file(path: &Path) -> io::Result<std::fs::File> {
         .open(path)
 }
 
-#[tauri::command]
-fn ensure_local_whisperx_ready(
-    state: State<'_, LocalBackendState>,
-    service_url: String,
-    allow_setup: bool,
-) -> Result<(), String> {
-    let endpoint = parse_local_service_url(&service_url)?;
-    let server_dir = resolve_whisperx_server_dir()?;
-    if !server_dir.exists() {
-        return Err(String::from("whisperx-server directory not found"));
-    }
-    let expected_version = compute_local_whisperx_version(&server_dir)?;
-
-    let mut needs_rebuild = false;
-    if let Some(health) = fetch_http_health(endpoint) {
-        if health.status.as_deref() == Some("ok")
-            && health.server_version.as_deref() == Some(expected_version.as_str())
-        {
-            return Ok(());
-        }
-
-        needs_rebuild = true;
-        if !allow_setup {
-            return Err(String::from(LOCAL_WHISPERX_REBUILD_REQUIRED));
-        }
-    }
-
-    let image_exists = docker_image_exists(&server_dir)?;
-    if !image_exists && !allow_setup {
-        return Err(String::from(LOCAL_WHISPERX_SETUP_REQUIRED));
-    }
-
-    let compose_args = if allow_setup && (needs_rebuild || !image_exists) {
-        vec!["up", "-d", "--build", "--force-recreate"]
-    } else if allow_setup {
-        vec!["up", "-d", "--build"]
-    } else {
-        vec!["up", "-d", "--no-build"]
-    };
-    let output = run_compose_command(
-        &server_dir,
-        &compose_args,
-        "failed to run docker compose",
-        &[("WHISPERX_SERVER_VERSION", expected_version.as_str())],
-    )?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
-            "docker compose failed{}",
-            if stderr.is_empty() { String::new() } else { format!(": {stderr}") }
-        ));
-    }
-
-    if let Ok(mut started_by_app) = state.whisperx_started_by_app.lock() {
-        *started_by_app = true;
-    }
-
-    wait_until_http_health_ready(endpoint, Duration::from_secs(120))?;
-
-    let health = fetch_http_health(endpoint)
-        .ok_or_else(|| String::from("failed to read WhisperX health response after startup"))?;
-    if health.server_version.as_deref() != Some(expected_version.as_str()) {
-        return Err(format!(
-            "local WhisperX version mismatch after startup: expected {}, got {}",
-            expected_version,
-            health.server_version.as_deref().unwrap_or("unknown")
-        ));
-    }
-
-    Ok(())
-}
-
-fn docker_image_exists(server_dir: &Path) -> Result<bool, String> {
-    let mut command = Command::new("docker");
-    command
-        .current_dir(server_dir)
-        .args(["image", "inspect", LOCAL_WHISPERX_IMAGE])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    prepare_hidden_command(&mut command);
-    let output = run_command_output(&mut command, "failed to inspect local WhisperX image")?;
-
-    if output.status.success() {
-        return Ok(true);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.contains("No such image")
-        || stderr.contains("No such object")
-        || stderr.contains("not found")
-    {
-        return Ok(false);
-    }
-
-    Err(format!(
-        "failed to inspect local WhisperX image{}",
-        if stderr.is_empty() { String::new() } else { format!(": {stderr}") }
-    ))
-}
-
-fn stop_local_whisperx_container() -> Result<(), String> {
-    let server_dir = resolve_whisperx_server_dir()?;
-    let output = run_compose_command(
-        &server_dir,
-        &["stop", "whisperx"],
-        "failed to stop docker compose whisperx",
-        &[],
-    )?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!(
-            "docker compose stop failed{}",
-            if stderr.is_empty() { String::new() } else { format!(": {stderr}") }
-        ))
-    }
-}
-
-fn run_compose_command(
-    server_dir: &Path,
-    args: &[&str],
-    context: &str,
-    envs: &[(&str, &str)],
-) -> Result<Output, String> {
-    let docker_compose = {
-        let mut command = Command::new("docker-compose");
-        command.current_dir(server_dir).args(args).envs(envs.iter().copied());
-        prepare_hidden_command(&mut command);
-        run_command_output(&mut command, context)
-    };
-
-    match docker_compose {
-        Ok(output) => Ok(output),
-        Err(compose_error) => {
-            let mut command = Command::new("docker");
-            command
-                .current_dir(server_dir)
-                .arg("compose")
-                .args(args)
-                .envs(envs.iter().copied());
-            prepare_hidden_command(&mut command);
-            run_command_output(&mut command, context).map_err(|docker_error| {
-                format!("{compose_error}; fallback docker compose also failed: {docker_error}")
-            })
-        }
-    }
-}
-
-fn compute_local_whisperx_version(server_dir: &Path) -> Result<String, String> {
-    let path = server_dir.join("server.py");
-    let contents = fs::read(&path)
-        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let digest = Sha256::digest(contents);
-    Ok(format!("{:x}", digest)[..16].to_string())
-}
-
 fn run_command_output(command: &mut Command, context: &str) -> Result<Output, String> {
     command
         .output()
         .map_err(|error| format!("{context}: {error}"))
-}
-
-fn prepare_hidden_command(command: &mut Command) {
-    command.stdout(Stdio::null()).stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
 }
 
 #[tauri::command]
@@ -477,44 +235,74 @@ async fn extract_audio(app: tauri::AppHandle, video_path: String) -> Result<Stri
     }
 }
 
-fn resolve_whisperx_server_dir() -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest_dir
-            .parent()
-            .and_then(|path| path.parent())
-            .map(Path::to_path_buf)
-            .ok_or_else(|| String::from("failed to resolve repo root from Cargo manifest dir"))?;
-        return Ok(repo_root.join("whisperx-server"));
+#[tauri::command]
+async fn transcribe_local(audio_path: String, language: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_whisperx_cli(&audio_path, &language)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Value, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let output_dir = std::env::temp_dir().join(format!("whisperx_out_{ts}"));
+
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("failed to create temp output dir: {e}"))?;
+
+    let audio_mount = format!("{}:/audio/input.wav:ro", audio_path);
+    let output_mount = format!("{}:/output", output_dir.display());
+
+    let mut command = Command::new("docker");
+    command.args([
+        "run", "--rm",
+        "--gpus", "all",
+        "-v", &audio_mount,
+        "-v", &output_mount,
+        GHCR_WHISPERX_IMAGE,
+        "/audio/input.wav",
+        "--model", "large-v3",
+        "--language", language,
+        "--output_format", "json",
+        "--batch_size", "8",
+        "--compute_type", "float16",
+        "--output_dir", "/output",
+    ]);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
     }
 
-    if let Ok(dir) = std::env::var("SUBTITLE_WHISPERX_SERVER_DIR") {
-        let path = PathBuf::from(&dir);
-        return if path.exists() {
-            Ok(path)
-        } else {
-            Err(format!(
-                "SUBTITLE_WHISPERX_SERVER_DIR is set but directory does not exist: {dir}"
-            ))
-        };
-    }
+    let docker_result = run_command_output(&mut command, "docker run whisperx");
 
-    let exe_dir = std::env::current_exe()
-        .map_err(|error| format!("failed to inspect current executable path: {error}"))?
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| String::from("failed to resolve executable directory"))?;
+    let result = (|| -> Result<serde_json::Value, String> {
+        let output = docker_result?;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let details = [stdout.as_str(), stderr.as_str()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(format!("whisperx transcription failed: {details}"));
+        }
+        let result_path = output_dir.join("input.json");
+        let bytes = fs::read(&result_path)
+            .map_err(|e| format!("failed to read transcription result: {e}"))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| format!("failed to parse transcription result: {e}"))
+    })();
 
-    let candidate = exe_dir.join("whisperx-server");
-    if candidate.exists() {
-        Ok(candidate)
-    } else {
-        Err(format!(
-            "whisperx-server directory not found next to the executable ({}); \
-            place the whisperx-server directory there or set SUBTITLE_WHISPERX_SERVER_DIR",
-            exe_dir.display()
-        ))
-    }
+    let _ = fs::remove_dir_all(&output_dir);
+    result
 }
 
 fn resolve_repo_root() -> Result<PathBuf, String> {
