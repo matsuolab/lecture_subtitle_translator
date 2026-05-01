@@ -307,13 +307,13 @@ fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Valu
         "-v", &audio_mount,
         "-v", &output_mount,
         GHCR_WHISPERX_IMAGE,
+        "/audio/input.wav",
         "--model", "large-v3",
         "--language", language,
         "--output_format", "json",
         "--batch_size", "8",
         "--compute_type", "float16",
         "--output_dir", "/output",
-        "/audio/input.wav",   // positional arg は最後
     ]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
