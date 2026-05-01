@@ -1,6 +1,29 @@
 import type { SubtitleBlock } from '@/types/subtitle'
+import type { AdminSettings } from '@/types/adminSettings'
+import type { PipelineRunResult } from '@/types/pipeline'
 
 const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
+
+export interface SessionExportData {
+  version: number
+  savedAt: string
+  blocks: SubtitleBlock[]
+  session?: {
+    videoSource?: {
+      name: string
+      path?: string
+    } | null
+    adminSettings?: Partial<AdminSettings>
+    pipelineRun?: PipelineRunResult
+    pipelineHistory?: PipelineRunResult[]
+  }
+}
+
+interface StoredLocalSession {
+  savedAt: string
+  blocks: SubtitleBlock[]
+  session?: SessionExportData['session']
+}
 
 // ─── localStorage（クラッシュ/誤リロード対策） ────────────────────────────
 
@@ -9,13 +32,31 @@ export function saveToLocalStorage(blocks: SubtitleBlock[]): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       savedAt: new Date().toISOString(),
       blocks,
-    }))
+    } satisfies StoredLocalSession))
+  } catch {
+    // QuotaExceededError 等は無視
+  }
+}
+
+export function saveSessionSnapshotToLocalStorage(data: SessionExportData): void {
+  try {
+    const payload: StoredLocalSession = {
+      savedAt: data.savedAt,
+      blocks: data.blocks,
+      session: data.session,
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
   } catch {
     // QuotaExceededError 等は無視
   }
 }
 
 export function loadFromLocalStorage(): SubtitleBlock[] | null {
+  const session = loadSessionSnapshotFromLocalStorage()
+  return session?.blocks ?? null
+}
+
+export function loadSessionSnapshotFromLocalStorage(): SessionExportData | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
@@ -23,11 +64,17 @@ export function loadFromLocalStorage(): SubtitleBlock[] | null {
     if (!Array.isArray(parsed.blocks)) return null
     // english→source / japanese→target フィールド名変更のマイグレーション
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return parsed.blocks.map((b: any) => ({
+    const blocks = parsed.blocks.map((b: any) => ({
       ...b,
       source: b.source ?? b.english ?? '',
       target: b.target ?? b.japanese ?? '',
     })) as SubtitleBlock[]
+    return {
+      version: Number(parsed.version ?? 2),
+      savedAt: String(parsed.savedAt ?? new Date(0).toISOString()),
+      blocks,
+      session: parsed.session,
+    }
   } catch {
     return null
   }
@@ -39,9 +86,12 @@ export function clearLocalStorage(): void {
 
 // ─── JSON プロジェクトファイル ─────────────────────────────────────────────
 
-export function exportProjectJson(blocks: SubtitleBlock[]): void {
-  const data = JSON.stringify({ version: 1, savedAt: new Date().toISOString(), blocks }, null, 2)
-  downloadFile(data, 'subtitle-project.json', 'application/json')
+export function exportProjectJson(data: SessionExportData | SubtitleBlock[]): void {
+  const payload: SessionExportData = Array.isArray(data)
+    ? { version: 1, savedAt: new Date().toISOString(), blocks: data }
+    : data
+  const json = JSON.stringify(payload, null, 2)
+  downloadFile(json, 'subtitle-project.json', 'application/json')
 }
 
 export function importProjectJson(file: File): Promise<SubtitleBlock[]> {
@@ -136,10 +186,12 @@ function parseSrt(text: string): SubtitleBlock[] {
 
     if (textLines.length === 0) continue
 
-    // 2行SRT（日本語+英語）: 1行目→target、2行目以降→source
-    // 1行SRT（英語のみ）:     1行目→source、target は空
-    const source = textLines.length >= 2 ? textLines.slice(1).join('\n') : textLines[0]
-    const target = textLines.length >= 2 ? textLines[0] : ''
+    // canonical:
+    // - source: subtitle text shown/exported by the app (usually English)
+    // - target: reference/source-language text (usually Japanese)
+    // 2行SRT は 1行目=source, 2行目以降=target として読む
+    const source = textLines[0]
+    const target = textLines.length >= 2 ? textLines.slice(1).join('\n') : ''
 
     const duration = Math.max(0.01, endTime - startTime)
     blocks.push({

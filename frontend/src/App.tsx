@@ -15,16 +15,20 @@ import { useHistory } from '@/hooks/useHistory'
 import {
   saveToLocalStorage,
   loadFromLocalStorage,
+  loadSessionSnapshotFromLocalStorage,
+  saveSessionSnapshotToLocalStorage,
   exportProjectJson,
   importProjectJson,
   importSrt,
   exportSrt,
+  type SessionExportData,
 } from '@/api/persistence'
 import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
-import { hasPipelineApi, runPipelineViaApi } from '@/api/pipelineClient'
+import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/pipelineClient'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
-import type { PipelineAuditReport, PipelineNodeTrace, PipelineReviewItem, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
+import type { PipelineAuditReport, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
+import type { TranscriptSegment } from '@/lib/pipeline/types'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
@@ -32,12 +36,53 @@ import { applyGlossaryToText } from '@/utils/glossaryApply'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
+type VideoSource = { name: string; path?: string; file?: File }
+
+function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
+  return blocks.map((block) => ({
+    ...block,
+    glossaryTerms: block.glossaryTerms.map((term) => ({ ...term })),
+    ignoredTypos: block.ignoredTypos ? [...block.ignoredTypos] : undefined,
+    ignoredMissing: block.ignoredMissing ? [...block.ignoredMissing] : undefined,
+  }))
+}
+
+function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> {
+  return {
+    serviceMode: settings.serviceMode,
+    serviceUrl: settings.serviceUrl,
+    translationProvider: settings.translationProvider,
+    translationModel: settings.translationModel,
+    openaiCompatibleBaseUrl: settings.openaiCompatibleBaseUrl,
+    serviceAuthToken: settings.serviceAuthToken ? '[configured]' : '',
+    hfToken: settings.hfToken ? '[configured]' : '',
+    openaiApiKey: settings.openaiApiKey ? '[configured]' : '',
+    geminiApiKey: settings.geminiApiKey ? '[configured]' : '',
+    deeplApiKey: settings.deeplApiKey ? '[configured]' : '',
+  }
+}
+
+function toUiSafeDebug(debug?: PipelineRunDebug): PipelineRunDebug | undefined {
+  if (!debug) return undefined
+  return {
+    ...debug,
+    transcriptSegments: undefined,
+  }
+}
+
+function toUiSafePipelineRun(result: PipelineRunResult): PipelineRunResult {
+  return {
+    ...result,
+    debug: toUiSafeDebug(result.debug),
+  }
+}
 
 export default function App() {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
   const { glossary, importEntries } = useGlossary()
-  const restored = loadFromLocalStorage()
+  const restoredSession = loadSessionSnapshotFromLocalStorage()
+  const restored = restoredSession?.blocks ?? loadFromLocalStorage()
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
     useHistory<SubtitleBlock[]>(restored ?? [])
   const [activeTab, setActiveTab] = useState<Tab>('subtitles')
@@ -47,17 +92,35 @@ export default function App() {
   const srtImportRef = useRef<HTMLInputElement>(null)
   const videoFileRef = useRef<HTMLInputElement>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
-  const [videoSource, setVideoSource] = useState<{ name: string; path?: string } | null>(null)
+  const [videoSource, setVideoSource] = useState<VideoSource | null>(
+    restoredSession?.session?.videoSource
+      ? {
+          name: restoredSession.session.videoSource.name,
+          path: restoredSession.session.videoSource.path,
+        }
+      : null,
+  )
   const [isDragOverRight, setIsDragOverRight] = useState(false)
   const lastHtmlDropRef = useRef(0)
-  const [pipelineRun, setPipelineRun] = useState<PipelineRunResult>({
-    status: 'idle',
-    step: 'idle',
-    message: 'レポートタブからパイプラインを開始できます',
-  })
-  const [pipelineHistory, setPipelineHistory] = useState<PipelineRunResult[]>([])
+  const [pipelineRun, setPipelineRun] = useState<PipelineRunResult>(
+    restoredSession?.session?.pipelineRun ?? {
+      status: 'idle',
+      step: 'idle',
+      message: 'レポートタブからパイプラインを開始できます',
+    },
+  )
+  const [pipelineHistory, setPipelineHistory] = useState<PipelineRunResult[]>(
+    restoredSession?.session?.pipelineHistory ?? [],
+  )
   const [pipelineStatusPinned, setPipelineStatusPinned] = useState(false)
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
+  const latestPipelineDebugRef = useRef<PipelineRunDebug | undefined>(
+    restoredSession?.session?.pipelineRun?.debug,
+  )
+  const [serviceCheck, setServiceCheck] = useState<{ status: 'idle' | 'checking' | 'success' | 'error'; message: string }>({
+    status: 'idle',
+    message: 'サービス接続は未確認です',
+  })
 
   // 編集中のドラフトテキスト（字幕オーバーレイのリアルタイム更新用）
   // useTransition でオーバーレイ更新を低優先度にしてエディタ入力を軽くする
@@ -138,7 +201,7 @@ export default function App() {
 
   const loadVideoFile = useCallback((file: File) => {
     lastHtmlDropRef.current = Date.now()
-    setVideoSource({ name: file.name })
+    setVideoSource({ name: file.name, file })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return URL.createObjectURL(file)
@@ -179,7 +242,21 @@ export default function App() {
 
   const resetAdminSettings = useCallback(() => {
     setAdminSettings(getDefaultAdminSettings())
+    setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
   }, [])
+
+  const handleServiceCheck = useCallback(async () => {
+    setServiceCheck({ status: 'checking', message: '接続確認中...' })
+    const result = await testServiceConnection(adminSettings)
+    setServiceCheck({
+      status: result.ok ? 'success' : 'error',
+      message: result.message,
+    })
+  }, [adminSettings])
+
+  useEffect(() => {
+    setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
+  }, [adminSettings.serviceMode, adminSettings.serviceUrl, adminSettings.serviceAuthToken])
 
   const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
     const totalBlocks = Math.max(1, generated.length)
@@ -270,9 +347,31 @@ export default function App() {
     }
   }, [])
 
-  const appendPipelineHistory = useCallback((result: PipelineRunResult) => {
-    setPipelineHistory(prev => [result, ...prev].slice(0, 20))
-  }, [])
+  const persistSessionSnapshot = useCallback((
+    next: {
+      blocks?: SubtitleBlock[]
+      pipelineRun?: PipelineRunResult
+      pipelineHistory?: PipelineRunResult[]
+      videoSource?: VideoSource | null
+    } = {},
+  ) => {
+    saveSessionSnapshotToLocalStorage({
+      version: 2,
+      savedAt: new Date().toISOString(),
+      blocks: cloneBlocks(next.blocks ?? blocks),
+      session: {
+        videoSource: (next.videoSource ?? videoSource)
+          ? {
+              name: (next.videoSource ?? videoSource)!.name,
+              path: (next.videoSource ?? videoSource)!.path,
+            }
+          : null,
+        adminSettings: sanitizeAdminSettings(adminSettings),
+        pipelineRun: next.pipelineRun ?? toUiSafePipelineRun(pipelineRun),
+        pipelineHistory: next.pipelineHistory ?? pipelineHistory,
+      },
+    })
+  }, [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
 
   const buildPipelineStubBlocks = useCallback((videoName: string): SubtitleBlock[] => {
     const rows: Array<{ start: number; end: number; source: string; target: string }> = [
@@ -313,9 +412,37 @@ export default function App() {
     })
   }, [])
 
-  const runDropPipeline = useCallback(async (sourceName: string, sourcePath?: string) => {
+  const runDropPipeline = useCallback(async (source: VideoSource) => {
+    const sourceName = source.name
     const startedAt = Date.now()
     const traces: PipelineNodeTrace[] = []
+    const progressEvents: PipelineProgressEvent[] = []
+    const initialBlocksSnapshot = cloneBlocks(blocks)
+    let managedRunId: string | undefined
+    let transcriptSegments: TranscriptSegment[] | undefined = undefined
+    let transcriptMetadata: Record<string, unknown> | undefined = undefined
+
+    const mapProgressStatus = (status: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'): PipelineRunResult['status'] => {
+      if (status === 'queued') return 'queued'
+      if (status === 'running') return 'running'
+      if (status === 'success') return 'success'
+      return 'error'
+    }
+
+    const mapProgressStep = (node: string | null): PipelineRunResult['step'] => {
+      switch (node) {
+        case 'transcribe':
+        case 'correct':
+        case 'translate':
+        case 'subtitle':
+          return node
+        case 'extract_audio':
+        case 'local_postprocess':
+          return 'transcribe'
+        default:
+          return 'idle'
+      }
+    }
 
     const runStep = async (
       nodeId: string,
@@ -326,7 +453,20 @@ export default function App() {
       provider = 'stub',
       model = 'stub-v1',
     ) => {
-      setPipelineRun({ status: 'running', step, message, sourceName, startedAt })
+      progressEvents.push({
+        at: Date.now(),
+        status: 'running',
+        step,
+        message,
+        runId: managedRunId,
+        currentNode: nodeId,
+      })
+      const runningState: PipelineRunResult = { status: 'running', step, message, sourceName, startedAt, runId: managedRunId }
+      setPipelineRun(runningState)
+      persistSessionSnapshot({
+        pipelineRun: runningState,
+        videoSource: source,
+      })
       const t0 = Date.now()
       await sleep(waitMs)
       const t1 = Date.now()
@@ -347,11 +487,32 @@ export default function App() {
       let audit: PipelineAuditReport | undefined
 
       if (hasPipelineApi(adminSettings)) {
-        setPipelineRun({ status: 'running', step: 'transcribe', message: 'パイプライン開始中...', sourceName, startedAt })
-        const apiResult = await runPipelineViaApi(sourceName, adminSettings, sourcePath, (progress) => {
+        const startingState: PipelineRunResult = {
+          status: 'running',
+          step: 'transcribe',
+          message: 'パイプライン開始中...',
+          sourceName,
+          startedAt,
+        }
+        setPipelineRun(startingState)
+        progressEvents.push({
+          at: Date.now(),
+          status: 'running',
+          step: 'transcribe',
+          message: 'パイプライン開始中...',
+          currentNode: 'transcribe',
+        })
+        persistSessionSnapshot({
+          pipelineRun: startingState,
+          videoSource: source,
+        })
+        const apiResult = await runPipelineViaApi(sourceName, adminSettings, source, (progress) => {
+          managedRunId = progress.runId
           const nodeLabel: Record<string, string> = {
+            queued: 'ジョブ投入待ち',
             extract_audio: '音声抽出',
             transcribe: '書き起こし（WhisperX）',
+            local_postprocess: 'ローカル後段処理',
             correct: '日本語補正',
             translate: '英語翻訳',
             subtitle: '字幕ブロック化',
@@ -362,17 +523,45 @@ export default function App() {
           const node = progress.currentNode ?? ''
           const label = nodeLabel[node] ?? node
           const elapsed = progress.nodeElapsedSec !== null ? ` (${progress.nodeElapsedSec}s)` : ''
-          const stepKey = (node || 'transcribe') as PipelineRunResult['step']
-          setPipelineRun({
-            status: 'running',
+          const stepKey = mapProgressStep(progress.currentNode)
+          const message = (() => {
+            if (progress.status === 'queued') {
+              return 'ジョブを投入しました。worker の開始を待っています。'
+            }
+            if (adminSettings.serviceMode === 'managed_service' && node === 'transcribe') {
+              return `AWS上で書き起こし実行中です${elapsed}。ローカル実行より時間がかかります。`
+            }
+            return `${label}${elapsed}`
+          })()
+          progressEvents.push({
+            at: Date.now(),
+            status: mapProgressStatus(progress.status),
             step: stepKey,
-            message: `${label}${elapsed}`,
+            message,
+            runId: progress.runId,
+            currentNode: progress.currentNode,
+            completedNodes: progress.completedNodes,
+            totalNodes: progress.totalNodes,
+            nodeElapsedSec: progress.nodeElapsedSec,
+          })
+          const progressState: PipelineRunResult = {
+            status: mapProgressStatus(progress.status),
+            step: stepKey,
+            message,
+            runId: progress.runId,
             sourceName,
             startedAt,
+          }
+          setPipelineRun(progressState)
+          persistSessionSnapshot({
+            pipelineRun: progressState,
+            videoSource: source,
           })
         })
         generated = apiResult.blocks
         audit = apiResult.audit
+        transcriptSegments = apiResult.debug?.transcriptSegments
+        transcriptMetadata = apiResult.debug?.transcriptMetadata
       } else {
         await runStep('transcribe', 'transcribe', '文字起こしを実行中...', 350, 'WhisperXでセグメント生成')
         await runStep('correct', 'correct', '日本語テキストを補正中...', 300, 'LLMで補正と正規化')
@@ -421,22 +610,61 @@ export default function App() {
         status: 'success',
         step: 'done',
         message: `パイプライン完了（${generated.length}ブロック）`,
+        runId: managedRunId,
         sourceName,
         startedAt,
         finishedAt,
         metrics,
         audit,
+        debug: {
+          sourceMedia: {
+            name: source.name,
+            path: source.path,
+            mode: adminSettings.serviceMode,
+          },
+          settingsSnapshot: sanitizeAdminSettings(adminSettings),
+          initialBlocks: initialBlocksSnapshot,
+          finalBlocks: cloneBlocks(generated),
+          progressEvents,
+          transcriptSegments,
+          transcriptMetadata,
+        },
       }
-      setPipelineRun(result)
-      appendPipelineHistory(result)
+      progressEvents.push({
+        at: finishedAt,
+        status: 'success',
+        step: 'done',
+        message: result.message,
+        runId: managedRunId,
+      })
+      latestPipelineDebugRef.current = result.debug
+      const uiSafeResult = toUiSafePipelineRun(result)
+      const nextHistory = [uiSafeResult, ...pipelineHistory].slice(0, 20)
+      setPipelineRun(uiSafeResult)
+      setPipelineHistory(nextHistory)
+      persistSessionSnapshot({
+        blocks: generated,
+        pipelineRun: uiSafeResult,
+        pipelineHistory: nextHistory,
+        videoSource: source,
+      })
     } catch (err) {
+      const finishedAt = Date.now()
+      progressEvents.push({
+        at: finishedAt,
+        status: 'error',
+        step: 'done',
+        message: err instanceof Error ? err.message : '不明なエラー',
+        runId: managedRunId,
+      })
       const result: PipelineRunResult = {
         status: 'error',
         step: 'done',
         message: `パイプライン失敗: ${err instanceof Error ? err.message : '不明なエラー'}`,
+        runId: managedRunId,
         sourceName,
         startedAt,
-        finishedAt: Date.now(),
+        finishedAt,
         audit: {
           mustReviewCount: 1,
           shouldReviewCount: 0,
@@ -452,11 +680,54 @@ export default function App() {
           ],
           nodeTraces: traces,
         },
+        debug: {
+          sourceMedia: {
+            name: source.name,
+            path: source.path,
+            mode: adminSettings.serviceMode,
+          },
+          settingsSnapshot: sanitizeAdminSettings(adminSettings),
+          initialBlocks: initialBlocksSnapshot,
+          finalBlocks: cloneBlocks(blocks),
+          progressEvents,
+          transcriptSegments,
+          transcriptMetadata,
+        },
       }
-      setPipelineRun(result)
-      appendPipelineHistory(result)
+      latestPipelineDebugRef.current = result.debug
+      const uiSafeResult = toUiSafePipelineRun(result)
+      const nextHistory = [uiSafeResult, ...pipelineHistory].slice(0, 20)
+      setPipelineRun(uiSafeResult)
+      setPipelineHistory(nextHistory)
+      persistSessionSnapshot({
+        pipelineRun: uiSafeResult,
+        pipelineHistory: nextHistory,
+        videoSource: source,
+      })
     }
-  }, [adminSettings, appendPipelineHistory, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, reset, sleep])
+  }, [adminSettings, blocks, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, persistSessionSnapshot, pipelineHistory, reset, sleep])
+
+  const buildSessionExport = useCallback((): SessionExportData => ({
+    version: 2,
+    savedAt: new Date().toISOString(),
+    blocks: cloneBlocks(blocks),
+    session: {
+      videoSource: videoSource
+        ? {
+            name: videoSource.name,
+            path: videoSource.path,
+          }
+        : null,
+      adminSettings: sanitizeAdminSettings(adminSettings),
+      pipelineRun: latestPipelineDebugRef.current
+        ? {
+            ...pipelineRun,
+            debug: latestPipelineDebugRef.current,
+          }
+        : pipelineRun,
+      pipelineHistory,
+    },
+  }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
 
   const confirmAndLoadVideo = useCallback((doLoad: () => void) => {
     if (blocks.length > 0) {
@@ -477,7 +748,7 @@ export default function App() {
 
   const handleRunPipelineFromReport = useCallback(() => {
     if (!videoSource) return
-    void runDropPipeline(videoSource.name, videoSource.path)
+    void runDropPipeline(videoSource)
   }, [videoSource, runDropPipeline])
 
   const handleRightDragOver = useCallback((e: React.DragEvent) => {
@@ -1148,7 +1419,7 @@ export default function App() {
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <FolderOpen size={11} />JSON読込
               </button>
-              <button onClick={() => exportProjectJson(blocks)} title={t.saveProjectTitle}
+              <button onClick={() => exportProjectJson(buildSessionExport())} title={t.saveProjectTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <Save size={11} />JSON保存
               </button>
@@ -1191,7 +1462,7 @@ export default function App() {
                   }}
                 />
                 <span style={{ color: theme.textSecondary, fontWeight: 600 }}>
-                  Pipeline: {pipelineRun.status === 'running' ? '実行中' : pipelineRun.status === 'success' ? '完了' : pipelineRun.status === 'error' ? '失敗' : '待機中'}
+                  Pipeline: {pipelineRun.status === 'queued' ? '待機中' : pipelineRun.status === 'running' ? '実行中' : pipelineRun.status === 'success' ? '完了' : pipelineRun.status === 'error' ? '失敗' : '待機中'}
                 </span>
                 {pipelineRun.sourceName && (
                   <span style={{ color: theme.textMuted }}>
@@ -1201,6 +1472,11 @@ export default function App() {
                 {pipelineRun.step !== 'idle' && pipelineRun.step !== 'done' && (
                   <span style={{ color: theme.textMuted }}>
                     step: {pipelineRun.step}
+                  </span>
+                )}
+                {pipelineRun.runId && (
+                  <span style={{ color: theme.textMuted, fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>
+                    job_id: {pipelineRun.runId}
                   </span>
                 )}
                 <button
@@ -1311,8 +1587,10 @@ export default function App() {
             {!isResizing && activeTab === 'settings' && (
               <SettingsTab
                 adminSettings={adminSettings}
+                serviceCheck={serviceCheck}
                 onAdminSettingsChange={updateAdminSettings}
                 onAdminSettingsReset={resetAdminSettings}
+                onServiceCheck={handleServiceCheck}
               />
             )}
           </div>
@@ -1322,5 +1600,3 @@ export default function App() {
     </div>
   )
 }
-
-

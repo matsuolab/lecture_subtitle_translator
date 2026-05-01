@@ -1,0 +1,534 @@
+locals {
+  prefix = "${var.project_name}-${var.environment}"
+  use_batch_custom_ami = trimspace(var.batch_custom_ami_id) != ""
+  batch_worker_image_reference = trimspace(var.batch_worker_image_reference) != "" ? var.batch_worker_image_reference : "${aws_ecr_repository.worker.repository_url}:latest"
+  common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+resource "aws_s3_bucket" "input" {
+  bucket = "${local.prefix}-input"
+  tags   = local.common_tags
+}
+
+resource "aws_s3_bucket_cors_configuration" "input" {
+  bucket = aws_s3_bucket.input.id
+
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["PUT", "GET", "HEAD"]
+    allowed_origins = [
+      "http://127.0.0.1:5173",
+      "http://localhost:5173",
+      "http://tauri.localhost",
+      "https://tauri.localhost",
+    ]
+    expose_headers = ["ETag"]
+    max_age_seconds = 300
+  }
+}
+
+resource "aws_s3_bucket" "result" {
+  bucket = "${local.prefix}-result"
+  tags   = local.common_tags
+}
+
+resource "aws_dynamodb_table" "jobs" {
+  name         = "${local.prefix}-jobs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "job_id"
+
+  attribute {
+    name = "job_id"
+    type = "S"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_ecr_repository" "worker" {
+  name = "${local.prefix}-worker"
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret" "bearer_token" {
+  name = "${local.prefix}-bearer-token"
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "bearer_token" {
+  secret_id     = aws_secretsmanager_secret.bearer_token.id
+  secret_string = var.managed_service_bearer_token
+}
+
+resource "aws_iam_role" "lambda_role" {
+  name = "${local.prefix}-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_basic" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "lambda_managed_service" {
+  name = "${local.prefix}-lambda-managed-service"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["s3:PutObject", "s3:GetObject"]
+        Resource = [
+          "${aws_s3_bucket.input.arn}/*",
+          "${aws_s3_bucket.result.arn}/*"
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.input.arn, aws_s3_bucket.result.arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.jobs.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["batch:SubmitJob"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = aws_secretsmanager_secret.bearer_token.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "batch_service_role" {
+  name = "${local.prefix}-batch-service-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "batch.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "batch_service_role" {
+  role       = aws_iam_role.batch_service_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole"
+}
+
+resource "aws_iam_role" "batch_execution_role" {
+  name = "${local.prefix}-batch-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "batch_execution_role" {
+  role       = aws_iam_role.batch_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role" "batch_job_role" {
+  name = "${local.prefix}-batch-job-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "batch_job_role" {
+  name = "${local.prefix}-batch-job-access"
+  role = aws_iam_role.batch_job_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject"]
+        Resource = [
+          "${aws_s3_bucket.input.arn}/*",
+          "${aws_s3_bucket.result.arn}/*"
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.jobs.arn
+      }
+    ]
+  })
+}
+
+resource "aws_launch_template" "batch_worker" {
+  name_prefix = "${local.prefix}-batch-worker-"
+  image_id    = local.use_batch_custom_ami ? var.batch_custom_ami_id : null
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      delete_on_termination = true
+      volume_size           = var.batch_root_volume_size_gb
+      volume_type           = "gp3"
+    }
+  }
+
+  user_data = base64encode(<<-EOT
+Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+MIME-Version: 1.0
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/bin/bash
+set -euxo pipefail
+mkdir -p /etc/ecs
+grep -q '^ECS_IMAGE_PULL_BEHAVIOR=' /etc/ecs/ecs.config 2>/dev/null || echo 'ECS_IMAGE_PULL_BEHAVIOR=${var.batch_image_pull_behavior}' >> /etc/ecs/ecs.config
+if command -v dnf >/dev/null 2>&1; then
+  dnf install -y amazon-ssm-agent || true
+fi
+systemctl enable --now amazon-ssm-agent || true
+--==BOUNDARY==--
+EOT
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = local.common_tags
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = local.common_tags
+  }
+
+  tags = local.common_tags
+}
+resource "aws_batch_compute_environment" "gpu" {
+  compute_environment_name = "${local.prefix}-gpu"
+  type                     = "MANAGED"
+  service_role             = aws_iam_role.batch_service_role.arn
+  state                    = "ENABLED"
+
+  compute_resources {
+    type                = "SPOT"
+    allocation_strategy = "SPOT_CAPACITY_OPTIMIZED"
+    max_vcpus           = var.batch_gpu_spot_max_vcpus
+    min_vcpus           = 0
+    desired_vcpus       = 0
+    instance_type       = ["g4dn.xlarge"]
+    subnets             = var.private_subnet_ids
+    security_group_ids  = var.batch_security_group_ids
+    instance_role       = aws_iam_instance_profile.batch_instance_profile.arn
+
+    ec2_configuration {
+      image_type = "ECS_AL2023_NVIDIA"
+    }
+
+    launch_template {
+      launch_template_id = aws_launch_template.batch_worker.id
+      version            = "$Latest"
+    }
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.batch_service_role]
+
+  tags = local.common_tags
+}
+
+resource "aws_batch_compute_environment" "gpu_ondemand" {
+  compute_environment_name = "${local.prefix}-gpu-ondemand"
+  type                     = "MANAGED"
+  service_role             = aws_iam_role.batch_service_role.arn
+  state                    = "ENABLED"
+
+  compute_resources {
+    type                = "EC2"
+    allocation_strategy = "BEST_FIT_PROGRESSIVE"
+    max_vcpus           = var.batch_gpu_ondemand_max_vcpus
+    min_vcpus           = 0
+    desired_vcpus       = 0
+    instance_type       = ["g4dn.xlarge"]
+    subnets             = var.private_subnet_ids
+    security_group_ids  = var.batch_security_group_ids
+    instance_role       = aws_iam_instance_profile.batch_instance_profile.arn
+
+    ec2_configuration {
+      image_type = "ECS_AL2023_NVIDIA"
+    }
+
+    launch_template {
+      launch_template_id = aws_launch_template.batch_worker.id
+      version            = "$Latest"
+    }
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.batch_service_role]
+
+  tags = local.common_tags
+}
+resource "aws_batch_compute_environment" "cpu_ondemand" {
+  compute_environment_name_prefix = "${local.prefix}-cpu-ondemand-"
+  type                            = "MANAGED"
+  service_role                    = aws_iam_role.batch_service_role.arn
+  state                           = "ENABLED"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  compute_resources {
+    type                = "EC2"
+    allocation_strategy = "BEST_FIT_PROGRESSIVE"
+    max_vcpus           = var.batch_ondemand_max_vcpus
+    min_vcpus           = 0
+    desired_vcpus       = 0
+    instance_type       = var.batch_instance_types
+    subnets             = var.private_subnet_ids
+    security_group_ids  = var.batch_security_group_ids
+    instance_role       = aws_iam_instance_profile.batch_instance_profile.arn
+
+    ec2_configuration {
+      image_type = var.batch_ec2_image_type
+    }
+
+    launch_template {
+      launch_template_id = aws_launch_template.batch_worker.id
+      version            = "$Latest"
+    }
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.batch_service_role]
+
+  tags = local.common_tags
+}
+resource "aws_iam_role" "batch_instance_role" {
+  name = "${local.prefix}-batch-instance-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "batch_instance_ecs" {
+  role       = aws_iam_role.batch_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+resource "aws_iam_role_policy_attachment" "batch_instance_ssm" {
+  role       = aws_iam_role.batch_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+resource "aws_iam_instance_profile" "batch_instance_profile" {
+  name = "${local.prefix}-batch-instance-profile"
+  role = aws_iam_role.batch_instance_role.name
+}
+
+resource "aws_batch_job_queue" "queue" {
+  name     = "${local.prefix}-queue"
+  state    = "ENABLED"
+  priority = 1
+
+  compute_environment_order {
+    order               = 1
+    compute_environment = aws_batch_compute_environment.gpu_ondemand.arn
+  }
+
+  compute_environment_order {
+    order               = 2
+    compute_environment = aws_batch_compute_environment.gpu.arn
+  }
+
+  dynamic "compute_environment_order" {
+    for_each = var.batch_include_cpu_fallback ? [1] : []
+    content {
+      order               = 3
+      compute_environment = aws_batch_compute_environment.cpu_ondemand.arn
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_batch_job_definition" "worker" {
+  name = "${local.prefix}-worker"
+  type = "container"
+
+  platform_capabilities = ["EC2"]
+
+  container_properties = jsonencode({
+    image            = local.batch_worker_image_reference
+    command          = ["python", "-m", "backend.aws_worker"]
+    executionRoleArn = aws_iam_role.batch_execution_role.arn
+    jobRoleArn       = aws_iam_role.batch_job_role.arn
+    resourceRequirements = concat(
+      [
+        { type = "VCPU", value = tostring(var.batch_vcpus) },
+        { type = "MEMORY", value = tostring(var.batch_memory) }
+      ],
+      var.batch_gpu_count > 0 ? [{ type = "GPU", value = tostring(var.batch_gpu_count) }] : []
+    )
+    environment = [
+      { name = "AWS_REGION", value = var.aws_region },
+      { name = "MANAGED_SERVICE_AWS_INPUT_BUCKET", value = aws_s3_bucket.input.bucket },
+      { name = "WHISPERX_EXECUTION_BACKEND", value = "embedded" },
+      { name = "WHISPERX_DEVICE", value = var.whisperx_device },
+      { name = "WHISPERX_MODEL", value = var.whisperx_model },
+      { name = "WHISPERX_LANGUAGE", value = var.whisperx_language },
+      { name = "WHISPERX_COMPUTE_TYPE", value = var.whisperx_compute_type },
+      { name = "WHISPERX_BATCH_SIZE", value = tostring(var.whisperx_batch_size) }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_lambda_function" "managed_api" {
+  function_name    = "${local.prefix}-managed-api"
+  role             = aws_iam_role.lambda_role.arn
+  runtime          = "python3.13"
+  handler          = "backend.lambda_handler.handler"
+  filename         = var.lambda_package_path
+  timeout          = 30
+  memory_size      = 512
+  source_code_hash = filebase64sha256(var.lambda_package_path)
+
+  dynamic "vpc_config" {
+    for_each = length(var.lambda_subnet_ids) > 0 && length(var.lambda_security_group_ids) > 0 ? [1] : []
+    content {
+      subnet_ids         = var.lambda_subnet_ids
+      security_group_ids = var.lambda_security_group_ids
+    }
+  }
+
+  environment {
+    variables = {
+      MANAGED_SERVICE_BACKEND                  = "aws"
+      MANAGED_SERVICE_AUTH_MODE                = "bearer_token"
+      MANAGED_SERVICE_BEARER_TOKEN_SECRET_NAME = aws_secretsmanager_secret.bearer_token.name
+      MANAGED_SERVICE_AWS_INPUT_BUCKET         = aws_s3_bucket.input.bucket
+      MANAGED_SERVICE_AWS_RESULT_BUCKET        = aws_s3_bucket.result.bucket
+      MANAGED_SERVICE_AWS_JOBS_TABLE           = aws_dynamodb_table.jobs.name
+      MANAGED_SERVICE_AWS_BATCH_JOB_QUEUE      = aws_batch_job_queue.queue.name
+      MANAGED_SERVICE_AWS_BATCH_JOB_DEFINITION = aws_batch_job_definition.worker.name
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_apigatewayv2_api" "managed" {
+  name          = "${local.prefix}-managed-api"
+  protocol_type = "HTTP"
+  cors_configuration {
+    allow_headers = ["authorization", "content-type", "accept", "origin", "x-requested-with"]
+    allow_methods = ["GET", "POST", "PUT", "OPTIONS"]
+    allow_origins = [
+      "http://127.0.0.1:5173",
+      "http://localhost:5173",
+      "http://tauri.localhost",
+      "https://tauri.localhost",
+    ]
+    expose_headers = ["content-type"]
+    max_age        = 300
+  }
+  tags          = local.common_tags
+}
+
+resource "aws_apigatewayv2_integration" "managed_lambda" {
+  api_id                 = aws_apigatewayv2_api.managed.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.managed_api.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "default" {
+  api_id    = aws_apigatewayv2_api.managed.id
+  route_key = "$default"
+  target    = "integrations/${aws_apigatewayv2_integration.managed_lambda.id}"
+}
+
+resource "aws_apigatewayv2_stage" "managed" {
+  api_id      = aws_apigatewayv2_api.managed.id
+  name        = "$default"
+  auto_deploy = true
+  tags        = local.common_tags
+}
+
+resource "aws_lambda_permission" "apigw_invoke" {
+  statement_id  = "AllowHttpApiInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.managed_api.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.managed.execution_arn}/*/*"
+}
+
+
+
+
+
+
+
+
+
+
+

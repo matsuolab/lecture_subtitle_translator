@@ -15,16 +15,16 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: frontend/src-tauri/target/release/subtitle-editor.exe
             asset: subtitle-editor-windows-x64.exe
+            build_args: --no-bundle
 
           - os: macos-latest
-            artifact: frontend/src-tauri/target/release/subtitle-editor
-            asset: subtitle-editor-macos-arm64
+            asset: subtitle-editor-macos-arm64.app.zip
+            build_args: --bundles app
 
           - os: ubuntu-22.04
-            artifact: frontend/src-tauri/target/release/subtitle-editor
-            asset: subtitle-editor-linux-x64
+            asset: subtitle-editor-linux-x64.AppImage
+            build_args: --bundles appimage
 
     runs-on: ${{ matrix.os }}
 
@@ -57,34 +57,43 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      # アイコンをPythonで生成してtauri iconで全サイズ展開
       - name: Generate icons
         working-directory: frontend
-        run: |
-          python3 -c "
-          import struct, zlib, os
-          def chunk(t, d):
-              return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t+d)&0xffffffff)
-          def make_png(w, h):
-              raw = b''.join(b'\x00' + bytes([99, 102, 241] * w) for _ in range(h))
-              return (b'\x89PNG\r\n\x1a\n'
-                      + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
-                      + chunk(b'IDAT', zlib.compress(raw))
-                      + chunk(b'IEND', b''))
-          os.makedirs('src-tauri/icons', exist_ok=True)
-          open('src-tauri/icons/source.png', 'wb').write(make_png(1024, 1024))
-          print('Source icon created (1024x1024 indigo)')
-          "
-          npx @tauri-apps/cli icon src-tauri/icons/source.png
+        run: npx @tauri-apps/cli icon src-tauri/app-icon.png
 
       - name: Build Tauri app (portable)
         working-directory: frontend
-        run: npx @tauri-apps/cli build
+        env:
+          VITE_APP_VERSION: ${{ github.ref_name }}
+          VITE_GITHUB_TOKEN: ${{ secrets.RELEASE_CHECK_TOKEN }}
+        run: npx @tauri-apps/cli build -- ${{ matrix.build_args }}
 
-      # 配布用にリネームしてリリースにアップロード
-      - name: Prepare artifact
+      - name: Prepare Windows artifact
+        if: matrix.os == 'windows-latest'
         shell: bash
-        run: cp "${{ matrix.artifact }}" "${{ matrix.asset }}"
+        run: cp "frontend/src-tauri/target/release/subtitle-editor.exe" "${{ matrix.asset }}"
+
+      - name: Prepare macOS artifact
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          app_path="$(find frontend/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "macOS app bundle not found"
+            exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "${{ matrix.asset }}"
+
+      - name: Prepare Linux artifact
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          appimage_path="$(find frontend/src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)"
+          if [[ -z "$appimage_path" ]]; then
+            echo "AppImage not found"
+            exit 1
+          fi
+          cp "$appimage_path" "${{ matrix.asset }}"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2

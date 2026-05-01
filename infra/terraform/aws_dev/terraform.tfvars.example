@@ -1,0 +1,37 @@
+project_name                 = "matsuo-subtitle-pipeline"
+environment                  = "dev"
+aws_region                   = "ap-northeast-1"
+managed_service_bearer_token = "replace-me"
+
+private_subnet_ids = [
+  "subnet-xxxxxxxx",
+  "subnet-yyyyyyyy"
+]
+
+batch_security_group_ids = [
+  "sg-xxxxxxxxxxxxxxxxx"
+]
+
+batch_ec2_image_type    = "ECS_AL2023_NVIDIA"
+batch_instance_types      = ["g4dn.xlarge"]
+batch_ondemand_max_vcpus = 4
+batch_vcpus              = 2
+batch_memory             = 12288
+batch_gpu_count          = 1
+whisperx_device          = "cuda"
+whisperx_model           = "large-v3"
+whisperx_language        = "ja"
+whisperx_compute_type    = "float16"
+whisperx_batch_size      = 4
+
+lambda_subnet_ids = [
+  "subnet-xxxxxxxx",
+  "subnet-yyyyyyyy"
+]
+
+lambda_security_group_ids = [
+  "sg-xxxxxxxxxxxxxxxxx"
+]
+
+lambda_package_path = "../../../dist/lambda/backend.zip"
+

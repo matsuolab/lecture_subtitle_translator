@@ -5,6 +5,8 @@
 # Internal docs & private notes (local only)
 docs/
 notes/
+.codex/
+CODEX.md
 
 # PoC actual data (real lecture content - do not commit)
 poc/data/
@@ -12,6 +14,8 @@ poc/.env
 poc/results/
 poc/step2_pipeline/output/
 poc/step2_pipeline/.env
+poc/step2_pipeline/glossary.json
+poc/step2_pipeline/**/__pycache__/
 
 # Audio/video files
 *.wav
@@ -22,6 +26,8 @@ poc/step2_pipeline/.env
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/*.log
+frontend/src-tauri/binaries/
 
 # Python
 __pycache__/
@@ -33,6 +39,15 @@ venv/
 # Environment
 .env
 *.env
+
+# Build artifacts
+artifacts/
+dist/
+
+# Terraform local state
+**/.terraform/
+*.tfstate
+*.tfstate.*
 
 # OS
 .DS_Store
