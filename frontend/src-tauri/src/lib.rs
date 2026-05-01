@@ -307,13 +307,13 @@ fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Valu
         "-v", &audio_mount,
         "-v", &output_mount,
         GHCR_WHISPERX_IMAGE,
-        "/audio/input.wav",
         "--model", "large-v3",
         "--language", language,
         "--output_format", "json",
         "--batch_size", "8",
         "--compute_type", "float16",
         "--output_dir", "/output",
+        "/audio/input.wav",   // positional arg は最後
     ]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
@@ -335,7 +335,9 @@ fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Valu
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
-            return Err(format!("whisperx transcription failed: {details}"));
+            return Err(format!(
+                "whisperx transcription failed\naudio_mount: {audio_mount}\noutput_mount: {output_mount}\n{details}"
+            ));
         }
         let result_path = output_dir.join("input.json");
         let bytes = fs::read(&result_path)
