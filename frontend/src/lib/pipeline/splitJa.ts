@@ -15,20 +15,40 @@ function sliceWordsByCharWeight(
   if (words.length === 0) return []
   if (sentenceCharCounts.length === 0) return words
 
-  const totalChars = sentenceCharCounts.reduce((sum, count) => sum + Math.max(1, count), 0)
-  const startWeight = sentenceCharCounts
+  const isLast = sentenceIndex === sentenceCharCounts.length - 1
+
+  const totalSentenceChars = sentenceCharCounts.reduce((sum, count) => sum + Math.max(1, count), 0)
+  const charsBefore = sentenceCharCounts
     .slice(0, sentenceIndex)
     .reduce((sum, count) => sum + Math.max(1, count), 0)
-  const endWeight = sentenceCharCounts
+  const charsUpTo = sentenceCharCounts
     .slice(0, sentenceIndex + 1)
     .reduce((sum, count) => sum + Math.max(1, count), 0)
 
-  const start = Math.floor((words.length * startWeight) / Math.max(1, totalChars))
-  const end =
-    sentenceIndex === sentenceCharCounts.length - 1
-      ? words.length
-      : Math.floor((words.length * endWeight) / Math.max(1, totalChars))
-  return words.slice(start, Math.max(start + 1, end))
+  // 各単語オブジェクトの実際の文字数を使って累積カウントを構築する。
+  // 旧実装は words.length を文字数比率で割っていたが、日本語では1単語オブジェクトが
+  // 複数文字を含む場合があり、均等割りだとタイムスタンプが前後のブロックにずれる。
+  const wordNormChars = words.map((w) => Math.max(1, normalizeTimingText(String(w.word ?? '')).length))
+  const totalWordChars = wordNormChars.reduce((sum, c) => sum + c, 0)
+
+  const targetStart = (charsBefore / totalSentenceChars) * totalWordChars
+  const targetEnd = (charsUpTo / totalSentenceChars) * totalWordChars
+
+  let cum = 0
+  const cumChars = wordNormChars.map((c) => { cum += c; return cum })
+
+  const startIdx = sentenceIndex === 0
+    ? 0
+    : Math.max(0, cumChars.findIndex((c) => c > targetStart))
+
+  if (isLast) {
+    return words.slice(startIdx)
+  }
+
+  const endIdxRaw = cumChars.findIndex((c) => c >= targetEnd)
+  const endIdx = endIdxRaw < 0 ? words.length : endIdxRaw + 1
+
+  return words.slice(startIdx, Math.max(startIdx + 1, endIdx))
 }
 
 export function splitJa(segments: CorrectedSegmentLite[]): JaBlock[] {
