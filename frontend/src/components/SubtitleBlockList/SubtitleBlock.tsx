@@ -161,6 +161,18 @@ function getCharLevel(lineLengths: number[]): 'ok' | 'warn' | 'error' {
   return 'ok'
 }
 
+const splitBtnStyle: React.CSSProperties = {
+  fontSize: 11,
+  padding: '3px 9px',
+  borderRadius: 4,
+  border: '1px solid #6366f1',
+  background: 'rgba(99,102,241,0.12)',
+  color: '#6366f1',
+  cursor: 'pointer',
+  fontWeight: 600,
+  whiteSpace: 'nowrap',
+}
+
 function SubtitleBlockInner({
   block,
   isActive,
@@ -432,6 +444,22 @@ function SubtitleBlockInner({
       {/* 訳文テキスト（編集可能） */}
       {isEditingTarget ? (
         <>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                const cursor = targetTextareaRef.current?.selectionStart ?? editTargetText.length
+                const before = editTargetText.slice(0, cursor).trimEnd()
+                const after = editTargetText.slice(cursor).trimStart()
+                if (before && after) {
+                  onSplitFromTarget(block.id, before, after)
+                  setIsEditingTarget(false)
+                }
+              }}
+              title="カーソル位置でブロックを2分割し、文字数比でタイムコードを再割り付けします"
+              style={splitBtnStyle}
+            >✂ 編集位置で分割</button>
+          </div>
           <textarea
             ref={targetTextareaRef}
             value={editTargetText}
@@ -497,6 +525,23 @@ function SubtitleBlockInner({
       {/* 原文テキスト */}
       {isEditing ? (
         <>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                const cursor = textareaRef.current?.selectionStart ?? editText.length
+                const before = editText.slice(0, cursor).trimEnd()
+                const after = editText.slice(cursor).trimStart()
+                if (before && after) {
+                  onManualSplit(block.id, before, after)
+                  onDraftChange(block.id, null)
+                  setIsEditing(false)
+                }
+              }}
+              title="カーソル位置でブロックを2分割し、文字数比でタイムコードを再割り付けします"
+              style={splitBtnStyle}
+            >✂ 編集位置で分割</button>
+          </div>
           <textarea
             ref={textareaRef}
             value={editText}
