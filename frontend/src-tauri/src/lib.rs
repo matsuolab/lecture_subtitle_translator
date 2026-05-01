@@ -22,6 +22,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             ensure_local_legacy_backend_ready,
+            check_local_whisperx,
             transcribe_local,
             extract_audio,
         ])
@@ -232,6 +233,45 @@ async fn extract_audio(app: tauri::AppHandle, video_path: String) -> Result<Stri
         Ok(output_path)
     } else {
         Err(String::from_utf8_lossy(&result.stderr).into_owned())
+    }
+}
+
+#[tauri::command]
+fn check_local_whisperx() -> Result<String, String> {
+    let mut docker_info = Command::new("docker");
+    docker_info.args(["info", "--format", "{{.ServerVersion}}"]);
+    docker_info.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        docker_info.creation_flags(0x0800_0000);
+    }
+    let info_output = run_command_output(&mut docker_info, "docker info")
+        .map_err(|_| String::from("Docker が見つかりません。Docker Desktop をインストールして起動してください"))?;
+    if !info_output.status.success() {
+        return Err(String::from(
+            "Docker デーモンが起動していません。Docker Desktop を起動してください",
+        ));
+    }
+    let docker_version = String::from_utf8_lossy(&info_output.stdout).trim().to_string();
+
+    let mut inspect = Command::new("docker");
+    inspect.args(["image", "inspect", "--format", "{{.Id}}", GHCR_WHISPERX_IMAGE]);
+    inspect.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        inspect.creation_flags(0x0800_0000);
+    }
+    let inspect_output = run_command_output(&mut inspect, "docker image inspect")?;
+    if inspect_output.status.success() {
+        Ok(format!(
+            "OK: Docker {docker_version} / イメージ {GHCR_WHISPERX_IMAGE} はローカルに存在します"
+        ))
+    } else {
+        Err(format!(
+            "イメージが見つかりません。初回転写時に自動で pull されます（約10GB）: {GHCR_WHISPERX_IMAGE}"
+        ))
     }
 }
 
