@@ -114,17 +114,7 @@ interface LocalWhisperxTranscriptResponse {
   segments?: WhisperxSegment[]
 }
 
-interface LocalWhisperxHealthResponse {
-  status?: string
-  model?: string
-  device?: string
-  compute_type?: string
-}
-
 const ENV_API_BASE = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
-const DEFAULT_LOCAL_TRANSCRIPT_API_BASE = 'http://127.0.0.1:8000'
-const LOCAL_WHISPERX_SETUP_REQUIRED = 'LOCAL_WHISPERX_SETUP_REQUIRED'
-const LOCAL_WHISPERX_REBUILD_REQUIRED = 'LOCAL_WHISPERX_REBUILD_REQUIRED'
 
 export interface PipelineApiRunResult {
   blocks: SubtitleBlock[]
@@ -204,7 +194,7 @@ function resolveServiceBase(settings: AdminSettings): string {
       }
     }
     if (isTauri()) {
-      return DEFAULT_LOCAL_TRANSCRIPT_API_BASE
+      return 'local'
     }
   }
 
@@ -224,73 +214,6 @@ function formatFetchError(stage: string, error: unknown, extra?: string): Error 
     return new Error(`${stage} failed${suffix}: ${error.message}`)
   }
   return new Error(`${stage} failed${suffix}`)
-}
-
-function isLoopbackHttpService(settings: AdminSettings, apiBase: string): boolean {
-  if (settings.serviceMode !== 'legacy_pipeline' || !isTauri()) return false
-  try {
-    const url = new URL(apiBase)
-    return url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
-  } catch {
-    return false
-  }
-}
-
-async function ensureLocalTranscriptService(settings: AdminSettings, apiBase: string): Promise<void> {
-  if (!isLoopbackHttpService(settings, apiBase)) return
-  await invoke('ensure_local_whisperx_ready', { serviceUrl: apiBase, allowSetup: false })
-}
-
-function isLocalSetupRequiredError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? '')
-  return message.includes(LOCAL_WHISPERX_SETUP_REQUIRED) || message.includes(LOCAL_WHISPERX_REBUILD_REQUIRED)
-}
-
-async function ensureLocalTranscriptServiceWithConsent(settings: AdminSettings, apiBase: string): Promise<void> {
-  let rebuildRequired = false
-  try {
-    await ensureLocalTranscriptService(settings, apiBase)
-    return
-  } catch (error) {
-    if (!isLocalSetupRequiredError(error)) {
-      throw error
-    }
-    const message = error instanceof Error ? error.message : String(error ?? '')
-    rebuildRequired = message.includes(LOCAL_WHISPERX_REBUILD_REQUIRED)
-  }
-
-  const approved = window.confirm(
-    rebuildRequired
-      ? 'ローカルWhisperXの再構築が必要です。Dockerイメージを再ビルドして起動しますか？'
-      : 'ローカルWhisperXのセットアップが必要です。初回セットアップを開始しますか？',
-  )
-  if (!approved) {
-    throw new Error('ローカルWhisperXのセットアップをキャンセルしました')
-  }
-
-  await invoke('ensure_local_whisperx_ready', { serviceUrl: apiBase, allowSetup: true })
-}
-
-async function fetchLocalWhisperxHealth(apiBase: string): Promise<LocalWhisperxHealthResponse> {
-  let response: Response
-  try {
-    response = await fetch(`${apiBase}/health`)
-  } catch (error) {
-    throw formatFetchError('local transcript health request', error, `${apiBase}/health`)
-  }
-  if (!response.ok) {
-    throw new Error(`local transcript health check failed: ${response.status}`)
-  }
-  return await response.json() as LocalWhisperxHealthResponse
-}
-
-function assertLocalWhisperxHealth(apiBase: string, health: LocalWhisperxHealthResponse): void {
-  if (health.status !== 'ok' || typeof health.model !== 'string' || !health.model.trim()) {
-    throw new Error(
-      `local transcript service is not whisperx-server: ${apiBase} responded without model metadata. ` +
-      `Another service may already be using port 8000, or whisperx-server is not running correctly.`,
-    )
-  }
 }
 
 function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
@@ -639,70 +562,44 @@ export async function runLegacyPipeline(
 }
 
 async function runLocalTranscriptPipeline(
-  apiBase: string,
+  _apiBase: string,
   sourceName: string,
   settings: AdminSettings,
   sourceInput?: PipelineSourceInput,
   onProgress?: (p: PipelineRunProgress) => void,
 ): Promise<PipelineApiRunResult> {
-  if (!sourceInput?.path && !sourceInput?.file) {
-    throw new Error('local transcript mode requires a local source file or file path')
+  if (!isTauri()) {
+    throw new Error('ローカルWhisperX転写はTauriデスクトップアプリでのみ利用可能です')
+  }
+  if (!sourceInput?.path) {
+    throw new Error('local transcript mode requires a local file path')
   }
   validateTranslationSettings(settings)
-  await ensureLocalTranscriptServiceWithConsent(settings, apiBase)
-  const health = await fetchLocalWhisperxHealth(apiBase)
-  assertLocalWhisperxHealth(apiBase, health)
 
-  let uploadInput: PipelineSourceInput = sourceInput
-  if (isTauri() && sourceInput.path) {
-    onProgress?.({
-      runId: 'local-transcript',
-      status: 'running',
-      currentNode: 'extract_audio',
-      completedNodes: [],
-      totalNodes: 0,
-      nodeElapsedSec: null,
-    })
-    const audioPath = await invoke<string>('extract_audio', { videoPath: sourceInput.path })
-    uploadInput = { path: audioPath }
-  }
-
-  const form = new FormData()
-  form.append('language', 'ja')
-  if (uploadInput.path) {
-    const fileBytes = await readFile(uploadInput.path)
-    const blob = new Blob([fileBytes], { type: 'audio/wav' })
-    form.append('file', blob, `${sourceName}.wav`)
-  } else if (uploadInput.file) {
-    form.append('file', uploadInput.file, uploadInput.file.name)
-  } else {
-    throw new Error('local transcript mode requires an uploadable source')
-  }
+  onProgress?.({
+    runId: 'local-transcript',
+    status: 'running',
+    currentNode: 'extract_audio',
+    completedNodes: [],
+    totalNodes: 0,
+    nodeElapsedSec: null,
+  })
+  const audioPath = await invoke<string>('extract_audio', { videoPath: sourceInput.path })
 
   onProgress?.({
     runId: 'local-transcript',
     status: 'running',
     currentNode: 'transcribe',
-    completedNodes: [],
+    completedNodes: ['extract_audio'],
     totalNodes: 1,
     nodeElapsedSec: null,
   })
 
   const t0 = Date.now()
-  let response: Response
-  try {
-    response = await fetch(`${apiBase}/transcribe`, {
-      method: 'POST',
-      body: form,
-    })
-  } catch (error) {
-    throw formatFetchError('local transcript request', error, `${apiBase}/transcribe`)
-  }
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`local transcript failed: ${response.status} ${detail}`)
-  }
-  const whisperxPayload: LocalWhisperxTranscriptResponse = await response.json()
+  const whisperxPayload = await invoke<LocalWhisperxTranscriptResponse>('transcribe_local', {
+    audioPath,
+    language: 'ja',
+  })
   const result = normalizeLocalTranscriptResult(whisperxPayload)
   const managedTraces = toManagedMetadataTraces(result).map((trace) =>
     trace.nodeId === 'transcribe' ? { ...trace, durationMs: Date.now() - t0, model: 'whisperx-local' } : trace,
