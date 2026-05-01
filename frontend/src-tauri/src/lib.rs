@@ -272,8 +272,7 @@ fn ensure_local_whisperx_ready(
     allow_setup: bool,
 ) -> Result<(), String> {
     let endpoint = parse_local_service_url(&service_url)?;
-    let repo_root = resolve_repo_root()?;
-    let server_dir = repo_root.join("whisperx-server");
+    let server_dir = resolve_whisperx_server_dir()?;
     if !server_dir.exists() {
         return Err(String::from("whisperx-server directory not found"));
     }
@@ -368,8 +367,7 @@ fn docker_image_exists(server_dir: &Path) -> Result<bool, String> {
 }
 
 fn stop_local_whisperx_container() -> Result<(), String> {
-    let repo_root = resolve_repo_root()?;
-    let server_dir = repo_root.join("whisperx-server");
+    let server_dir = resolve_whisperx_server_dir()?;
     let output = run_compose_command(
         &server_dir,
         &["stop", "whisperx"],
@@ -476,6 +474,46 @@ async fn extract_audio(app: tauri::AppHandle, video_path: String) -> Result<Stri
         Ok(output_path)
     } else {
         Err(String::from_utf8_lossy(&result.stderr).into_owned())
+    }
+}
+
+fn resolve_whisperx_server_dir() -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| String::from("failed to resolve repo root from Cargo manifest dir"))?;
+        return Ok(repo_root.join("whisperx-server"));
+    }
+
+    if let Ok(dir) = std::env::var("SUBTITLE_WHISPERX_SERVER_DIR") {
+        let path = PathBuf::from(&dir);
+        return if path.exists() {
+            Ok(path)
+        } else {
+            Err(format!(
+                "SUBTITLE_WHISPERX_SERVER_DIR is set but directory does not exist: {dir}"
+            ))
+        };
+    }
+
+    let exe_dir = std::env::current_exe()
+        .map_err(|error| format!("failed to inspect current executable path: {error}"))?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| String::from("failed to resolve executable directory"))?;
+
+    let candidate = exe_dir.join("whisperx-server");
+    if candidate.exists() {
+        Ok(candidate)
+    } else {
+        Err(format!(
+            "whisperx-server directory not found next to the executable ({}); \
+            place the whisperx-server directory there or set SUBTITLE_WHISPERX_SERVER_DIR",
+            exe_dir.display()
+        ))
     }
 }
 
