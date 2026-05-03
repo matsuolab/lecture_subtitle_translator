@@ -563,7 +563,7 @@ export async function runLegacyPipeline(
 
 async function runLocalTranscriptPipeline(
   _apiBase: string,
-  sourceName: string,
+  _sourceName: string,
   settings: AdminSettings,
   sourceInput?: PipelineSourceInput,
   onProgress?: (p: PipelineRunProgress) => void,
