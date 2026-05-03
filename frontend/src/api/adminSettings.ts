@@ -19,7 +19,25 @@ export function getDefaultAdminSettings(): AdminSettings {
     deeplApiKey: '',
     openaiCompatibleBaseUrl: '',
     translationProvider: DEFAULT_TRANSLATION_PROVIDER,
+    translationModel: '',
+    correctionModel: 'gpt-4.1-nano',
+    embeddingModel: 'text-embedding-3-small',
+    logRetentionCount: null,
+    enMaxCharsPerLine: 42,
+    enMaxLines: 2,
+    enMaxTotalChars: 84,
+    enMaxCps: 17.0,
+    subtitleMinDurationSec: 0.833,
+    subtitleMaxDurationSec: 7.0,
+    mergeMinJaChars: 8,
+    qualityCorrectionThreshold: 0.15,
+    qualityTranslationThreshold: 0.25,
   }
+}
+
+function normalizePositiveNumber(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : parseFloat(value as string)
+  return isFinite(n) && n > 0 ? n : fallback
 }
 
 function normalizeServiceMode(value: unknown): ServiceMode {
@@ -57,6 +75,19 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     deeplApiKey: typeof raw.deeplApiKey === 'string' ? raw.deeplApiKey : '',
     openaiCompatibleBaseUrl: typeof raw.openaiCompatibleBaseUrl === 'string' ? raw.openaiCompatibleBaseUrl : '',
     translationProvider: normalizeTranslationProvider(raw.translationProvider),
+    translationModel: typeof raw.translationModel === 'string' ? raw.translationModel : '',
+    correctionModel: typeof raw.correctionModel === 'string' && raw.correctionModel ? raw.correctionModel : defaults.correctionModel,
+    embeddingModel: typeof raw.embeddingModel === 'string' && raw.embeddingModel ? raw.embeddingModel : defaults.embeddingModel,
+    logRetentionCount: typeof raw.logRetentionCount === 'number' ? raw.logRetentionCount : null,
+    enMaxCharsPerLine: normalizePositiveNumber(raw.enMaxCharsPerLine, defaults.enMaxCharsPerLine),
+    enMaxLines: normalizePositiveNumber(raw.enMaxLines, defaults.enMaxLines),
+    enMaxTotalChars: normalizePositiveNumber(raw.enMaxTotalChars, defaults.enMaxTotalChars),
+    enMaxCps: normalizePositiveNumber(raw.enMaxCps, defaults.enMaxCps),
+    subtitleMinDurationSec: normalizePositiveNumber(raw.subtitleMinDurationSec, defaults.subtitleMinDurationSec),
+    subtitleMaxDurationSec: normalizePositiveNumber(raw.subtitleMaxDurationSec, defaults.subtitleMaxDurationSec),
+    mergeMinJaChars: normalizePositiveNumber(raw.mergeMinJaChars, defaults.mergeMinJaChars),
+    qualityCorrectionThreshold: normalizePositiveNumber(raw.qualityCorrectionThreshold, defaults.qualityCorrectionThreshold),
+    qualityTranslationThreshold: normalizePositiveNumber(raw.qualityTranslationThreshold, defaults.qualityTranslationThreshold),
   }
 }
 
