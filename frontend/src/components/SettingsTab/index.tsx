@@ -206,6 +206,30 @@ export function SettingsTab({
         <FieldCard theme={theme}>
           <Field
             theme={theme}
+            label="補正モデル (Correction)"
+            value={adminSettings.correctionModel}
+            placeholder="gpt-4.1-nano"
+            onChange={(value) => onAdminSettingsChange({ correctionModel: value })}
+          />
+          <Field
+            theme={theme}
+            label="翻訳モデル (Translation)"
+            value={adminSettings.translationModel}
+            placeholder=""
+            onChange={(value) => onAdminSettingsChange({ translationModel: value })}
+          />
+          <Field
+            theme={theme}
+            label="Embedding モデル"
+            value={adminSettings.embeddingModel}
+            placeholder="text-embedding-3-small"
+            onChange={(value) => onAdminSettingsChange({ embeddingModel: value })}
+          />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <Field
+            theme={theme}
             label={t.settingsOpenAiApiKey}
             value={adminSettings.openaiApiKey}
             placeholder="sk-..."
@@ -248,6 +272,85 @@ export function SettingsTab({
         >
           {t.settingsResetAdmin}
         </button>
+      </Section>
+
+      <Section title={t.settingsSubtitleQualityTitle} theme={theme}>
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxCharsPerLine}
+            value={adminSettings.enMaxCharsPerLine}
+            min={10}
+            onChange={(value) => onAdminSettingsChange({ enMaxCharsPerLine: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxLines}
+            value={adminSettings.enMaxLines}
+            min={1}
+            onChange={(value) => onAdminSettingsChange({ enMaxLines: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxTotalChars}
+            value={adminSettings.enMaxTotalChars}
+            min={10}
+            onChange={(value) => onAdminSettingsChange({ enMaxTotalChars: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsEnMaxCps}
+            value={adminSettings.enMaxCps}
+            min={1}
+            step={0.1}
+            onChange={(value) => onAdminSettingsChange({ enMaxCps: value })}
+          />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsSubtitleMinDuration}
+            value={adminSettings.subtitleMinDurationSec}
+            min={0.1}
+            step={0.001}
+            onChange={(value) => onAdminSettingsChange({ subtitleMinDurationSec: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsSubtitleMaxDuration}
+            value={adminSettings.subtitleMaxDurationSec}
+            min={1}
+            step={0.1}
+            onChange={(value) => onAdminSettingsChange({ subtitleMaxDurationSec: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsMergeMinJaChars}
+            value={adminSettings.mergeMinJaChars}
+            min={1}
+            onChange={(value) => onAdminSettingsChange({ mergeMinJaChars: value })}
+          />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsQualityCorrectionThreshold}
+            value={adminSettings.qualityCorrectionThreshold}
+            min={0.01}
+            step={0.01}
+            onChange={(value) => onAdminSettingsChange({ qualityCorrectionThreshold: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsQualityTranslationThreshold}
+            value={adminSettings.qualityTranslationThreshold}
+            min={0.01}
+            step={0.01}
+            onChange={(value) => onAdminSettingsChange({ qualityTranslationThreshold: value })}
+          />
+        </FieldCard>
       </Section>
     </div>
   )
@@ -334,6 +437,47 @@ function Field({
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+        }}
+      />
+    </label>
+  )
+}
+
+function NumberField({
+  theme,
+  label,
+  value,
+  min,
+  step = 1,
+  onChange,
+}: {
+  theme: Theme
+  label: string
+  value: number
+  min?: number
+  step?: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <input
+        type="number"
+        value={value}
+        min={min}
+        step={step}
+        onChange={(e) => {
+          const n = parseFloat(e.target.value)
+          if (isFinite(n) && (min === undefined || n >= min)) onChange(n)
+        }}
         style={{
           width: '100%',
           padding: '10px 12px',
