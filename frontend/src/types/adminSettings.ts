@@ -11,5 +11,17 @@ export interface AdminSettings {
   deeplApiKey: string
   openaiCompatibleBaseUrl: string
   translationProvider: TranslationProvider
-  translationModel?: string
+  translationModel: string
+  correctionModel: string
+  embeddingModel: string
+  logRetentionCount: number | null
+  enMaxCharsPerLine: number
+  enMaxLines: number
+  enMaxTotalChars: number
+  enMaxCps: number
+  subtitleMinDurationSec: number
+  subtitleMaxDurationSec: number
+  mergeMinJaChars: number
+  qualityCorrectionThreshold: number
+  qualityTranslationThreshold: number
 }

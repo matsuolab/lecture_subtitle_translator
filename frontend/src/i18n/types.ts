@@ -107,4 +107,14 @@ export interface LocaleStrings {
   settingsResetAdmin: string
   pocThemeDesc: string
   matsuoThemeDesc: string
+  settingsSubtitleQualityTitle: string
+  settingsEnMaxCharsPerLine: string
+  settingsEnMaxLines: string
+  settingsEnMaxTotalChars: string
+  settingsEnMaxCps: string
+  settingsSubtitleMinDuration: string
+  settingsSubtitleMaxDuration: string
+  settingsMergeMinJaChars: string
+  settingsQualityCorrectionThreshold: string
+  settingsQualityTranslationThreshold: string
 }

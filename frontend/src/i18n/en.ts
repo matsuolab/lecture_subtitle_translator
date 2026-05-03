@@ -218,6 +218,16 @@ export const en: LocaleStrings = {
   settingsResetAdmin: 'Reset admin settings',
   pocThemeDesc: 'Dark blue (development default)',
   matsuoThemeDesc: 'White × Gray × Deep blue',
+  settingsSubtitleQualityTitle: 'Subtitle Quality Parameters',
+  settingsEnMaxCharsPerLine: 'Max chars per line',
+  settingsEnMaxLines: 'Max lines',
+  settingsEnMaxTotalChars: 'Max total chars',
+  settingsEnMaxCps: 'Max CPS (chars/sec)',
+  settingsSubtitleMinDuration: 'Min subtitle duration (sec)',
+  settingsSubtitleMaxDuration: 'Max subtitle duration (sec)',
+  settingsMergeMinJaChars: 'Min JA chars for merge',
+  settingsQualityCorrectionThreshold: 'Correction quality threshold (embedding dist)',
+  settingsQualityTranslationThreshold: 'Translation quality threshold (embedding dist)',
 }
 
 
