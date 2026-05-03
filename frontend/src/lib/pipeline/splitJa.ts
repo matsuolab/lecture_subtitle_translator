@@ -1,7 +1,6 @@
 import type { CorrectedSegmentLite } from './correct'
 import type { JaBlock } from './blockTypes'
 import { normalizeSpaces, splitJaIntoSentences } from './textUtils'
-import type { WordTimestamp } from './types'
 
 function normalizeTimingText(text: string): string {
   return normalizeSpaces(text).replace(/[。、「」『』（）()［］\[\]！？!?・,，、.\s]/g, '')
