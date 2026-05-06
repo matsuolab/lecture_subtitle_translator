@@ -1,3 +1,4 @@
+import React from 'react'
 import type { Theme } from '@/themes'
 import { themes } from '@/themes'
 import { locales } from '@/i18n'
@@ -34,6 +35,35 @@ export function SettingsTab({
   const { strings: t, setLocaleId } = useLocale()
   const currentVersion = (import.meta.env.VITE_APP_VERSION as string | undefined) || null
 
+  const [availableModels, setAvailableModels] = React.useState<string[]>(() => {
+    try {
+      const cached = localStorage.getItem('subtitle-editor.available-models')
+      return cached ? JSON.parse(cached) as string[] : []
+    } catch { return [] }
+  })
+  const [modelRefreshState, setModelRefreshState] = React.useState<'idle' | 'loading' | 'error'>('idle')
+
+  async function handleRefreshModels() {
+    setModelRefreshState('loading')
+    try {
+      const baseUrl = (adminSettings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
+      const apiKey = adminSettings.openaiApiKey.trim()
+      const res = await fetch(`${baseUrl}/models`, {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      const ids: string[] = ((data.data ?? []) as Array<{ id: string }>)
+        .map((m) => m.id)
+        .sort()
+      setAvailableModels(ids)
+      localStorage.setItem('subtitle-editor.available-models', JSON.stringify(ids))
+      setModelRefreshState('idle')
+    } catch {
+      setModelRefreshState('error')
+    }
+  }
+
   const serviceUrlPlaceholder = adminSettings.serviceMode === 'managed_service'
     ? 'https://service.example.com'
     : 'http://127.0.0.1:8000'
@@ -47,6 +77,12 @@ export function SettingsTab({
     : serviceCheck.status === 'error'
       ? '#ef4444'
       : theme.textSecondary
+
+  const refreshLabel = modelRefreshState === 'loading'
+    ? t.settingsRefreshModelsLoading
+    : modelRefreshState === 'error'
+      ? t.settingsRefreshModelsError
+      : t.settingsRefreshModels
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
@@ -203,28 +239,77 @@ export function SettingsTab({
           />
         </FieldCard>
 
+        <datalist id="available-models-list">
+          {availableModels.map((id) => (
+            <option key={id} value={id} />
+          ))}
+        </datalist>
+
         <FieldCard theme={theme}>
-          <Field
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+            入力でフィルター・絞り込み。「モデル一覧を更新」で選択肢を取得してから ▼ をクリックすると一覧表示されます。
+          </div>
+          <ComboField
             theme={theme}
             label="補正モデル (Correction)"
             value={adminSettings.correctionModel}
             placeholder="gpt-4.1-nano"
+            listId="available-models-list"
+            hint="空欄 = gpt-4.1-nano"
             onChange={(value) => onAdminSettingsChange({ correctionModel: value })}
           />
-          <Field
+          <ComboField
             theme={theme}
             label="翻訳モデル (Translation)"
             value={adminSettings.translationModel}
-            placeholder=""
+            placeholder="gpt-4.1-mini（デフォルト）"
+            listId="available-models-list"
+            hint="空欄 = gpt-4.1-mini。圧縮・展開モデルが空欄の場合もこのモデルを流用します"
             onChange={(value) => onAdminSettingsChange({ translationModel: value })}
           />
-          <Field
+          <ComboField
             theme={theme}
             label="Embedding モデル"
             value={adminSettings.embeddingModel}
             placeholder="text-embedding-3-small"
+            listId="available-models-list"
+            hint="空欄 = text-embedding-3-small"
             onChange={(value) => onAdminSettingsChange({ embeddingModel: value })}
           />
+          <ComboField
+            theme={theme}
+            label={t.settingsCompressModel}
+            value={adminSettings.compressModel}
+            placeholder="（翻訳モデルと同じ）"
+            listId="available-models-list"
+            hint="空欄 = 翻訳モデルと同じ"
+            onChange={(value) => onAdminSettingsChange({ compressModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label={t.settingsExpandModel}
+            value={adminSettings.expandModel}
+            placeholder="（翻訳モデルと同じ）"
+            listId="available-models-list"
+            hint="空欄 = 翻訳モデルと同じ"
+            onChange={(value) => onAdminSettingsChange({ expandModel: value })}
+          />
+          <button
+            onClick={handleRefreshModels}
+            disabled={modelRefreshState === 'loading'}
+            style={{
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.panelBg,
+              color: modelRefreshState === 'error' ? '#ef4444' : theme.textPrimary,
+              cursor: modelRefreshState === 'loading' ? 'wait' : 'pointer',
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {refreshLabel}
+          </button>
         </FieldCard>
 
         <FieldCard theme={theme}>
@@ -352,6 +437,107 @@ export function SettingsTab({
           />
         </FieldCard>
       </Section>
+
+      <Section title={t.settingsPipelineThresholdsTitle} theme={theme}>
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineShortDurationSec}
+            value={adminSettings.pipelineShortDurationSec}
+            min={0.1}
+            step={0.1}
+            onChange={(value) => onAdminSettingsChange({ pipelineShortDurationSec: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineLongDurationSec}
+            value={adminSettings.pipelineLongDurationSec}
+            min={1}
+            step={0.5}
+            onChange={(value) => onAdminSettingsChange({ pipelineLongDurationSec: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineMergedLongDurationSec}
+            value={adminSettings.pipelineMergedLongDurationSec}
+            min={1}
+            step={0.5}
+            onChange={(value) => onAdminSettingsChange({ pipelineMergedLongDurationSec: value })}
+          />
+        </FieldCard>
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineVerboseEnRatio}
+            value={adminSettings.pipelineVerboseEnRatio}
+            min={0.5}
+            step={0.1}
+            onChange={(value) => onAdminSettingsChange({ pipelineVerboseEnRatio: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineOverCompressedRatio}
+            value={adminSettings.pipelineOverCompressedRatio}
+            min={0.05}
+            step={0.05}
+            onChange={(value) => onAdminSettingsChange({ pipelineOverCompressedRatio: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineOverCompressedJaChars}
+            value={adminSettings.pipelineOverCompressedJaChars}
+            min={1}
+            onChange={(value) => onAdminSettingsChange({ pipelineOverCompressedJaChars: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineSlowCps}
+            value={adminSettings.pipelineSlowCps}
+            min={0.5}
+            step={0.5}
+            onChange={(value) => onAdminSettingsChange({ pipelineSlowCps: value })}
+          />
+        </FieldCard>
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineMaxExpandPerBlock}
+            value={adminSettings.pipelineMaxExpandPerBlock}
+            min={0}
+            onChange={(value) => onAdminSettingsChange({ pipelineMaxExpandPerBlock: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineMaxCompressPerBlock}
+            value={adminSettings.pipelineMaxCompressPerBlock}
+            min={0}
+            onChange={(value) => onAdminSettingsChange({ pipelineMaxCompressPerBlock: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineMaxPhase2Retries}
+            value={adminSettings.pipelineMaxPhase2Retries}
+            min={0}
+            onChange={(value) => onAdminSettingsChange({ pipelineMaxPhase2Retries: value })}
+          />
+        </FieldCard>
+        <FieldCard theme={theme}>
+          <TextareaField
+            theme={theme}
+            label={t.settingsCompressPromptOverride}
+            value={adminSettings.compressPromptOverride}
+            placeholder="(empty = use default)"
+            onChange={(value) => onAdminSettingsChange({ compressPromptOverride: value })}
+          />
+          <TextareaField
+            theme={theme}
+            label={t.settingsExpandPromptOverride}
+            value={adminSettings.expandPromptOverride}
+            placeholder="(empty = use default)"
+            onChange={(value) => onAdminSettingsChange({ expandPromptOverride: value })}
+          />
+        </FieldCard>
+      </Section>
     </div>
   )
 }
@@ -451,6 +637,86 @@ function Field({
   )
 }
 
+function ComboField({
+  theme,
+  label,
+  value,
+  placeholder,
+  listId,
+  hint,
+  onChange,
+}: {
+  theme: Theme
+  label: string
+  value: string
+  placeholder?: string
+  listId: string
+  hint?: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <input
+        type="text"
+        list={listId}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+        }}
+      />
+      {hint && (
+        <span style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>{hint}</span>
+      )}
+    </div>
+  )
+}
+
+function TextareaField({
+  theme,
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  theme: Theme
+  label: string
+  value: string
+  placeholder?: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        rows={4}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+          resize: 'vertical',
+          fontFamily: 'inherit',
+        }}
+      />
+    </label>
+  )
+}
+
 function NumberField({
   theme,
   label,
@@ -466,17 +732,28 @@ function NumberField({
   step?: number
   onChange: (value: number) => void
 }) {
+  const [display, setDisplay] = React.useState(() => String(value))
+
+  React.useEffect(() => {
+    setDisplay(String(value))
+  }, [value])
+
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
       <input
         type="number"
-        value={value}
+        value={display}
         min={min}
         step={step}
         onChange={(e) => {
+          setDisplay(e.target.value)
           const n = parseFloat(e.target.value)
           if (isFinite(n) && (min === undefined || n >= min)) onChange(n)
+        }}
+        onBlur={() => {
+          const n = parseFloat(display)
+          if (!isFinite(n) || (min !== undefined && n < min)) setDisplay(String(value))
         }}
         style={{
           width: '100%',

@@ -32,6 +32,20 @@ export function getDefaultAdminSettings(): AdminSettings {
     mergeMinJaChars: 8,
     qualityCorrectionThreshold: 0.15,
     qualityTranslationThreshold: 0.25,
+    pipelineShortDurationSec: 1.5,
+    pipelineLongDurationSec: 10.0,
+    pipelineMergedLongDurationSec: 7.0,
+    pipelineVerboseEnRatio: 2.0,
+    pipelineOverCompressedRatio: 0.25,
+    pipelineOverCompressedJaChars: 15,
+    pipelineSlowCps: 3.0,
+    pipelineMaxExpandPerBlock: 3,
+    pipelineMaxCompressPerBlock: 5,
+    pipelineMaxPhase2Retries: 3,
+    compressModel: '',
+    expandModel: '',
+    compressPromptOverride: '',
+    expandPromptOverride: '',
   }
 }
 
@@ -88,6 +102,20 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     mergeMinJaChars: normalizePositiveNumber(raw.mergeMinJaChars, defaults.mergeMinJaChars),
     qualityCorrectionThreshold: normalizePositiveNumber(raw.qualityCorrectionThreshold, defaults.qualityCorrectionThreshold),
     qualityTranslationThreshold: normalizePositiveNumber(raw.qualityTranslationThreshold, defaults.qualityTranslationThreshold),
+    pipelineShortDurationSec: normalizePositiveNumber(raw.pipelineShortDurationSec, defaults.pipelineShortDurationSec),
+    pipelineLongDurationSec: normalizePositiveNumber(raw.pipelineLongDurationSec, defaults.pipelineLongDurationSec),
+    pipelineMergedLongDurationSec: normalizePositiveNumber(raw.pipelineMergedLongDurationSec, defaults.pipelineMergedLongDurationSec),
+    pipelineVerboseEnRatio: normalizePositiveNumber(raw.pipelineVerboseEnRatio, defaults.pipelineVerboseEnRatio),
+    pipelineOverCompressedRatio: normalizePositiveNumber(raw.pipelineOverCompressedRatio, defaults.pipelineOverCompressedRatio),
+    pipelineOverCompressedJaChars: normalizePositiveNumber(raw.pipelineOverCompressedJaChars, defaults.pipelineOverCompressedJaChars),
+    pipelineSlowCps: normalizePositiveNumber(raw.pipelineSlowCps, defaults.pipelineSlowCps),
+    pipelineMaxExpandPerBlock: normalizePositiveNumber(raw.pipelineMaxExpandPerBlock, defaults.pipelineMaxExpandPerBlock),
+    pipelineMaxCompressPerBlock: normalizePositiveNumber(raw.pipelineMaxCompressPerBlock, defaults.pipelineMaxCompressPerBlock),
+    pipelineMaxPhase2Retries: normalizePositiveNumber(raw.pipelineMaxPhase2Retries, defaults.pipelineMaxPhase2Retries),
+    compressModel: typeof raw.compressModel === 'string' ? raw.compressModel : '',
+    expandModel: typeof raw.expandModel === 'string' ? raw.expandModel : '',
+    compressPromptOverride: typeof raw.compressPromptOverride === 'string' ? raw.compressPromptOverride : '',
+    expandPromptOverride: typeof raw.expandPromptOverride === 'string' ? raw.expandPromptOverride : '',
   }
 }
 

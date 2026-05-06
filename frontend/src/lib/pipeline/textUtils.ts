@@ -30,24 +30,25 @@ export function splitEnLines42(text: string, maxChars = 42): string {
 
   const words = normalized.split(' ')
   if (words.length <= 1) {
-    return normalized.slice(0, maxChars) + '\n' + normalized.slice(maxChars, maxChars * 2)
+    const mid = Math.floor(normalized.length / 2)
+    return normalized.slice(0, mid) + '\n' + normalized.slice(mid)
   }
 
   const half = normalized.length / 2
-  let best = half
+  let bestPos = 0
   let bestDist = Infinity
   let pos = 0
   for (let i = 0; i < words.length - 1; i++) {
     pos += words[i].length
     const dist = Math.abs(pos - half)
-    if (dist < bestDist && pos <= maxChars) {
+    if (dist < bestDist) {
       bestDist = dist
-      best = pos
+      bestPos = pos
     }
     pos += 1
   }
 
-  const left = normalized.slice(0, best).trimEnd()
-  const right = normalized.slice(best).trimStart()
+  const left = normalized.slice(0, bestPos).trimEnd()
+  const right = normalized.slice(bestPos).trimStart()
   return right ? `${left}\n${right}` : left
 }
