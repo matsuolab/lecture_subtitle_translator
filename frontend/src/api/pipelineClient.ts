@@ -624,7 +624,6 @@ async function runLocalTranscriptPipeline(
   const localResult = await runLocalPostPipeline(
     transcriptSegments,
     settings,
-    { maxCps: 99, semanticScoreOverride: 0.9 },
     (step) =>
       onProgress?.({
         runId: 'local-transcript',
@@ -746,7 +745,6 @@ async function runManagedPipeline(
     const localResult = await runLocalPostPipeline(
       transcriptSegments,
       settings,
-      { maxCps: 99, semanticScoreOverride: 0.9 },
       (step) =>
         onProgress?.({
           runId: jobId,

@@ -24,4 +24,24 @@ export interface AdminSettings {
   mergeMinJaChars: number
   qualityCorrectionThreshold: number
   qualityTranslationThreshold: number
+
+  // パイプライン閾値（PipelineThresholds に完全マッピング）
+  pipelineShortDurationSec: number
+  pipelineLongDurationSec: number
+  pipelineMergedLongDurationSec: number
+  pipelineVerboseEnRatio: number
+  pipelineOverCompressedRatio: number
+  pipelineOverCompressedJaChars: number
+  pipelineSlowCps: number
+  pipelineMaxExpandPerBlock: number
+  pipelineMaxCompressPerBlock: number
+  pipelineMaxPhase2Retries: number
+
+  // ノード別モデル
+  compressModel: string
+  expandModel: string
+
+  // プロンプト上書き（'' = デフォルト使用）
+  compressPromptOverride: string
+  expandPromptOverride: string
 }

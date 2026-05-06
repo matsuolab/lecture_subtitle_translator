@@ -117,4 +117,22 @@ export interface LocaleStrings {
   settingsMergeMinJaChars: string
   settingsQualityCorrectionThreshold: string
   settingsQualityTranslationThreshold: string
+  settingsPipelineThresholdsTitle: string
+  settingsPipelineShortDurationSec: string
+  settingsPipelineLongDurationSec: string
+  settingsPipelineMergedLongDurationSec: string
+  settingsPipelineVerboseEnRatio: string
+  settingsPipelineOverCompressedRatio: string
+  settingsPipelineOverCompressedJaChars: string
+  settingsPipelineSlowCps: string
+  settingsPipelineMaxExpandPerBlock: string
+  settingsPipelineMaxCompressPerBlock: string
+  settingsPipelineMaxPhase2Retries: string
+  settingsCompressModel: string
+  settingsExpandModel: string
+  settingsCompressPromptOverride: string
+  settingsExpandPromptOverride: string
+  settingsRefreshModels: string
+  settingsRefreshModelsLoading: string
+  settingsRefreshModelsError: string
 }
