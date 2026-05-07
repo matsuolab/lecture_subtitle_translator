@@ -2,6 +2,8 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
+import { formatLines } from '../../formatLines'
+import { computeMetrics } from '../../metrics'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
 
@@ -17,12 +19,13 @@ interface SplitUnit {
 }
 
 function fallbackSplitJa(jaText: string): SplitResult | null {
-  // 句点・感嘆符・疑問符で分割を試みる
-  const sentenceEnd = /[。！？]/g
+  // 句点・読点・接続表現の近くで分割を試みる
+  const sentenceEnd = /[。！？、]|(?:について|として|ために|踏まえて|また|そして|ただし|一方で)/g
   let match: RegExpExecArray | null
   const candidates: number[] = []
   while ((match = sentenceEnd.exec(jaText)) !== null) {
-    candidates.push(match.index + 1)
+    const pos = match.index + match[0].length
+    if (pos > 0 && pos < jaText.length) candidates.push(pos)
   }
 
   // 中央に最も近い分割位置を選ぶ
@@ -40,12 +43,23 @@ function fallbackSplitJa(jaText: string): SplitResult | null {
   }
 
   if (bestPos === -1) return null
+
+  const first = normalizeJaSplitUnit(jaText.slice(0, bestPos))
+  const second = normalizeJaSplitUnit(jaText.slice(bestPos))
+  if (!first || !second) return null
+
   return {
     units: [
-      { text: jaText.slice(0, bestPos).trim(), reason: 'sentence_boundary_fallback' },
-      { text: jaText.slice(bestPos).trim(), reason: 'sentence_boundary_fallback' },
+      { text: first, reason: 'semantic_boundary_fallback' },
+      { text: second, reason: 'semantic_boundary_fallback' },
     ],
   }
+}
+
+function normalizeJaSplitUnit(text: string): string {
+  return normalizeSpaces(text)
+    .replace(/[、,]\s*$/g, '')
+    .trim()
 }
 
 function normalizeJaUnit(text: string): string {
@@ -54,7 +68,7 @@ function normalizeJaUnit(text: string): string {
 
 function endsWithIncompleteJapanese(text: string): boolean {
   const normalized = normalizeJaUnit(text)
-  return /(の|と|を|に|が|は|で|て|から|ため|として|について|には|では|ので|し)$/.test(normalized)
+  return /([、,]|の|と|を|に|が|は|で|て|から|ため|として|について|には|では|ので|し|か|点で)$/.test(normalized)
 }
 
 function isBadJapaneseUnit(text: string): boolean {
@@ -263,6 +277,51 @@ function allocateDurationsMs(weights: number[], availableMs: number, minDuration
   return durations
 }
 
+function validateSplitCandidates(
+  original: EnBlock,
+  candidates: EnBlock[],
+  thresholds: PipelineThresholds & AgentThresholds,
+): { ok: true; blocks: EnBlock[] } | { ok: false; warning: string } {
+  const formatted = formatLines(candidates, thresholds)
+  const originalMetrics = computeMetrics(formatLines([original], thresholds)[0])
+
+  const invalid = formatted
+    .map((block) => ({ block, metrics: computeMetrics(block) }))
+    .find(({ metrics }) =>
+      metrics.duration < thresholds.shortDurationSec ||
+      metrics.cps > thresholds.verboseCps ||
+      metrics.maxLineLen > thresholds.maxLineLen * 2
+    )
+
+  if (invalid) {
+    return {
+      ok: false,
+      warning:
+        `split_block: rejected candidate #${invalid.block.id}; ` +
+        `duration=${invalid.metrics.duration.toFixed(2)}s, ` +
+        `cps=${invalid.metrics.cps.toFixed(1)}, ` +
+        `maxLine=${invalid.metrics.maxLineLen}`,
+    }
+  }
+
+  const worstCps = Math.max(...formatted.map(block => computeMetrics(block).cps))
+  const worstLine = Math.max(...formatted.map(block => computeMetrics(block).maxLineLen))
+  const longestDuration = Math.max(...formatted.map(block => computeMetrics(block).duration))
+  const improved =
+    worstCps < originalMetrics.cps ||
+    worstLine < originalMetrics.maxLineLen ||
+    longestDuration < originalMetrics.duration
+
+  if (!improved) {
+    return {
+      ok: false,
+      warning: 'split_block: rejected candidate because it does not improve cps, line length, or duration',
+    }
+  }
+
+  return { ok: true, blocks: formatted }
+}
+
 export const splitBlockTool: Tool = {
   name: 'split_block',
   description: 'Split Japanese into 2 semantic sentences. Re-translate each with proportional time.',
@@ -330,6 +389,8 @@ export const splitBlockTool: Tool = {
         enText,
         enRaw: enText,
         enChars: enText.length,
+        cps: enText.length / Math.max(0.001, end - start),
+        maxLineLen: enText.length,
         compressCount: 0,
         expandCount: 0,
         enTextOriginal: block.enTextOriginal ?? block.enText,
@@ -340,9 +401,14 @@ export const splitBlockTool: Tool = {
       return nextBlock
     })
 
+    const validated = validateSplitCandidates(block, replaceBlocks, thresholds)
+    if (!validated.ok) {
+      return buildFailurePatch(block, validated.warning)
+    }
+
     return {
-      replaceBlocks,
-      dirtyBlockIds: replaceBlocks.map(nextBlock => String(nextBlock.id)),
+      replaceBlocks: validated.blocks,
+      dirtyBlockIds: validated.blocks.map(nextBlock => String(nextBlock.id)),
       changed: true,
       warning: splitWarning,
     }

@@ -6,6 +6,7 @@ import { translateEn } from './translateEn'
 import { correctionEngine } from './correctionAgent/loop'
 import { createDecisionNode } from './correctionAgent/decisionNode'
 import { buildAgentThresholds } from './correctionAgent/types'
+import { mergeContextFragments } from './contextMergeFragments'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -27,19 +28,25 @@ export async function runPhase2(
     .map((b, i) => (needsCorrection(b) ? i : -1))
     .filter(i => i !== -1)
 
-  if (violatingIndices.length === 0) return blocks
+  if (violatingIndices.length > 0) {
+    const agentThresholds = buildAgentThresholds({
+      subtitleMinDurationSec: settings.subtitleMinDurationSec,
+    })
+    const combinedThresholds = { ...thresholds, ...agentThresholds }
+    const decisionNode = createDecisionNode(agentThresholds.useAgentDecision)
 
-  const agentThresholds = buildAgentThresholds({
-    subtitleMinDurationSec: settings.subtitleMinDurationSec,
-  })
-  const combinedThresholds = { ...thresholds, ...agentThresholds }
-  const decisionNode = createDecisionNode(agentThresholds.useAgentDecision)
+    blocks = await runNode('correctionEngine', () =>
+      correctionEngine(blocks, violatingIndices, decisionNode, settings, combinedThresholds, {
+        onToolWarning: (blockId, strategy, message) => {
+          onWarning?.(`correctionEngine[block=${blockId},${strategy}]`, message)
+        },
+      }),
+    )
+  }
 
-  blocks = await runNode('correctionEngine', () =>
-    correctionEngine(blocks, violatingIndices, decisionNode, settings, combinedThresholds, {
-      onToolWarning: (blockId, strategy, message) => {
-        onWarning?.(`correctionEngine[block=${blockId},${strategy}]`, message)
-      },
+  blocks = await runNode('mergeContextFragments', () =>
+    mergeContextFragments(blocks, settings, thresholds, (blockId, message) => {
+      onWarning?.(`mergeContextFragments[block=${blockId}]`, message)
     }),
   )
 

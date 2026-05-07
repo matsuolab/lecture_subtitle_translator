@@ -40,6 +40,10 @@ export interface AdminSettings {
   // ノード別モデル
   compressModel: string
   expandModel: string
+  contextMergeModel: string
+  subtitleLanguageLabel: string
+  transcriptLanguageLabel: string
+  languageProfileConfigJson: string
 
   // プロンプト上書き（'' = デフォルト使用）
   compressPromptOverride: string

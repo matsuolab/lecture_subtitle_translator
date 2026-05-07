@@ -27,13 +27,58 @@ export interface SubtitleBlock {
   ignoredTypos?: string[]
   /** 無視する用語漏れ候補のキー: entry.id */
   ignoredMissing?: string[]
+  reviewSummary?: string
+  reviewAction?: string
+  reviewPriority?: 'must_review' | 'should_review' | 'auto_pass'
+  reviewDisposition?: 'auto_pass' | 'auto_applied' | 'proposed' | 'manual_review'
+  correctionAttempts?: Array<{
+    strategy: string
+    changed: boolean
+    beforeChars: number
+    afterChars: number
+    beforeViolation: string
+    afterViolation: string
+    rationale?: string
+  }>
+  editHistory?: Array<{
+    at: string
+    type:
+      | 'approve'
+      | 'flag'
+      | 'source_edit'
+      | 'target_edit'
+      | 'time_edit'
+      | 'split'
+      | 'merge'
+      | 'ignore_warning'
+    before?: Record<string, unknown>
+    after?: Record<string, unknown>
+  }>
 }
 
 export type CpsLevel = 'ok' | 'warn' | 'error'
 
-export function getCpsLevel(cps: number): CpsLevel {
-  if (cps <= 15) return 'ok'
-  if (cps <= 18) return 'warn'
+const DEFAULT_MAX_CPS = 17
+const DEFAULT_MAX_CHARS_PER_LINE = 42
+
+function normalizePositiveThreshold(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value !== undefined && value > 0 ? value : fallback
+}
+
+export function getCpsLevel(cps: number, maxCps = DEFAULT_MAX_CPS): CpsLevel {
+  const limit = normalizePositiveThreshold(maxCps, DEFAULT_MAX_CPS)
+  const warnThreshold = limit * 0.9
+  if (cps <= warnThreshold) return 'ok'
+  if (cps <= limit) return 'warn'
+  return 'error'
+}
+
+export function getLineLengthLevel(lineLengths: number[], maxCharsPerLine = DEFAULT_MAX_CHARS_PER_LINE): CpsLevel {
+  const limit = normalizePositiveThreshold(maxCharsPerLine, DEFAULT_MAX_CHARS_PER_LINE)
+  const warnThreshold = Math.floor(limit * 6 / 7)
+  const max = Math.max(...lineLengths, 0)
+  if (max <= warnThreshold) return 'ok'
+  if (max <= limit) return 'warn'
   return 'error'
 }
 

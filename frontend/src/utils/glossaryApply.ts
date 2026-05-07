@@ -314,8 +314,10 @@ export function findTypoCandidates(
   const coveredTokens = new Set<number>()
 
   for (const entry of sortedEntries) {
-    const termLower = entry.en.toLowerCase()
-    const termWordCount = entry.en.trim().split(/\s+/).length
+    const term = entry.en.trim()
+    if (!term) continue
+    const termLower = term.toLowerCase()
+    const termWordCount = term.split(/\s+/).length
     const termChars = termLower.replace(/\s+/g, '')
     if (termChars.length < 3) continue
 
@@ -331,7 +333,7 @@ export function findTypoCandidates(
       const ngramLower = ngram.toLowerCase()
 
       // 正確にマッチしている場合: カバー済みにしてスキップ
-      if (buildPattern(entry.en).test(ngram)) {
+      if (ngramLower === termLower || buildPattern(term).test(ngram)) {
         for (let j = i; j < i + termWordCount; j++) coveredTokens.add(j)
         continue
       }
@@ -347,7 +349,7 @@ export function findTypoCandidates(
       const threshold = termLower.length <= 8 ? 1 : 2
       if (dist === 0 || dist > threshold) continue
 
-      const pairKey = `${ngram}::${entry.en}`
+      const pairKey = `${ngram}::${term}`
       if (seenPairs.has(pairKey)) continue
       seenPairs.add(pairKey)
 

@@ -78,11 +78,23 @@ export async function runLocalPostPipeline(
   const enBlocks = await runPhase2(jaBlocks, settings, thresholds, runNode, (nodeId, message) => {
     record(nodeId, 'success', 0, message)
   })
-  const phase3 = await runPhase3(enBlocks, [], runNode)
+  const phase3 = await runPhase3(enBlocks, [], thresholds, runNode)
 
-  const mustReviewCount = phase3.reviewItems.filter((item) => item.priority === 'must_review').length
-  const shouldReviewCount = phase3.reviewItems.filter((item) => item.priority === 'should_review').length
-  const autoPassCount = Math.max(0, phase3.blocks.length - mustReviewCount - shouldReviewCount)
+  const terminologyMustCount = phase3.reviewItems
+    .filter((item) => item.blockId === undefined && item.priority === 'must_review')
+    .length
+  const terminologyShouldCount = phase3.reviewItems
+    .filter((item) => item.blockId === undefined && item.priority === 'should_review')
+    .length
+  const mustReviewCount = phase3.blocks
+    .filter((block) => block.reviewPriority === 'must_review')
+    .length + terminologyMustCount
+  const shouldReviewCount = phase3.blocks
+    .filter((block) => block.reviewPriority === 'should_review')
+    .length + terminologyShouldCount
+  const autoPassCount = phase3.blocks
+    .filter((block) => block.reviewPriority === 'auto_pass')
+    .length
 
   return {
     blocks: phase3.blocks,

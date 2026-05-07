@@ -25,6 +25,8 @@ interface SubtitleBlockListProps {
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
+  maxCps: number
+  maxCharsPerLine: number
 }
 
 interface BoundaryDrag {
@@ -174,6 +176,8 @@ export function SubtitleBlockList({
   onUpdateTimes,
   onIgnoreWarning,
   onDraftChange,
+  maxCps,
+  maxCharsPerLine,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -453,6 +457,8 @@ export function SubtitleBlockList({
               onUpdateTimes={onUpdateTimes}
               onIgnoreWarning={onIgnoreWarning}
               onDraftChange={onDraftChange}
+              maxCps={maxCps}
+              maxCharsPerLine={maxCharsPerLine}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
               onDragOver={handleDragOver}
@@ -524,7 +530,7 @@ export function SubtitleBlockList({
           >
             {/* 各ブロックをCPS色でストライプ表示：問題あるほど目立つ */}
             {displayBlocks.map((b, i) => {
-              const level = getCpsLevel(b.cps)
+              const level = getCpsLevel(b.cps, maxCps)
               const color = level === 'ok'
                 ? theme.cpsBadgeOk[0]
                 : level === 'warn'
