@@ -13,6 +13,7 @@ interface TimelineBarProps {
   onBlockSelect: (id: number) => void
   onAdjustBoundary: (id1: number, id2: number, newTime: number) => void
   trackHeight?: number
+  maxCps: number
 }
 
 const BOUNDARY_SNAP_PX = 8
@@ -34,6 +35,7 @@ export function TimelineBar({
   onBlockSelect,
   onAdjustBoundary,
   trackHeight = 32,
+  maxCps,
 }: TimelineBarProps) {
   const { theme } = useTheme()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -400,6 +402,7 @@ export function TimelineBar({
                 containerWidth={containerWidth}
                 fillProgress={fillProgress}
                 isActive={isActive}
+                maxCps={maxCps}
                 onClick={(e?: React.MouseEvent) => {
                   e?.stopPropagation()
                   onBlockSelect(block.id)

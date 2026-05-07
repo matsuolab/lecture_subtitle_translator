@@ -1,4 +1,5 @@
 import type { WordTimestamp } from './types'
+import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
 
 export type AlignConf = 'exact' | 'proportional' | 'merged'
 
@@ -39,6 +40,7 @@ export interface EnBlock extends JaBlock {
     distOrigToModified: number
     distJaToModified: number
   }
+  correctionAttempts?: PipelineCorrectionAttemptSummary[]
 }
 
 export interface PipelineThresholds {

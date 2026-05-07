@@ -10,6 +10,7 @@ interface TimelineBlockProps {
   fillProgress: number  // 0-100、非アクティブは常に0
   isActive: boolean
   onClick: (e?: React.MouseEvent) => void
+  maxCps: number
 }
 
 const cpsTrackColors = {
@@ -38,8 +39,9 @@ function TimelineBlockInner({
   fillProgress,
   isActive,
   onClick,
+  maxCps,
 }: TimelineBlockProps) {
-  const cpsLevel = getCpsLevel(block.cps)
+  const cpsLevel = getCpsLevel(block.cps, maxCps)
   const colors = cpsTrackColors[cpsLevel]
 
   const left = visibleDuration > 0

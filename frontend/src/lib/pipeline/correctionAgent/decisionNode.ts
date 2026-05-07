@@ -32,21 +32,32 @@ export class RuleBasedDecisionNode implements DecisionNode {
       return 'borrow_gap'
     }
 
-    // 3. large/extreme → split_block 優先（強圧縮は学術的正確性を損なう）
+    // 3. 長尺で明確な日本語境界がある場合は split_block を優先
+    if (f.has('split_block') && this.shouldAutoSplitLongSegment(ctx, m)) {
+      return 'split_block'
+    }
+
+    // 4. 行長だけの軽度違反はまず短縮・言い換えで自動解決を試す
+    if (ctx.block.violation === 'line_length_only') {
+      if (f.has('compress_rephrase')) return 'compress_rephrase'
+      if (f.has('compress_trim')) return 'compress_trim'
+    }
+
+    // 5. large/extreme → split_block 優先（強圧縮は学術的正確性を損なう）
     if (f.has('split_block') && this.shouldSplitFirst(m)) {
       return 'split_block'
     }
 
-    // 4. tier に応じた圧縮戦略
+    // 6. tier に応じた圧縮戦略
     const compress = this.chooseCompressionStrategy(m, f)
     if (compress) return compress
 
-    // 5. 圧縮が全部失敗/試み済み → split を再検討
+    // 7. 圧縮が全部失敗/試み済み → split を再検討
     if (f.has('split_block') && m.splitViable) {
       return 'split_block'
     }
 
-    // 6. compress_core（manual review 前提）
+    // 8. compress_core（manual review 前提）
     if (f.has('compress_core')) {
       return 'compress_core'
     }
@@ -85,6 +96,12 @@ export class RuleBasedDecisionNode implements DecisionNode {
 
   private shouldSplitFirst(m: DecisionMetrics): boolean {
     return (m.tier === 'large' || m.tier === 'extreme') && m.splitViable
+  }
+
+  private shouldAutoSplitLongSegment(ctx: DecisionContext, m: DecisionMetrics): boolean {
+    if (!m.splitViable) return false
+    if (ctx.block.violation !== 'long_segment' && ctx.block.violation !== 'merged_long') return false
+    return /[。！？、]|について|として|ために|踏まえて|また|そして|ただし|一方で/.test(ctx.block.jaText)
   }
 
   private chooseCompressionStrategy(

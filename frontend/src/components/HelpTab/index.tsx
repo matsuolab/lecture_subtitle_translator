@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 
-type HelpSection = 'guide' | 'shortcuts' | 'bestpractice'
+type HelpSection = 'guide' | 'admin' | 'shortcuts' | 'bestpractice'
 
 function KeyBadge({ label }: { label: string }) {
   const { theme } = useTheme()
@@ -119,6 +119,9 @@ export function HelpTab() {
         <button style={tabStyle(section === 'guide')} onClick={() => setSection('guide')}>
           使い方ガイド
         </button>
+        <button style={tabStyle(section === 'admin')} onClick={() => setSection('admin')}>
+          管理者向け
+        </button>
         <button style={tabStyle(section === 'shortcuts')} onClick={() => setSection('shortcuts')}>
           キー操作
         </button>
@@ -133,31 +136,40 @@ export function HelpTab() {
           <SectionCard title="基本的な作業の流れ">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                このツールは動画と字幕SRTを読み込み、ブロックごとに内容・タイミングを確認・編集して最終SRTを書き出す字幕エディタです。
+                このツールは日本語講義動画から英語字幕を作成し、字幕ブロックごとに内容・タイミング・用語・自動処理結果を確認して承認するための字幕エディタです。
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
                 <strong style={{ color: theme.textPrimary }}>① 動画を読み込む</strong>（左パネルにドロップ、またはボタンから選択）→
-                <strong style={{ color: theme.textPrimary }}> ② SRTを読み込む</strong>（右パネルにドロップ、またはツールバーから） →
-                <strong style={{ color: theme.textPrimary }}> ③ 動画を再生しながら各ブロックを確認・編集</strong> →
+                <strong style={{ color: theme.textPrimary }}> ② レポートタブでパイプラインを実行</strong> →
+                <strong style={{ color: theme.textPrimary }}> ③ 提案・要確認・用語警告を確認</strong> →
                 <strong style={{ color: theme.textPrimary }}> ④ 問題なければ承認</strong> →
-                <strong style={{ color: theme.textPrimary }}> ⑤ SRTとして書き出す</strong>
+                <strong style={{ color: theme.textPrimary }}> ⑤ JSONまたはSRTとして書き出す</strong>
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                プロジェクトはブラウザに自動保存されます。JSON形式でのエクスポート・インポートも可能です。<br />
-                新しい動画を読み込むと字幕はリセットされます（確認ダイアログが表示されます）。
+                プロジェクトJSONには日本語原文、英語字幕、レビュー状態、自動処理ログ、編集履歴が保存されます。SRTは英語字幕の提出・確認用です。
               </p>
             </div>
           </SectionCard>
 
-          <SectionCard title="パイプライン（自動書き起こし・翻訳）【実装作業中】">
+          <SectionCard title="パイプライン（自動書き起こし・翻訳）">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
                 <strong style={{ color: theme.textPrimary }}>レポートタブ</strong>からパイプラインを実行できます。動画を読み込んだ状態で「パイプラインを実行」ボタンを押すと、書き起こし → 日本語補正 → 英語翻訳 → 字幕ブロック生成を自動で行います。
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                パイプラインを使用するには設定タブでバックエンドAPIのURLを設定する必要があります。未設定の場合はデモ用のスタブ結果が表示されます。
+                パイプラインを使用するには、管理者から共有された Service URL、認証トークン、必要に応じて OpenAI API Key を設定タブに入力します。
               </p>
             </div>
+          </SectionCard>
+
+          <SectionCard title="提案・要確認・自動処理ログの見方">
+            <BulletList items={[
+              '提案: 自動処理またはLLMが修正候補を出している状態です。内容を確認し、必要なら編集して承認します。',
+              '要確認: 速度、表示時間、訳抜け、用語など、人間の判断を優先したい状態です。',
+              '自動: 自動処理が適用済みで、大きな問題がなければ承認できます。',
+              '自動処理 n: その字幕で試した分割、短縮、前後結合、表示時間調整などの履歴です。クリックすると、何を試して、採用されたか見送られたかを確認できます。',
+              '処理全体の詳しいログはレポートタブの「処理ログ」から確認できます。管理者やエンジニアへ相談するときは、プロジェクトJSONも一緒に共有してください。',
+            ]} />
           </SectionCard>
 
           <SectionCard title="字幕ブロックと CPS（文字/秒）">
@@ -169,7 +181,7 @@ export function HelpTab() {
                 CPS（Characters Per Second）は読みやすさの指標で、文字数 ÷ 表示秒数で計算されます。3段階で色分けされます：
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                🟢 緑（CPS 15以下）: 読みやすい　🟡 黄（15〜20）: やや速い・要確認　🔴 赤（20超）: 速すぎる・分割推奨
+                既定値では CPS 16.9 を上限、1行80文字を上限として表示します。値は管理者が設定タブで変更できます。
               </p>
             </div>
           </SectionCard>
@@ -197,6 +209,75 @@ export function HelpTab() {
               '字幕ブロックでは用語ハイライトに加えて用語漏れ・タイポ候補を表示します。',
               '誤検出は × で無視、↩ で復帰できます。',
               '用語辞書タブの「全ブロックに適用」ボタンで一括適用も可能です。',
+            ]} />
+          </SectionCard>
+        </div>
+      )}
+
+      {/* 管理者向けセクション */}
+      {section === 'admin' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <SectionCard title="初回設定で確認する項目">
+            <BulletList items={[
+              'Service URL: 管理者が用意したパイプラインAPIのURLを入力します。',
+              'Service Auth Token: APIの認証トークンを入力します。READMEやチャットに公開しないでください。',
+              'OpenAI API Key: ローカル後段でOpenAIを使う運用では必要です。Managed Service側で鍵を管理する運用では不要な場合があります。',
+              'OpenAI Compatible Base URL: OpenAI互換APIを使う場合だけ入力します。通常は空欄です。',
+              '用語辞書: CSV/XLSXを読み込み、確定済み用語をハイライト・用語漏れ・タイポ候補に使います。',
+            ]} />
+          </SectionCard>
+
+          <SectionCard title="現在の推奨モデル・字幕制限">
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                <tbody>
+                  {[
+                    ['translationProvider', 'openai'],
+                    ['translationModel', 'gpt-5.4-mini'],
+                    ['correctionModel', 'gpt-5.4-mini'],
+                    ['compressModel', 'gpt-5.4-mini'],
+                    ['expandModel', 'gpt-5.4-mini'],
+                    ['contextMergeModel', 'gpt-5.5'],
+                    ['subtitleLanguageLabel', 'English'],
+                    ['transcriptLanguageLabel', 'Japanese'],
+                    ['enMaxCharsPerLine', '80'],
+                    ['enMaxCps', '16.9'],
+                    ['pipelineVerboseEnRatio', '1.5'],
+                  ].map(([key, value]) => (
+                    <tr key={key} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
+                      <td style={{ padding: '5px 8px', color: theme.textPrimary, fontWeight: 700, whiteSpace: 'nowrap' }}>{key}</td>
+                      <td style={{ padding: '5px 8px', color: theme.textSecondary }}>{value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="言語プロファイルJSON">
+            <BulletList items={[
+              'Context Merge で source/target の取り違えを防ぐため、曖昧な source/target ではなく subtitle_text と transcript_text の役割でLLMに渡します。',
+              'subtitleLanguageLabel は画面に表示する字幕の言語です。既定では English です。',
+              'transcriptLanguageLabel は参照する書き起こし原文の言語です。既定では Japanese です。',
+              'script は latin / japanese / generic から選びます。英日以外の言語では generic を使うと、文字種による強制判定を避けられます。',
+              'sentenceEndPattern、continuationEndPattern、fragmentStartPattern は、短い断片を前後と統合する候補判定に使います。',
+            ]} />
+          </SectionCard>
+
+          <SectionCard title="プロンプト上書きの注意">
+            <BulletList items={[
+              'compressPromptOverride と expandPromptOverride を入力すると、デフォルトプロンプトを完全に置き換えます。',
+              '上書きプロンプトでは、CPS、行長、行数、講義らしさ、専門用語保持などの制約を自分で明示してください。',
+              '一部だけ追記する欄ではないため、検証中は空欄に戻せるよう変更内容を別途控えてください。',
+            ]} />
+          </SectionCard>
+
+          <SectionCard title="障害調査・PDCAで共有する情報">
+            <BulletList items={[
+              'プロジェクトJSON: 字幕、レビュー状態、自動処理ログ、編集履歴、設定スナップショットを含みます。',
+              'ReportTab の処理ログ: モジュール別ログ、進行イベント、設定スナップショットを確認できます。',
+              'job_id または runId: Managed Service の実行結果を追跡するときに必要です。',
+              '不要な提案、危険な自動修正、良かった自動修正、UIで迷った点をPDCAメモとして残してください。',
             ]} />
           </SectionCard>
         </div>
@@ -244,14 +325,14 @@ export function HelpTab() {
                 netflix: '17 cps',
                 youtube: '〜20 cps（目安）',
                 bbc: '15〜20 cps',
-                note: 'このツールは15/20で警告',
+                note: '既定上限は16.9。設定で変更可',
               },
               {
                 label: '1行最大文字数',
                 netflix: '42文字',
                 youtube: '42文字（推奨）',
                 bbc: '40〜42文字',
-                note: '半角換算',
+                note: 'このプロジェクトの既定上限は80文字',
               },
               {
                 label: '最大行数',
@@ -319,7 +400,7 @@ export function HelpTab() {
           <SectionCard title="Netflix 字幕ガイドライン（英語字幕の主要ルール）">
             <BulletList items={[
               'CPS: 最大17（英語）。このツールでは15超で黄色、20超で赤で警告',
-              '1行最大42文字（半角）。2行まで',
+              '1行最大42文字（半角）。2行まで。現在のプロジェクト既定値は講義字幕向けに80文字',
               '最短表示時間: 5フレーム（24fpsで0.208秒）、推奨は0.833秒（20フレーム）',
               '最長表示時間: 7秒',
               'ブロック間の最小間隔: 2フレーム（24fpsで83ms）',
@@ -352,10 +433,11 @@ export function HelpTab() {
           <SectionCard title="このツールでの品質チェックポイント">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {[
-                ['🔴 CPS > 20', '赤表示。即座に分割を検討する'],
-                ['🟡 CPS 15〜20', '黄表示。読めるが速め。内容によって分割を検討'],
-                ['⚠ 42文字超過', '1行が42文字を超えているブロック。改行または短縮する'],
-                ['🚩 要確認フラグ', '翻訳品質に疑問があるブロックに手動でフラグを立てられる'],
+                ['CPS警告', '既定では16.9を上限として判定。設定タブの値に連動します'],
+                ['行長警告', '既定では1行80文字を上限として判定。設定タブの値に連動します'],
+                ['提案', '自動修正やLLMが修正候補を出しているブロック。内容確認後に承認します'],
+                ['要確認', '人間の判断を優先するブロック。訳抜け、速度、表示時間、用語を確認します'],
+                ['自動処理', 'そのブロックで試した分割・短縮・結合などの履歴を確認できます'],
                 ['用語ハイライト', '用語辞書に登録した語が正しく訳されているか確認する'],
               ].map(([badge, desc], i) => (
                 <div key={i} style={{ display: 'flex', gap: 10, fontSize: 12, alignItems: 'flex-start' }}>

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useDeferredValue, memo } from 'react'
-import { getCpsLevel, formatTime, parseTime, type SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
+import { getCpsLevel, getLineLengthLevel, formatTime, parseTime, type SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
 import { TermHighlight } from './TermHighlight'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
@@ -32,6 +32,8 @@ interface SubtitleBlockProps {
   onDragEnd: () => void
   onDragOver: (id: number) => void
   onDrop: (id: number) => void
+  maxCps: number
+  maxCharsPerLine: number
 }
 
 // ─── 警告バッジ共通コンポーネント ───────────────────────────────────────────
@@ -154,11 +156,90 @@ function cpsBadgeStyle(level: 'ok' | 'warn' | 'error', theme: Theme) {
   return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
 }
 
-function getCharLevel(lineLengths: number[]): 'ok' | 'warn' | 'error' {
-  const max = Math.max(...lineLengths, 0)
-  if (max > 42) return 'error'
-  if (max > 36) return 'warn'
-  return 'ok'
+function reviewBadgeStyle(block: SubtitleBlockType, theme: Theme) {
+  if (block.reviewDisposition === 'manual_review') {
+    return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
+  }
+  if (block.reviewDisposition === 'proposed') {
+    return block.reviewPriority === 'must_review'
+      ? { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
+      : { background: theme.cpsBadgeWarn[0], color: theme.cpsBadgeWarn[1] }
+  }
+  if (block.reviewDisposition === 'auto_applied') {
+    return { background: theme.cpsBadgeOk[0], color: theme.cpsBadgeOk[1] }
+  }
+  return { background: theme.cpsBadgeOk[0], color: theme.cpsBadgeOk[1] }
+}
+
+function reviewBadgePrefix(disposition: SubtitleBlockType['reviewDisposition']): string {
+  if (disposition === 'manual_review') return '要確認'
+  if (disposition === 'proposed') return '提案'
+  if (disposition === 'auto_applied') return '自動'
+  return '確認'
+}
+
+function reviewBadgeText(block: SubtitleBlockType): string {
+  const prefix = reviewBadgePrefix(block.reviewDisposition)
+  const summary = block.reviewSummary ?? ''
+  return summary === prefix ? summary : `${prefix}: ${summary}`
+}
+
+function reviewBadgeTitle(block: SubtitleBlockType): string | undefined {
+  const attempts = block.correctionAttempts ?? []
+  if (attempts.length === 0) return block.reviewAction
+  const latest = attempts.slice(-3).map((attempt) => {
+    const result = attempt.changed ? '適用' : '不採用'
+    return `${attempt.strategy}: ${result} (${attempt.beforeViolation} → ${attempt.afterViolation})`
+  }).join('\n')
+  return `${block.reviewAction ?? ''}\n\n自動修正履歴:\n${latest}`.trim()
+}
+
+type CorrectionAttempt = NonNullable<SubtitleBlockType['correctionAttempts']>[number]
+
+function correctionStrategyLabel(strategy: string): string {
+  if (strategy === 'split_block') return '分割'
+  if (strategy === 'merge_window') return '前後との結合'
+  if (strategy === 'compress_core') return '要点を残した短縮'
+  if (strategy === 'compress_rephrase') return '言い換えによる短縮'
+  if (strategy === 'compress_trim') return '余分な表現の削除'
+  if (strategy === 'borrow_gap') return '表示時間の調整'
+  return strategy
+}
+
+function correctionResultLabel(attempt: CorrectionAttempt): string {
+  if (attempt.changed) return '適用されました'
+  if (attempt.rationale?.includes('LLM chose keep') || attempt.rationale?.includes('no merge')) {
+    return '不要と判断されました'
+  }
+  return '見送られました'
+}
+
+function correctionAttemptSummary(attempt: CorrectionAttempt): string {
+  const delta = attempt.beforeChars - attempt.afterChars
+  const deltaText = delta > 0
+    ? `英文を${delta}文字短くしました`
+    : delta < 0
+      ? `英文を${Math.abs(delta)}文字広げました`
+      : '文字数は変わっていません'
+  return `${correctionStrategyLabel(attempt.strategy)}: ${correctionResultLabel(attempt)}。${deltaText}。`
+}
+
+function correctionAttemptReason(attempt: CorrectionAttempt): string | undefined {
+  if (!attempt.rationale) return undefined
+  if (attempt.rationale.startsWith('context merge rejected large inter-block gap')) {
+    return '前後の字幕との間隔が大きいため、結合しませんでした。'
+  }
+  if (attempt.rationale.startsWith('context merge rejected long merged duration')) {
+    return '結合後の表示時間が長すぎるため、結合しませんでした。'
+  }
+  if (attempt.rationale.includes('returned fewer than 2 usable units')) {
+    return '自然に分けられる候補が足りなかったため、分割しませんでした。'
+  }
+  if (attempt.rationale.includes('incomplete') || attempt.rationale.includes('未完結') || attempt.rationale.includes('断片')) {
+    return '独立した字幕として成立しにくい候補だったため、自動分割を避けました。'
+  }
+  if (attempt.rationale.length > 120) return `${attempt.rationale.slice(0, 120)}...`
+  return attempt.rationale
 }
 
 const splitBtnStyle: React.CSSProperties = {
@@ -198,6 +279,8 @@ function SubtitleBlockInner({
   onDragEnd,
   onDragOver,
   onDrop,
+  maxCps,
+  maxCharsPerLine,
 }: SubtitleBlockProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -257,6 +340,7 @@ function SubtitleBlockInner({
   }, [matchedTermsEn, typoTerms, typoCandidates])
   const [showTypoList, setShowTypoList] = useState(false)
   const [showMissingList, setShowMissingList] = useState(false)
+  const [showAutoLog, setShowAutoLog] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState(block.source)
   // 編集中のタイポ候補（editText に対してライブ計算）
@@ -277,7 +361,7 @@ function SubtitleBlockInner({
   const liveCps = isEditing
     ? Math.round((editText.length / Math.max(0.01, block.endTime - block.startTime)) * 10) / 10
     : block.cps
-  const cpsLevel = getCpsLevel(liveCps)
+  const cpsLevel = getCpsLevel(liveCps, maxCps)
 
   // 時間編集開始時にフォーカス
   useEffect(() => {
@@ -381,7 +465,13 @@ function SubtitleBlockInner({
 
   const sourceLines = block.source.split('\n')
   const liveLines = isEditing ? editText.split('\n') : sourceLines
-  const charLevel = getCharLevel(liveLines.map(l => l.length))
+  const charLevel = getLineLengthLevel(liveLines.map(l => l.length), maxCharsPerLine)
+  const lineLengthColor = (length: number) => {
+    const level = getLineLengthLevel([length], maxCharsPerLine)
+    if (level === 'error') return theme.cpsBadgeError[0]
+    if (level === 'warn') return theme.cpsBadgeWarn[0]
+    return theme.textMuted
+  }
   // 再生位置がこのブロック内にあるときだけ「再生位置で分割」を有効化
   const canSplitAtPlayhead = !isApproved && isCurrentlyPlaying
 
@@ -489,9 +579,9 @@ function SubtitleBlockInner({
               <span key={i} style={{
                 fontSize: 10,
                 fontFamily: 'monospace',
-                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+                color: lineLengthColor(line.length),
               }}>
-                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+                {i + 1}行: {line.length}字{line.length > maxCharsPerLine ? ' ⚠' : ''}
               </span>
             ))}
           </div>
@@ -570,9 +660,9 @@ function SubtitleBlockInner({
               <span key={i} style={{
                 fontSize: 10,
                 fontFamily: 'monospace',
-                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+                color: lineLengthColor(line.length),
               }}>
-                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+                {i + 1}行: {line.length}字{line.length > maxCharsPerLine ? ' ⚠' : ''}
               </span>
             ))}
           </div>
@@ -825,6 +915,87 @@ function SubtitleBlockInner({
               </>
             )}
           </WarningBadge>
+        )}
+        {block.reviewSummary && block.reviewDisposition !== 'auto_pass' && (
+          <span
+            title={reviewBadgeTitle(block)}
+            style={{
+              ...reviewBadgeStyle(block, theme),
+              fontSize: 10,
+              padding: '2px 7px',
+              borderRadius: 999,
+              fontWeight: 700,
+              opacity: block.reviewDisposition === 'auto_applied' ? 0.82 : 1,
+            }}
+          >
+            {reviewBadgeText(block)}
+          </span>
+        )}
+        {(block.correctionAttempts?.length ?? 0) > 0 && (
+          <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+            <button
+              onClick={e => { e.stopPropagation(); setShowAutoLog(v => !v) }}
+              title="この字幕に対する自動処理ログ"
+              style={{
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textSecondary,
+                borderRadius: 999,
+                padding: '2px 7px',
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              自動処理 {block.correctionAttempts?.length ?? 0}
+            </button>
+            {showAutoLog && (
+              <div
+                onClick={e => e.stopPropagation()}
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  zIndex: 22,
+                  marginTop: 4,
+                  background: theme.cardBg,
+                  border: `1px solid ${theme.panelBorder}`,
+                  borderRadius: 6,
+                  padding: '8px 10px',
+                  minWidth: 280,
+                  maxWidth: 380,
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                  display: 'grid',
+                  gap: 7,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 700, color: theme.textPrimary }}>
+                  この字幕で試した自動処理
+                </div>
+                {block.correctionAttempts!.slice(-6).map((attempt, index) => (
+                  <div
+                    key={`${attempt.strategy}-${index}`}
+                    style={{
+                      borderTop: index === 0 ? 'none' : `1px solid ${theme.panelBorder}`,
+                      paddingTop: index === 0 ? 0 : 6,
+                      fontSize: 11,
+                      color: theme.textSecondary,
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    <div style={{ color: attempt.changed ? theme.textPrimary : theme.textMuted, fontWeight: 600 }}>
+                      {correctionAttemptSummary(attempt)}
+                    </div>
+                    {correctionAttemptReason(attempt) && (
+                      <div style={{ marginTop: 2, color: theme.textMuted }}>
+                        理由: {correctionAttemptReason(attempt)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </span>
         )}
       </div>
 

@@ -26,13 +26,57 @@ export interface PipelineRunMetrics {
 
 export type PipelineReviewPriority = 'must_review' | 'should_review' | 'auto_pass'
 
+export type PipelineReviewDisposition =
+  | 'auto_pass'
+  | 'auto_applied'
+  | 'proposed'
+  | 'manual_review'
+
+export type PipelineReviewCategory =
+  | 'timing'
+  | 'readability'
+  | 'line_length'
+  | 'content'
+  | 'terminology'
+  | 'metadata'
+
+export type PipelineProposalKind =
+  | 'replace_text'
+  | 'split_block'
+  | 'merge_window'
+  | 'retime'
+  | 'verify_terms'
+
+export interface PipelineReviewProposal {
+  kind: PipelineProposalKind
+  confidence: number
+  rationale: string
+}
+
+export interface PipelineCorrectionAttemptSummary {
+  strategy: string
+  changed: boolean
+  beforeChars: number
+  afterChars: number
+  beforeViolation: string
+  afterViolation: string
+  rationale?: string
+}
+
 export interface PipelineReviewItem {
   id: string
   nodeId: string
   reason: string
   priority: PipelineReviewPriority
+  disposition?: PipelineReviewDisposition
   score: number
   blockId?: number
+  category?: PipelineReviewCategory
+  title?: string
+  action?: string
+  details?: string[]
+  proposal?: PipelineReviewProposal
+  attempts?: PipelineCorrectionAttemptSummary[]
 }
 
 export interface PipelineNodeTrace {

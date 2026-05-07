@@ -294,6 +294,36 @@ export function SettingsTab({
             hint="空欄 = 翻訳モデルと同じ"
             onChange={(value) => onAdminSettingsChange({ expandModel: value })}
           />
+          <ComboField
+            theme={theme}
+            label="文脈統合モデル (Context Merge)"
+            value={adminSettings.contextMergeModel}
+            placeholder="gpt-4.1"
+            listId="available-models-list"
+            hint="文脈依存の短い断片を前後どちらに統合するか判断する高精度モデル"
+            onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
+          />
+          <Field
+            theme={theme}
+            label="字幕言語ラベル"
+            value={adminSettings.subtitleLanguageLabel}
+            placeholder="English"
+            onChange={(value) => onAdminSettingsChange({ subtitleLanguageLabel: value })}
+          />
+          <Field
+            theme={theme}
+            label="書き起こし言語ラベル"
+            value={adminSettings.transcriptLanguageLabel}
+            placeholder="Japanese"
+            onChange={(value) => onAdminSettingsChange({ transcriptLanguageLabel: value })}
+          />
+          <TextareaField
+            theme={theme}
+            label="言語プロファイルJSON"
+            value={adminSettings.languageProfileConfigJson}
+            placeholder='{"subtitle":{"label":"English","script":"latin"},"transcript":{"label":"Japanese","script":"japanese"}}'
+            onChange={(value) => onAdminSettingsChange({ languageProfileConfigJson: value })}
+          />
           <button
             onClick={handleRefreshModels}
             disabled={modelRefreshState === 'loading'}

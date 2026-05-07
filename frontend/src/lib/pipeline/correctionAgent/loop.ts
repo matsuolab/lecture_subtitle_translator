@@ -1,5 +1,6 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../blockTypes'
+import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
 import type { AgentThresholds, CorrectionAttempt, DecisionNode } from './types'
 import { buildContext } from './contextBuilder'
 import { getFeasibleStrategies } from './feasibility'
@@ -32,6 +33,25 @@ export async function correctionEngine(
     if (!attemptHistories.has(blockId)) attemptHistories.set(blockId, [])
     return attemptHistories.get(blockId)!
   }
+
+  const summarizeAttempt = (attempt: CorrectionAttempt): PipelineCorrectionAttemptSummary => ({
+    strategy: attempt.strategy,
+    changed: attempt.changed,
+    beforeChars: attempt.beforeChars,
+    afterChars: attempt.afterChars,
+    beforeViolation: attempt.beforeViolation,
+    afterViolation: attempt.afterViolation,
+    rationale: attempt.rationale,
+  })
+
+  const attachAttemptHistories = (timelineWithResults: EnBlock[]): EnBlock[] =>
+    timelineWithResults.map((block) => {
+      const ownHistory = getHistory(String(block.id))
+      const sourceId = (block as { splitFrom?: number }).splitFrom
+      const sourceHistory = sourceId !== undefined ? getHistory(String(sourceId)) : []
+      const attempts = [...sourceHistory, ...ownHistory].map(summarizeAttempt)
+      return attempts.length > 0 ? { ...block, correctionAttempts: attempts } : block
+    })
 
   while (queue.size > 0) {
     const blockIdStr = queue.values().next().value as string
@@ -95,6 +115,7 @@ export async function correctionEngine(
       afterChars: patch.replaceBlocks[0]?.enChars ?? beforeChars,
       beforeViolation,
       afterViolation: patch.replaceBlocks[0]?.violation ?? beforeViolation,
+      rationale: patch.warning,
     }
     history.push(attempt)
 
@@ -112,5 +133,5 @@ export async function correctionEngine(
     }
   }
 
-  return currentTimeline
+  return attachAttemptHistories(currentTimeline)
 }

@@ -7,9 +7,14 @@ export function computeMetrics(
   const duration = Math.max(0.001, Number(block.end) - Number(block.start))
   const renderedText = block.enText ?? block.enRaw ?? ''
   const lines = renderedText.split('\n').filter((line) => line.length > 0)
-  const enChars = block.enChars || renderedText.replace(/\n/g, '').length
-  const maxLineLen = block.maxLineLen || Math.max(0, ...lines.map((line) => line.length))
-  const cps = block.cps || enChars / duration
+  const hasRenderedText = renderedText.length > 0
+  const enChars = hasRenderedText
+    ? renderedText.replace(/\n/g, '').length
+    : block.enChars ?? 0
+  const maxLineLen = hasRenderedText
+    ? Math.max(0, ...lines.map((line) => line.length))
+    : block.maxLineLen ?? 0
+  const cps = enChars / duration
   return {
     duration,
     jaChars: block.jaChars,
