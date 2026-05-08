@@ -16,6 +16,11 @@ export interface LocaleStrings {
   saveProjectTitle: string
   exportSrtTitle: string
   restored: string
+  videoLoadChoiceTitle: string
+  videoLoadChoiceDesc: (name: string, count: number) => string
+  videoLoadReset: string
+  videoLoadKeep: string
+  videoLoadCancel: string
   approvedCount: (approved: number, total: number) => string
   reSplitAlert: (id: number) => string
   reTranslateAlert: (id: number) => string
@@ -96,11 +101,8 @@ export interface LocaleStrings {
   settingsTranslatorProvider: string
   settingsTranslatorProviderOpenAi: string
   settingsTranslatorProviderGemini: string
-  settingsTranslatorProviderDeepL: string
-  settingsTranslatorProviderLocal: string
   settingsOpenAiApiKey: string
   settingsGeminiApiKey: string
-  settingsDeepLApiKey: string
   settingsOpenAiBaseUrl: string
   settingsOpenAiBaseUrlPlaceholder: string
   settingsStorageNotice: string
@@ -117,4 +119,22 @@ export interface LocaleStrings {
   settingsMergeMinJaChars: string
   settingsQualityCorrectionThreshold: string
   settingsQualityTranslationThreshold: string
+  settingsPipelineThresholdsTitle: string
+  settingsPipelineShortDurationSec: string
+  settingsPipelineLongDurationSec: string
+  settingsPipelineMergedLongDurationSec: string
+  settingsPipelineVerboseEnRatio: string
+  settingsPipelineOverCompressedRatio: string
+  settingsPipelineOverCompressedJaChars: string
+  settingsPipelineSlowCps: string
+  settingsPipelineMaxExpandPerBlock: string
+  settingsPipelineMaxCompressPerBlock: string
+  settingsPipelineMaxPhase2Retries: string
+  settingsCompressModel: string
+  settingsExpandModel: string
+  settingsCompressPromptOverride: string
+  settingsExpandPromptOverride: string
+  settingsRefreshModels: string
+  settingsRefreshModelsLoading: string
+  settingsRefreshModelsError: string
 }

@@ -4,7 +4,7 @@ from typing import Any
 
 from .contracts import NodeExecutionRecord, RunState
 
-_SECRET_KEYS = {"openai_api_key", "gemini_api_key", "deepl_api_key", "anthropic_api_key"}
+_SECRET_KEYS = {"openai_api_key", "gemini_api_key", "anthropic_api_key"}
 
 
 def sanitize_state_data(data: dict[str, Any]) -> dict[str, Any]:

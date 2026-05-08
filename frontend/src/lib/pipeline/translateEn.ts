@@ -3,6 +3,7 @@ import type { EnBlock, JaBlock } from './blockTypes'
 import { computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
 import { pickTranslateSystemPrompt, resolveTranslateModelId } from './prompts'
+import { requireAiConnection, resolveChatModelForProvider } from './aiProvider'
 
 const MAX_SEGMENTS_PER_REQUEST = 40
 const JA_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/g
@@ -25,21 +26,12 @@ function resolveApiConfig(settings: AdminSettings): {
   model: string
   systemPrompt: string
 } {
-  const provider = settings.translationProvider === 'local' ? 'openai' : settings.translationProvider
-  if (provider === 'gemini') throw new Error('Gemini translation provider is not implemented yet')
-  if (provider === 'deepl') throw new Error('DeepL translation provider is not implemented yet')
-
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-  if (provider === 'openai' && !apiKey) {
-    throw new Error('OpenAI API key is required before running the pipeline')
-  }
-
-  const model = resolveTranslateModelId(settings.translationModel)
+  const connection = requireAiConnection(settings)
+  const model = resolveChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel))
   return {
-    apiKey,
-    baseUrl,
-    providerLabel: 'OpenAI',
+    apiKey: connection.apiKey,
+    baseUrl: connection.baseUrl,
+    providerLabel: connection.providerLabel,
     model,
     systemPrompt: pickTranslateSystemPrompt(model),
   }

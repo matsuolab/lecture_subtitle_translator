@@ -43,18 +43,10 @@ _PROVIDER_MAP = {
     "gemini": _RuntimeTranslationConfig(
         provider="gemini-api",
         provider_label="Gemini",
-        model="gemini-2.5-flash",
+        model="gemini-3-flash-preview",
         api_key_field="gemini_api_key",
         env_key="GEMINI_API_KEY",
-        supported=False,
-    ),
-    "deepl": _RuntimeTranslationConfig(
-        provider="deepl-api",
-        provider_label="DeepL",
-        model="deepl-text",
-        api_key_field="deepl_api_key",
-        env_key="DEEPL_API_KEY",
-        supported=False,
+        default_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
     ),
     "local": _RuntimeTranslationConfig(
         provider="openai-compatible-local",

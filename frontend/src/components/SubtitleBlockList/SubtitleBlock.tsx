@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useDeferredValue, memo } from 'react'
-import { getCpsLevel, formatTime, parseTime, type SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
+import { getCpsLevel, getLineLengthLevel, formatTime, parseTime, type SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
 import { TermHighlight } from './TermHighlight'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
@@ -11,8 +11,6 @@ interface SubtitleBlockProps {
   block: SubtitleBlockType
   isActive: boolean
   isCurrentlyPlaying: boolean
-  isDragging: boolean
-  isDragOver: boolean
   playProgress: number // 0-100
   onSelect: (id: number) => void
   onApprove: (id: number) => void
@@ -28,10 +26,12 @@ interface SubtitleBlockProps {
   onEqualSplit: (id: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
-  onDragStart: (id: number) => void
-  onDragEnd: () => void
-  onDragOver: (id: number) => void
-  onDrop: (id: number) => void
+  canMergePrevious: boolean
+  canMergeNext: boolean
+  onMergeWithPrevious: (id: number) => void
+  onMergeWithNext: (id: number) => void
+  maxCps: number
+  maxCharsPerLine: number
 }
 
 // ─── 警告バッジ共通コンポーネント ───────────────────────────────────────────
@@ -154,11 +154,154 @@ function cpsBadgeStyle(level: 'ok' | 'warn' | 'error', theme: Theme) {
   return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
 }
 
-function getCharLevel(lineLengths: number[]): 'ok' | 'warn' | 'error' {
-  const max = Math.max(...lineLengths, 0)
-  if (max > 42) return 'error'
-  if (max > 36) return 'warn'
-  return 'ok'
+function reviewBadgeStyle(block: SubtitleBlockType, theme: Theme) {
+  if (block.reviewDisposition === 'manual_review') {
+    return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
+  }
+  if (block.reviewDisposition === 'proposed') {
+    return block.reviewPriority === 'must_review'
+      ? { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
+      : { background: theme.cpsBadgeWarn[0], color: theme.cpsBadgeWarn[1] }
+  }
+  if (block.reviewDisposition === 'auto_applied') {
+    return { background: theme.cpsBadgeOk[0], color: theme.cpsBadgeOk[1] }
+  }
+  return { background: theme.cpsBadgeOk[0], color: theme.cpsBadgeOk[1] }
+}
+
+function reviewBadgePrefix(disposition: SubtitleBlockType['reviewDisposition']): string {
+  if (disposition === 'manual_review') return '要確認'
+  if (disposition === 'proposed') return '提案'
+  if (disposition === 'auto_applied') return '自動'
+  return '確認'
+}
+
+function reviewBadgeText(block: SubtitleBlockType): string {
+  const prefix = reviewBadgePrefix(block.reviewDisposition)
+  const summary = block.reviewSummary ?? ''
+  return summary === prefix ? summary : `${prefix}: ${summary}`
+}
+
+function reviewBadgeTitle(block: SubtitleBlockType): string | undefined {
+  const attempts = block.correctionAttempts ?? []
+  if (attempts.length === 0) return block.reviewAction
+  const latest = attempts.slice(-3).map((attempt) => {
+    const result = attempt.changed ? '適用' : '不採用'
+    return `${attempt.strategy}: ${result} (${attempt.beforeViolation} → ${attempt.afterViolation})`
+  }).join('\n')
+  return `${block.reviewAction ?? ''}\n\n自動修正履歴:\n${latest}`.trim()
+}
+
+type CorrectionAttempt = NonNullable<SubtitleBlockType['correctionAttempts']>[number]
+
+function correctionStrategyLabel(strategy: string): string {
+  if (strategy === 'split_block') return '分割'
+  if (strategy === 'merge_window') return '前後との結合'
+  if (strategy === 'compress_core') return '要点を残した短縮'
+  if (strategy === 'compress_rephrase') return '言い換えによる短縮'
+  if (strategy === 'compress_trim') return '余分な表現の削除'
+  if (strategy === 'borrow_gap') return '表示時間の調整'
+  return strategy
+}
+
+function correctionResultLabel(attempt: CorrectionAttempt): string {
+  if (attempt.changed) return '適用されました'
+  if (attempt.rationale?.includes('LLM chose keep') || attempt.rationale?.includes('no merge')) {
+    return '不要と判断されました'
+  }
+  return '見送られました'
+}
+
+function correctionAttemptSummary(attempt: CorrectionAttempt): string {
+  const delta = attempt.beforeChars - attempt.afterChars
+  const deltaText = delta > 0
+    ? `英文を${delta}文字短くしました`
+    : delta < 0
+      ? `英文を${Math.abs(delta)}文字広げました`
+      : '文字数は変わっていません'
+  return `${correctionStrategyLabel(attempt.strategy)}: ${correctionResultLabel(attempt)}。${deltaText}。`
+}
+
+function correctionAttemptReason(attempt: CorrectionAttempt): string | undefined {
+  if (!attempt.rationale) return undefined
+  if (attempt.rationale.startsWith('context merge rejected large inter-block gap')) {
+    return '前後の字幕との間隔が大きいため、結合しませんでした。'
+  }
+  if (attempt.rationale.startsWith('context merge rejected long merged duration')) {
+    return '結合後の表示時間が長すぎるため、結合しませんでした。'
+  }
+  if (attempt.rationale.includes('returned fewer than 2 usable units')) {
+    return '自然に分けられる候補が足りなかったため、分割しませんでした。'
+  }
+  if (attempt.rationale.includes('incomplete') || attempt.rationale.includes('未完結') || attempt.rationale.includes('断片')) {
+    return '独立した字幕として成立しにくい候補だったため、自動分割を避けました。'
+  }
+  if (attempt.rationale.length > 120) return `${attempt.rationale.slice(0, 120)}...`
+  return attempt.rationale
+}
+
+function hasAttemptTextFlow(attempt: CorrectionAttempt): boolean {
+  return Boolean(
+    attempt.beforeTranscriptText ||
+    attempt.beforeSubtitleText ||
+    attempt.afterTranscriptText ||
+    attempt.afterSubtitleText,
+  )
+}
+
+function AttemptTextFlow({ attempt, theme }: { attempt: CorrectionAttempt; theme: Theme }) {
+  if (!hasAttemptTextFlow(attempt)) return null
+  const rowStyle: React.CSSProperties = {
+    display: 'grid',
+    gridTemplateColumns: '52px 1fr',
+    gap: 6,
+    alignItems: 'start',
+    minWidth: 0,
+  }
+  const labelStyle: React.CSSProperties = {
+    color: theme.textMuted,
+    fontWeight: 700,
+    whiteSpace: 'nowrap',
+  }
+  const textStyle: React.CSSProperties = {
+    color: theme.textSecondary,
+    overflowWrap: 'anywhere',
+    whiteSpace: 'pre-wrap',
+  }
+  return (
+    <div style={{
+      marginTop: 5,
+      display: 'grid',
+      gap: 4,
+      padding: '6px 8px',
+      borderRadius: 6,
+      background: theme.cardBg,
+      border: `1px solid ${theme.panelBorder}`,
+    }}>
+      {(attempt.beforeTranscriptText || attempt.afterTranscriptText) && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>書き起こし</span>
+          <span style={textStyle}>
+            {attempt.beforeTranscriptText || '（なし）'}
+            {attempt.afterTranscriptText && attempt.afterTranscriptText !== attempt.beforeTranscriptText
+              ? `\n→ ${attempt.afterTranscriptText}`
+              : ''}
+          </span>
+        </div>
+      )}
+      {(attempt.beforeSubtitleText || attempt.afterSubtitleText) && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>字幕</span>
+          <span style={textStyle}>
+            {attempt.beforeSubtitleText || '（なし）'}
+            {attempt.afterSubtitleText && attempt.afterSubtitleText !== attempt.beforeSubtitleText
+              ? `\n→ ${attempt.afterSubtitleText}`
+              : ''}
+          </span>
+        </div>
+      )}
+    </div>
+  )
 }
 
 const splitBtnStyle: React.CSSProperties = {
@@ -177,8 +320,6 @@ function SubtitleBlockInner({
   block,
   isActive,
   isCurrentlyPlaying,
-  isDragging,
-  isDragOver,
   playProgress,
   onSelect,
   onApprove,
@@ -194,10 +335,12 @@ function SubtitleBlockInner({
   onEqualSplit,
   onIgnoreWarning,
   onDraftChange,
-  onDragStart,
-  onDragEnd,
-  onDragOver,
-  onDrop,
+  canMergePrevious,
+  canMergeNext,
+  onMergeWithPrevious,
+  onMergeWithNext,
+  maxCps,
+  maxCharsPerLine,
 }: SubtitleBlockProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -257,6 +400,8 @@ function SubtitleBlockInner({
   }, [matchedTermsEn, typoTerms, typoCandidates])
   const [showTypoList, setShowTypoList] = useState(false)
   const [showMissingList, setShowMissingList] = useState(false)
+  const [showAutoLog, setShowAutoLog] = useState(false)
+  const [showMergeMenu, setShowMergeMenu] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState(block.source)
   // 編集中のタイポ候補（editText に対してライブ計算）
@@ -277,7 +422,7 @@ function SubtitleBlockInner({
   const liveCps = isEditing
     ? Math.round((editText.length / Math.max(0.01, block.endTime - block.startTime)) * 10) / 10
     : block.cps
-  const cpsLevel = getCpsLevel(liveCps)
+  const cpsLevel = getCpsLevel(liveCps, maxCps)
 
   // 時間編集開始時にフォーカス
   useEffect(() => {
@@ -381,16 +526,20 @@ function SubtitleBlockInner({
 
   const sourceLines = block.source.split('\n')
   const liveLines = isEditing ? editText.split('\n') : sourceLines
-  const charLevel = getCharLevel(liveLines.map(l => l.length))
+  const charLevel = getLineLengthLevel(liveLines.map(l => l.length), maxCharsPerLine)
+  const lineLengthColor = (length: number) => {
+    const level = getLineLengthLevel([length], maxCharsPerLine)
+    if (level === 'error') return theme.cpsBadgeError[0]
+    if (level === 'warn') return theme.cpsBadgeWarn[0]
+    return theme.textMuted
+  }
   // 再生位置がこのブロック内にあるときだけ「再生位置で分割」を有効化
   const canSplitAtPlayhead = !isApproved && isCurrentlyPlaying
 
   const blockStyle: React.CSSProperties = {
     position: 'relative',
     border: '1px solid',
-    borderColor: isDragOver
-      ? theme.cardBorderDragOver
-      : isActive
+    borderColor: isActive
         ? theme.cardBorderActive
         : isApproved
           ? theme.cardBorderApproved
@@ -399,9 +548,7 @@ function SubtitleBlockInner({
             : theme.cardBorder,
     borderRadius: 8,
     padding: 10,
-    background: isDragOver
-      ? theme.cardBgDragOver
-      : isActive
+    background: isActive
         ? theme.cardBgActive
         : isApproved
           ? theme.cardBgApproved
@@ -409,10 +556,8 @@ function SubtitleBlockInner({
             ? theme.cardBgFlagged
             : theme.cardBg,
     cursor: isApproved ? 'default' : 'pointer',
-    opacity: isDragging ? 0.4 : 1,
-    boxShadow: isDragOver
-      ? theme.cardShadowDragOver
-      : isActive
+    opacity: 1,
+    boxShadow: isActive
         ? theme.cardShadowActive
         : undefined,
     transition: 'border-color 0.15s, box-shadow 0.15s',
@@ -422,11 +567,6 @@ function SubtitleBlockInner({
     <div
       style={blockStyle}
       onClick={() => onSelect(block.id)}
-      draggable={!isApproved}
-      onDragStart={e => { if (isApproved) { e.preventDefault(); return }; e.dataTransfer.effectAllowed = 'move'; onDragStart(block.id) }}
-      onDragEnd={onDragEnd}
-      onDragOver={e => { e.preventDefault(); if (!isApproved) { e.dataTransfer.dropEffect = 'move'; onDragOver(block.id) } else { e.dataTransfer.dropEffect = 'none' } }}
-      onDrop={e => { e.preventDefault(); if (!isApproved) onDrop(block.id) }}
     >
       {/* 再生進行バー（背景） */}
       <div style={{
@@ -441,6 +581,101 @@ function SubtitleBlockInner({
       }} />
       {/* コンテンツ（背景バーの上） */}
       <div style={{ position: 'relative', zIndex: 1 }}>
+      {!isApproved && (
+        <div style={{ position: 'absolute', top: -3, right: -3, zIndex: 3 }}>
+          <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation()
+              setShowMergeMenu(v => !v)
+            }}
+            onMouseDown={e => e.stopPropagation()}
+            title="前後の字幕ブロックと結合"
+            aria-label="前後の字幕ブロックと結合"
+            aria-expanded={showMergeMenu}
+            style={{
+              width: 22,
+              height: 22,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 5,
+              border: `1px solid ${theme.panelBorder}`,
+              background: showMergeMenu ? theme.cardBg : theme.panelBg,
+              color: showMergeMenu ? theme.textPrimary : theme.textMuted,
+              cursor: 'pointer',
+              fontSize: 14,
+              lineHeight: 1,
+              userSelect: 'none',
+            }}
+          >
+            ↕
+          </button>
+          {showMergeMenu && (
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                position: 'absolute',
+                top: 26,
+                right: 0,
+                minWidth: 124,
+                display: 'grid',
+                gap: 4,
+                padding: 6,
+                borderRadius: 6,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.cardBg,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+              }}
+            >
+              <button
+                type="button"
+                disabled={!canMergePrevious}
+                onClick={e => {
+                  e.stopPropagation()
+                  if (!canMergePrevious) return
+                  setShowMergeMenu(false)
+                  onMergeWithPrevious(block.id)
+                }}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: canMergePrevious ? theme.btnText : theme.textMuted,
+                  borderRadius: 5,
+                  padding: '5px 8px',
+                  fontSize: 12,
+                  cursor: canMergePrevious ? 'pointer' : 'not-allowed',
+                  textAlign: 'left',
+                }}
+              >
+                前と結合
+              </button>
+              <button
+                type="button"
+                disabled={!canMergeNext}
+                onClick={e => {
+                  e.stopPropagation()
+                  if (!canMergeNext) return
+                  setShowMergeMenu(false)
+                  onMergeWithNext(block.id)
+                }}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: canMergeNext ? theme.btnText : theme.textMuted,
+                  borderRadius: 5,
+                  padding: '5px 8px',
+                  fontSize: 12,
+                  cursor: canMergeNext ? 'pointer' : 'not-allowed',
+                  textAlign: 'left',
+                }}
+              >
+                次と結合
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {/* 訳文テキスト（編集可能） */}
       {isEditingTarget ? (
         <>
@@ -489,9 +724,9 @@ function SubtitleBlockInner({
               <span key={i} style={{
                 fontSize: 10,
                 fontFamily: 'monospace',
-                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+                color: lineLengthColor(line.length),
               }}>
-                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+                {i + 1}行: {line.length}字{line.length > maxCharsPerLine ? ' ⚠' : ''}
               </span>
             ))}
           </div>
@@ -570,9 +805,9 @@ function SubtitleBlockInner({
               <span key={i} style={{
                 fontSize: 10,
                 fontFamily: 'monospace',
-                color: line.length > 42 ? '#ef4444' : line.length > 36 ? '#f59e0b' : theme.textMuted,
+                color: lineLengthColor(line.length),
               }}>
-                {i + 1}行: {line.length}字{line.length > 42 ? ' ⚠' : ''}
+                {i + 1}行: {line.length}字{line.length > maxCharsPerLine ? ' ⚠' : ''}
               </span>
             ))}
           </div>
@@ -826,7 +1061,92 @@ function SubtitleBlockInner({
             )}
           </WarningBadge>
         )}
+        {block.reviewSummary && block.reviewDisposition !== 'auto_pass' && (
+          <span
+            title={reviewBadgeTitle(block)}
+            style={{
+              ...reviewBadgeStyle(block, theme),
+              fontSize: 10,
+              padding: '2px 7px',
+              borderRadius: 999,
+              fontWeight: 700,
+              opacity: block.reviewDisposition === 'auto_applied' ? 0.82 : 1,
+            }}
+          >
+            {reviewBadgeText(block)}
+          </span>
+        )}
+        {(block.correctionAttempts?.length ?? 0) > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center' }}>
+            <button
+              onClick={e => { e.stopPropagation(); setShowAutoLog(v => !v) }}
+              title="この字幕に対する自動処理ログ"
+              aria-expanded={showAutoLog}
+              style={{
+                border: `1px solid ${theme.panelBorder}`,
+                background: showAutoLog ? theme.cardBg : theme.panelBg,
+                color: showAutoLog ? theme.textPrimary : theme.textSecondary,
+                borderRadius: 999,
+                padding: '2px 7px',
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              自動処理 {block.correctionAttempts?.length ?? 0}
+            </button>
+          </span>
+        )}
       </div>
+
+      {showAutoLog && (block.correctionAttempts?.length ?? 0) > 0 && (
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            marginTop: 8,
+            background: theme.panelBg,
+            border: `1px solid ${theme.panelBorder}`,
+            borderRadius: 6,
+            padding: '8px 10px',
+            display: 'grid',
+            gap: 7,
+            width: '100%',
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 700, color: theme.textPrimary }}>
+            この字幕で試した自動処理
+          </div>
+          {block.correctionAttempts!.slice(-6).map((attempt, index) => (
+            <div
+              key={`${attempt.strategy}-${index}`}
+              style={{
+                borderTop: index === 0 ? 'none' : `1px solid ${theme.panelBorder}`,
+                paddingTop: index === 0 ? 0 : 6,
+                fontSize: 11,
+                color: theme.textSecondary,
+                lineHeight: 1.45,
+                minWidth: 0,
+              }}
+            >
+              <div style={{
+                color: attempt.changed ? theme.textPrimary : theme.textMuted,
+                fontWeight: 600,
+                overflowWrap: 'anywhere',
+              }}>
+                {correctionAttemptSummary(attempt)}
+              </div>
+              {correctionAttemptReason(attempt) && (
+                <div style={{ marginTop: 2, color: theme.textMuted, overflowWrap: 'anywhere' }}>
+                  理由: {correctionAttemptReason(attempt)}
+                </div>
+              )}
+              <AttemptTextFlow attempt={attempt} theme={theme} />
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* アクションボタン */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
