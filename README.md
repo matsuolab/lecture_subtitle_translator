@@ -4,7 +4,7 @@
 
 このリポジトリでは、Desktop アプリ（Tauri + React）と、書き起こし・翻訳・字幕整形のパイプラインを開発しています。
 
-> この README の操作手順・設定説明は `subtitle-editor v0.4.3` 準拠です。
+> この README の操作手順・設定説明は `subtitle-editor v0.4.4` 準拠です。
 
 ---
 

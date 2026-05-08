@@ -109,7 +109,7 @@ export function HelpTab() {
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
       <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 8 }}>
-        このヘルプの操作手順・設定説明は次回リリース予定の subtitle-editor v0.4.3 準拠です。
+        このヘルプの操作手順・設定説明は subtitle-editor v0.4.4 準拠です。
       </div>
 
       {/* セクション切り替えタブ */}
