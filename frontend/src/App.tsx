@@ -79,6 +79,62 @@ function joinTextParts(parts: Array<string | undefined>, separator = ' '): strin
     .join(separator)
 }
 
+function withTimeEditHistory(
+  block: SubtitleBlock,
+  startTime: number,
+  endTime: number,
+  afterExtra?: Record<string, unknown>,
+): SubtitleBlock {
+  const dur = Math.max(0.01, endTime - startTime)
+  return withEditHistory(
+    {
+      ...block,
+      startTime,
+      endTime,
+      cps: Math.round(block.charCount / dur * 10) / 10,
+    },
+    'time_edit',
+    { startTime: block.startTime, endTime: block.endTime },
+    { startTime, endTime, ...afterExtra },
+  )
+}
+
+function updateTimesWithNeighborAdjust(
+  blocks: SubtitleBlock[],
+  id: number,
+  startTime: number,
+  endTime: number,
+): SubtitleBlock[] {
+  if (startTime < 0 || startTime >= endTime) return blocks
+  const idx = blocks.findIndex(b => b.id === id)
+  if (idx === -1) return blocks
+  const current = blocks[idx]
+  if (current.status === 'approved') return blocks
+
+  const startChanged = Math.abs(current.startTime - startTime) > 0.0005
+  const endChanged = Math.abs(current.endTime - endTime) > 0.0005
+  const prev = idx > 0 ? blocks[idx - 1] : undefined
+  const next = idx < blocks.length - 1 ? blocks[idx + 1] : undefined
+  const shouldAdjustPrev = Boolean(startChanged && prev && prev.status !== 'approved' && startTime > prev.startTime)
+  const shouldAdjustNext = Boolean(endChanged && next && next.status !== 'approved' && endTime < next.endTime)
+
+  return blocks.map((b, i) => {
+    if (i === idx) {
+      return withTimeEditHistory(b, startTime, endTime, {
+        adjustedPreviousEnd: shouldAdjustPrev ? startTime : undefined,
+        adjustedNextStart: shouldAdjustNext ? endTime : undefined,
+      })
+    }
+    if (shouldAdjustPrev && i === idx - 1) {
+      return withTimeEditHistory(b, b.startTime, startTime, { adjustedByBlockId: id })
+    }
+    if (shouldAdjustNext && i === idx + 1) {
+      return withTimeEditHistory(b, endTime, b.endTime, { adjustedByBlockId: id })
+    }
+    return b
+  })
+}
+
 function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> {
   return {
     serviceMode: settings.serviceMode,
@@ -1154,17 +1210,7 @@ export default function App() {
         if (!block || block.status === 'approved') return
         const newStart = currentTimeRef.current
         if (newStart >= block.endTime) return
-        const dur = Math.max(0.01, block.endTime - newStart)
-        push(blocks.map(b => b.id !== activeBlockId ? b : withEditHistory(
-          {
-            ...b,
-            startTime: newStart,
-            cps: Math.round(b.charCount / dur * 10) / 10,
-          },
-          'time_edit',
-          { startTime: b.startTime, endTime: b.endTime },
-          { startTime: newStart, endTime: b.endTime },
-        )))
+        push(updateTimesWithNeighborAdjust(blocks, activeBlockId, newStart, block.endTime))
         return
       }
 
@@ -1175,17 +1221,7 @@ export default function App() {
         if (!block || block.status === 'approved') return
         const newEnd = currentTimeRef.current
         if (newEnd <= block.startTime) return
-        const dur = Math.max(0.01, newEnd - block.startTime)
-        push(blocks.map(b => b.id !== activeBlockId ? b : withEditHistory(
-          {
-            ...b,
-            endTime: newEnd,
-            cps: Math.round(b.charCount / dur * 10) / 10,
-          },
-          'time_edit',
-          { startTime: b.startTime, endTime: b.endTime },
-          { startTime: b.startTime, endTime: newEnd },
-        )))
+        push(updateTimesWithNeighborAdjust(blocks, activeBlockId, block.startTime, newEnd))
         return
       }
 
@@ -1214,16 +1250,7 @@ export default function App() {
   }, [undo, redo, activeBlockId, blocks, handleMerge, push])
 
   const handleUpdateTimes = useCallback((id: number, startTime: number, endTime: number) => {
-    push(blocks.map(b => {
-      if (b.id !== id) return b
-      const dur = Math.max(0.01, endTime - startTime)
-      return withEditHistory(
-        { ...b, startTime, endTime, cps: Math.round(b.charCount / dur * 10) / 10 },
-        'time_edit',
-        { startTime: b.startTime, endTime: b.endTime },
-        { startTime, endTime },
-      )
-    }))
+    push(updateTimesWithNeighborAdjust(blocks, id, startTime, endTime))
   }, [blocks, push])
 
   const handleAdjustBoundary = useCallback((id1: number, id2: number, newTime: number) => {

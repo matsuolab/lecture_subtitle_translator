@@ -416,6 +416,7 @@ function SubtitleBlockInner({
   const [editEnd, setEditEnd] = useState(formatTime(block.endTime))
   const [timeError, setTimeError] = useState<string | null>(null)
   const startInputRef = useRef<HTMLInputElement>(null)
+  const timeEditorRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const targetTextareaRef = useRef<HTMLTextAreaElement>(null)
   // 編集中はeditTextベースでCPS・文字数をライブ計算する
@@ -453,6 +454,12 @@ function SubtitleBlockInner({
   const handleTimeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') { e.preventDefault(); handleTimeEditSave() }
     if (e.key === 'Escape') { setIsEditingTime(false); setTimeError(null) }
+  }
+
+  const handleTimeEditorBlur = (e: React.FocusEvent<HTMLDivElement>) => {
+    const nextFocused = e.relatedTarget
+    if (nextFocused instanceof Node && e.currentTarget.contains(nextFocused)) return
+    window.setTimeout(handleTimeEditSave, 0)
   }
 
   useEffect(() => {
@@ -858,13 +865,17 @@ function SubtitleBlockInner({
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 12, color: theme.textSecondary, marginTop: 8 }}>
         {/* 時間表示 / 編集 */}
         {isEditingTime ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }} onClick={e => e.stopPropagation()}>
+          <div
+            ref={timeEditorRef}
+            style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+            onClick={e => e.stopPropagation()}
+            onBlur={handleTimeEditorBlur}
+          >
             <input
               ref={startInputRef}
               value={editStart}
               onChange={e => { setEditStart(e.target.value); setTimeError(null) }}
               onKeyDown={handleTimeKeyDown}
-              onBlur={handleTimeEditSave}
               style={{
                 width: 86, background: theme.inputBg, border: `1px solid ${timeError ? theme.cpsBadgeError[0] : theme.inputBorderFocus}`,
                 borderRadius: 4, padding: '2px 5px', fontSize: 12, color: theme.inputText,
@@ -876,7 +887,6 @@ function SubtitleBlockInner({
               value={editEnd}
               onChange={e => { setEditEnd(e.target.value); setTimeError(null) }}
               onKeyDown={handleTimeKeyDown}
-              onBlur={handleTimeEditSave}
               style={{
                 width: 86, background: theme.inputBg, border: `1px solid ${timeError ? theme.cpsBadgeError[0] : theme.inputBorderFocus}`,
                 borderRadius: 4, padding: '2px 5px', fontSize: 12, color: theme.inputText,
