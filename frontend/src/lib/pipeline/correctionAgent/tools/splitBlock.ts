@@ -4,6 +4,7 @@ import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
 import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
+import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
 
@@ -146,15 +147,14 @@ async function splitJaText(
   jaText: string,
   settings: AdminSettings,
 ): Promise<SplitResult> {  // warning フィールドが設定される場合がある
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-  const model = settings.correctionModel || 'gpt-4.1-nano'
+  const connection = requireAiConnection(settings)
+  const model = resolveChatModelForProvider(settings, settings.correctionModel)
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      Authorization: `Bearer ${connection.apiKey}`,
     },
     body: JSON.stringify({
       model,
@@ -214,15 +214,14 @@ async function translateSingle(
   jaText: string,
   settings: AdminSettings,
 ): Promise<string> {
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-  const model = resolveTranslateModelId(settings.translationModel)
+  const connection = requireAiConnection(settings)
+  const model = resolveChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel))
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      Authorization: `Bearer ${connection.apiKey}`,
     },
     body: JSON.stringify({
       model,

@@ -58,6 +58,10 @@ export interface CorrectionAttempt {
   afterChars: number
   beforeViolation: ViolationCode
   afterViolation: ViolationCode
+  beforeTranscriptText?: string
+  beforeSubtitleText?: string
+  afterTranscriptText?: string
+  afterSubtitleText?: string
   rationale?: string
 }
 

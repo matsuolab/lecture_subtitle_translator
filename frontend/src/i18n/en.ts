@@ -18,6 +18,11 @@ export const en: LocaleStrings = {
   saveProjectTitle: 'Save as project JSON',
   exportSrtTitle: 'Export as SRT file',
   restored: 'Previous session restored',
+  videoLoadChoiceTitle: 'Load video?',
+  videoLoadChoiceDesc: (name, count) => `Load "${name}". Choose whether to reset the current ${count} subtitle blocks or keep them and only replace the video.`,
+  videoLoadReset: 'Reset subtitles and load',
+  videoLoadKeep: 'Keep subtitles and load',
+  videoLoadCancel: 'Cancel',
   approvedCount: (a, t) => `${a} / ${t} approved`,
   reSplitAlert: (id) => `Re-splitting block #${id} (calls LLM API in production)`,
   reTranslateAlert: (id) => `Re-translating block #${id} (calls LLM API in production)`,
@@ -104,8 +109,8 @@ export const en: LocaleStrings = {
     {
       category: 'Edit',
       items: [
-        { keys: ['Click (source text)'], desc: 'Enter edit mode' },
-        { keys: ['Enter'], desc: 'Insert line break (42 chars per line recommended)' },
+        { keys: ['Click (source/subtitle text)'], desc: 'Enter edit mode' },
+        { keys: ['Enter'], desc: 'Insert line break (match the line-length limit in Settings)' },
         { keys: ['Ctrl', 'Enter'], desc: 'Save edit' },
         { keys: ['Esc'], desc: 'Cancel edit' },
         { keys: ['Shift', 'Enter'], desc: 'Split block at cursor' },
@@ -121,7 +126,7 @@ export const en: LocaleStrings = {
     {
       category: 'Merge',
       items: [
-        { keys: ['Drag & Drop'], desc: 'Merge two blocks (approved blocks excluded)' },
+        { keys: ['↕ menu'], desc: 'Choose merge with previous or next (approved blocks excluded)' },
         { keys: ['Ctrl', 'M'], desc: 'Merge active block with next' },
         { keys: ['Ctrl', 'Shift', 'M'], desc: 'Merge active block with previous' },
       ],
@@ -148,6 +153,8 @@ export const en: LocaleStrings = {
         { keys: ['O'], desc: 'Set active block end = playback position (mark out)' },
         { keys: ['‹← / →› (next to timestamp)'], desc: 'Fine-tune start/end by ±0.1s' },
         { keys: ['Click (timestamp)'], desc: 'Type time directly in MM:SS.mmm format' },
+        { keys: ['Enter (while editing time)'], desc: 'Save time edit' },
+        { keys: ['Esc (while editing time)'], desc: 'Cancel time edit' },
         { keys: ['Ctrl', 'Drag (boundary) ←→'], desc: 'Shift time boundary between adjacent blocks (Ctrl release = cancel)' },
         { keys: ['Ctrl', 'Drag (timeline boundary)'], desc: 'Drag block boundary on the bottom timeline' },
         { keys: ['Click / Drag (timeline)'], desc: 'Click or drag the timeline to seek' },
@@ -207,11 +214,8 @@ export const en: LocaleStrings = {
   settingsTranslatorProvider: 'Translation provider',
   settingsTranslatorProviderOpenAi: 'OpenAI',
   settingsTranslatorProviderGemini: 'Gemini',
-  settingsTranslatorProviderDeepL: 'DeepL',
-  settingsTranslatorProviderLocal: 'Local / OpenAI-compatible',
   settingsOpenAiApiKey: 'OpenAI API key',
   settingsGeminiApiKey: 'Gemini API key',
-  settingsDeepLApiKey: 'DeepL API key',
   settingsOpenAiBaseUrl: 'OpenAI-compatible base URL',
   settingsOpenAiBaseUrlPlaceholder: 'http://127.0.0.1:8000/v1',
   settingsStorageNotice: 'API keys and connection settings are stored in this device\'s localStorage. Be careful on shared machines.',
@@ -247,5 +251,3 @@ export const en: LocaleStrings = {
   settingsRefreshModelsLoading: 'Loading...',
   settingsRefreshModelsError: 'Fetch failed',
 }
-
-

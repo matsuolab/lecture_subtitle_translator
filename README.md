@@ -4,6 +4,8 @@
 
 このリポジトリでは、Desktop アプリ（Tauri + React）と、書き起こし・翻訳・字幕整形のパイプラインを開発しています。
 
+> この README の操作手順・設定説明は `subtitle-editor v0.4.3` 準拠です。
+
 ---
 
 ## 利用者向け: アプリを使う
@@ -22,20 +24,22 @@ macOS や Windows で警告が出る場合は、配布元を確認したうえ�
 
 ### 2. 最低限必要な設定
 
-初回起動後、右側の **設定** タブで以下を設定します。
+初回起動後、右側の **設定** タブで実行先とAIプロバイダを設定します。リモート実行する場合は、接続先の Service URL と Service Auth Token も入力します。
 
 | 項目 | 何を入れるか |
 |---|---|
-| Service URL | 管理者から共有されたパイプライン API の URL |
-| Service Auth Token | 管理者から共有された認証トークン |
-| OpenAI API Key | 管理者から共有された OpenAI API キー。Managed Service 側で管理する運用の場合は不要なことがあります |
+| 実行先 | `AWS / リモート実行` または `このPCで実行` を選びます |
+| Service URL | リモート実行する場合のパイプライン API の URL |
+| Service Auth Token | リモート実行する場合の認証トークン。公開しないでください |
+| 接続先AIプロバイダ | 使用するAIプロバイダを選びます |
+| API Key | 選択したAIプロバイダのAPIキーを入力します |
 | 翻訳モデル | 既定値は `gpt-5.4-mini` |
 | 補正モデル | 既定値は `gpt-5.4-mini` |
 | 文脈統合モデル | 既定値は `gpt-5.5` |
 | 1行文字数上限 | 既定値は `80` |
 | CPS上限 | 既定値は `16.9` |
 
-設定後、**レポート** タブからパイプラインを実行できます。
+リモート実行では、設定後に **接続テスト** を押してください。OK が表示されれば、アプリからリモート実行先へアクセスできています。その後、**レポート** タブからパイプラインを実行できます。
 
 ### 3. 基本的な作業の流れ
 
@@ -87,38 +91,6 @@ SRT は英語字幕の出力用です。日本語原文、処理ログ、レビ�
 
 ## 管理者・エンジニア向け
 
-### 開発環境
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### Desktop アプリを開発起動
-
-```bash
-cd frontend
-npm run tauri:dev
-```
-
-### ビルド確認
-
-```bash
-cd frontend
-npm run build
-```
-
-### リリース成果物
-
-`.github/workflows/release.yml` ではタグ `vX.Y.Z` の push を契機に、以下の成果物を draft release へアップロードします。
-
-| OS | 成果物 |
-|---|---|
-| Windows | `subtitle-editor-windows-x64.exe` |
-| macOS | `subtitle-editor-macos-arm64.app.zip` |
-| Linux | `subtitle-editor-linux-x64.AppImage` |
-
 ### 管理者が確認する設定
 
 - `translationProvider`: `openai`
@@ -145,7 +117,5 @@ npm run build
 | `backend/` | WhisperX / Managed Service 周辺のバックエンド実装 |
 | `poc/` | 実験・検証コード |
 | `.github/workflows/` | build / release ワークフロー |
-
-`docs/`、`00_context/`、`10_meetings/` は内部メモとして `.gitignore` 対象です。GitHub で共有する利用手順は、この README とアプリ内 Help に集約します。
 
 ## License

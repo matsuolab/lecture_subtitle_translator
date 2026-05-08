@@ -1,7 +1,7 @@
 import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 
-const STORAGE_KEY = 'subtitle-editor.admin-settings.v3'
+const STORAGE_KEY = 'subtitle-editor.admin-settings.v4'
 const ENV_SERVICE_URL = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 const ENV_HF_TOKEN = (import.meta.env.VITE_HF_TOKEN as string | undefined) ?? ''
 const DEFAULT_LOCAL_TRANSCRIPT_API_BASE = 'http://127.0.0.1:8000'
@@ -17,7 +17,6 @@ export function getDefaultAdminSettings(): AdminSettings {
     hfToken: ENV_HF_TOKEN,
     openaiApiKey: '',
     geminiApiKey: '',
-    deeplApiKey: '',
     openaiCompatibleBaseUrl: '',
     translationProvider: DEFAULT_TRANSLATION_PROVIDER,
     translationModel: 'gpt-5.4-mini',
@@ -66,11 +65,8 @@ function normalizeServiceMode(value: unknown): ServiceMode {
 }
 
 function normalizeTranslationProvider(value: unknown): TranslationProvider {
-  if (value === 'openai' || value === 'gemini' || value === 'deepl') {
+  if (value === 'openai' || value === 'gemini') {
     return value
-  }
-  if (value === 'local') {
-    return DEFAULT_TRANSLATION_PROVIDER
   }
   return DEFAULT_TRANSLATION_PROVIDER
 }
@@ -91,7 +87,6 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     hfToken: typeof raw.hfToken === 'string' ? raw.hfToken : defaults.hfToken,
     openaiApiKey: typeof raw.openaiApiKey === 'string' ? raw.openaiApiKey : '',
     geminiApiKey: typeof raw.geminiApiKey === 'string' ? raw.geminiApiKey : '',
-    deeplApiKey: typeof raw.deeplApiKey === 'string' ? raw.deeplApiKey : '',
     openaiCompatibleBaseUrl: typeof raw.openaiCompatibleBaseUrl === 'string' ? raw.openaiCompatibleBaseUrl : '',
     translationProvider: normalizeTranslationProvider(raw.translationProvider),
     translationModel: typeof raw.translationModel === 'string' && raw.translationModel ? raw.translationModel : defaults.translationModel,
@@ -133,8 +128,7 @@ export function loadAdminSettings(): AdminSettings {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) return normalizeAdminSettings(JSON.parse(raw))
 
-    const legacy = localStorage.getItem('subtitle-editor.admin-settings.v2')
-    return legacy ? normalizeAdminSettings(JSON.parse(legacy)) : getDefaultAdminSettings()
+    return getDefaultAdminSettings()
   } catch {
     return getDefaultAdminSettings()
   }

@@ -1,6 +1,7 @@
 import { readFile } from '@tauri-apps/plugin-fs'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import type { AdminSettings } from '@/types/adminSettings'
+import { requireAiConnection } from '@/lib/pipeline/aiProvider'
 import type { PipelineAuditReport, PipelineNodeTrace } from '@/types/pipeline'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
@@ -160,18 +161,7 @@ export interface ServiceConnectionCheck {
 }
 
 function validateTranslationSettings(settings: AdminSettings): void {
-  const provider = settings.translationProvider === 'local' ? 'openai' : settings.translationProvider
-  switch (provider) {
-    case 'openai':
-      if (!settings.openaiApiKey.trim()) {
-        throw new Error('OpenAI API key is required before running the pipeline')
-      }
-      return
-    case 'gemini':
-      throw new Error('Gemini translation provider is not implemented yet')
-    case 'deepl':
-      throw new Error('DeepL translation provider is not implemented yet')
-  }
+  requireAiConnection(settings)
 }
 
 export function hasConfiguredService(settings: AdminSettings): boolean {
@@ -509,7 +499,6 @@ export async function runLegacyPipeline(
     translation_provider: settings.translationProvider,
     openai_api_key: settings.openaiApiKey.trim(),
     gemini_api_key: settings.geminiApiKey.trim(),
-    deepl_api_key: settings.deeplApiKey.trim(),
     openai_compatible_base_url: settings.openaiCompatibleBaseUrl.trim(),
     hf_token: settings.hfToken.trim(),
   })

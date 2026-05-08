@@ -4,6 +4,7 @@ import type { EnBlock, PipelineThresholds } from './blockTypes'
 import { classifyViolation, computeMetrics } from './metrics'
 import { formatLines } from './formatLines'
 import { normalizeSpaces } from './textUtils'
+import { requireAiConnection, resolveAiConnection, resolveChatModelForProvider } from './aiProvider'
 import {
   hasContinuationEnd,
   hasFragmentStart,
@@ -72,9 +73,16 @@ function isContextMergeCandidate(block: EnBlock, config: LanguageProfileConfig):
 }
 
 function appendAttempt(block: EnBlock, attempt: PipelineCorrectionAttemptSummary): EnBlock {
+  const enrichedAttempt: PipelineCorrectionAttemptSummary = {
+    ...attempt,
+    beforeTranscriptText: attempt.beforeTranscriptText ?? block.jaText,
+    beforeSubtitleText: attempt.beforeSubtitleText ?? block.enText,
+    afterTranscriptText: attempt.afterTranscriptText ?? block.jaText,
+    afterSubtitleText: attempt.afterSubtitleText ?? block.enText,
+  }
   return {
     ...block,
-    correctionAttempts: [...(block.correctionAttempts ?? []), attempt].slice(-20),
+    correctionAttempts: [...(block.correctionAttempts ?? []), enrichedAttempt].slice(-20),
   }
 }
 
@@ -195,20 +203,15 @@ async function decideContextMerge(
   next: EnBlock | undefined,
   settings: AdminSettings,
 ): Promise<MergeDecision> {
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-  const model = settings.contextMergeModel.trim() || settings.correctionModel || 'gpt-4.1'
+  const connection = requireAiConnection(settings, 'context merge')
+  const model = resolveChatModelForProvider(settings, settings.contextMergeModel.trim() || settings.correctionModel)
   const config = loadLanguageProfileConfig(settings)
 
-  if (!apiKey && !settings.openaiCompatibleBaseUrl.trim()) {
-    throw new Error('context merge requires OpenAI API key or compatible base URL')
-  }
-
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      Authorization: `Bearer ${connection.apiKey}`,
     },
     body: JSON.stringify({
       model,
@@ -378,6 +381,10 @@ function buildMergedBlock(
     afterChars: metrics.enChars,
     beforeViolation: fragment.violation,
     afterViolation: violation,
+    beforeTranscriptText: fragment.jaText,
+    beforeSubtitleText: fragment.enText,
+    afterTranscriptText: formatted.jaText,
+    afterSubtitleText: formatted.enText,
     rationale: `${rationale}; absorbedGapSec=${absorbedGapSec.toFixed(2)}`,
   }
 
@@ -404,7 +411,7 @@ export async function mergeContextFragments(
   thresholds: PipelineThresholds,
   onWarning?: OnWarning,
 ): Promise<EnBlock[]> {
-  if (!settings.openaiApiKey.trim() && !settings.openaiCompatibleBaseUrl.trim()) {
+  if (!resolveAiConnection(settings).apiKey) {
     return blocks
   }
 

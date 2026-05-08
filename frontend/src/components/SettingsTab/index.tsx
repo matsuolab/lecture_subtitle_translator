@@ -5,6 +5,11 @@ import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import {
+  DEFAULT_GEMINI_CHAT_MODEL,
+  DEFAULT_OPENAI_CHAT_MODEL,
+  resolveAiConnection,
+} from '@/lib/pipeline/aiProvider'
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -46,10 +51,9 @@ export function SettingsTab({
   async function handleRefreshModels() {
     setModelRefreshState('loading')
     try {
-      const baseUrl = (adminSettings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-      const apiKey = adminSettings.openaiApiKey.trim()
-      const res = await fetch(`${baseUrl}/models`, {
-        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      const connection = resolveAiConnection(adminSettings)
+      const res = await fetch(`${connection.baseUrl}/models`, {
+        headers: connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {},
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
@@ -83,6 +87,28 @@ export function SettingsTab({
     : modelRefreshState === 'error'
       ? t.settingsRefreshModelsError
       : t.settingsRefreshModels
+
+  function handleTranslationProviderChange(value: TranslationProvider) {
+    if (value === 'gemini') {
+      onAdminSettingsChange({
+        translationProvider: value,
+        translationModel: DEFAULT_GEMINI_CHAT_MODEL,
+        correctionModel: DEFAULT_GEMINI_CHAT_MODEL,
+        compressModel: DEFAULT_GEMINI_CHAT_MODEL,
+        expandModel: DEFAULT_GEMINI_CHAT_MODEL,
+        contextMergeModel: DEFAULT_GEMINI_CHAT_MODEL,
+      })
+      return
+    }
+    onAdminSettingsChange({
+      translationProvider: value,
+      translationModel: DEFAULT_OPENAI_CHAT_MODEL,
+      correctionModel: DEFAULT_OPENAI_CHAT_MODEL,
+      compressModel: DEFAULT_OPENAI_CHAT_MODEL,
+      expandModel: DEFAULT_OPENAI_CHAT_MODEL,
+      contextMergeModel: 'gpt-5.5',
+    })
+  }
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
@@ -208,6 +234,44 @@ export function SettingsTab({
         </FieldCard>
 
         <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>接続先AIプロバイダ</div>
+          <SelectField
+            theme={theme}
+            label={t.settingsTranslatorProvider}
+            value={adminSettings.translationProvider}
+            onChange={handleTranslationProviderChange}
+            options={[
+              { value: 'openai', label: t.settingsTranslatorProviderOpenAi },
+              { value: 'gemini', label: t.settingsTranslatorProviderGemini },
+            ]}
+          />
+          <Field
+            theme={theme}
+            label={adminSettings.translationProvider === 'gemini' ? t.settingsGeminiApiKey : t.settingsOpenAiApiKey}
+            value={adminSettings.translationProvider === 'gemini' ? adminSettings.geminiApiKey : adminSettings.openaiApiKey}
+            placeholder={adminSettings.translationProvider === 'gemini' ? 'AIza...' : 'sk-...'}
+            type="password"
+            onChange={(value) => onAdminSettingsChange(
+              adminSettings.translationProvider === 'gemini'
+                ? { geminiApiKey: value }
+                : { openaiApiKey: value },
+            )}
+          />
+          {adminSettings.translationProvider === 'openai' && (
+            <Field
+              theme={theme}
+              label={t.settingsOpenAiBaseUrl}
+              value={adminSettings.openaiCompatibleBaseUrl}
+              placeholder={t.settingsOpenAiBaseUrlPlaceholder}
+              onChange={(value) => onAdminSettingsChange({ openaiCompatibleBaseUrl: value })}
+            />
+          )}
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            翻訳、補正、短縮、分割、文脈統合などのLLM処理に使うプロバイダとAPIキーです。入力したキーはこのPCの設定として保存されます。
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
           <Field
             theme={theme}
             label={t.settingsHfToken}
@@ -215,27 +279,6 @@ export function SettingsTab({
             placeholder={t.settingsHfTokenPlaceholder}
             type="password"
             onChange={(value) => onAdminSettingsChange({ hfToken: value })}
-          />
-        </FieldCard>
-
-        <FieldCard theme={theme}>
-          <SelectField
-            theme={theme}
-            label={t.settingsTranslatorProvider}
-            value={adminSettings.translationProvider}
-            onChange={(value) => onAdminSettingsChange({ translationProvider: value })}
-            options={[
-              { value: 'openai', label: t.settingsTranslatorProviderOpenAi },
-              { value: 'gemini', label: t.settingsTranslatorProviderGemini },
-              { value: 'deepl', label: t.settingsTranslatorProviderDeepL },
-            ]}
-          />
-          <Field
-            theme={theme}
-            label={t.settingsOpenAiBaseUrl}
-            value={adminSettings.openaiCompatibleBaseUrl}
-            placeholder={t.settingsOpenAiBaseUrlPlaceholder}
-            onChange={(value) => onAdminSettingsChange({ openaiCompatibleBaseUrl: value })}
           />
         </FieldCard>
 
@@ -253,18 +296,18 @@ export function SettingsTab({
             theme={theme}
             label="補正モデル (Correction)"
             value={adminSettings.correctionModel}
-            placeholder="gpt-4.1-nano"
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : DEFAULT_OPENAI_CHAT_MODEL}
             listId="available-models-list"
-            hint="空欄 = gpt-4.1-nano"
+            hint="接続先AIプロバイダに対応するモデルIDを指定します"
             onChange={(value) => onAdminSettingsChange({ correctionModel: value })}
           />
           <ComboField
             theme={theme}
             label="翻訳モデル (Translation)"
             value={adminSettings.translationModel}
-            placeholder="gpt-4.1-mini（デフォルト）"
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : DEFAULT_OPENAI_CHAT_MODEL}
             listId="available-models-list"
-            hint="空欄 = gpt-4.1-mini。圧縮・展開モデルが空欄の場合もこのモデルを流用します"
+            hint="圧縮・展開モデルが空欄の場合もこのモデルを流用します"
             onChange={(value) => onAdminSettingsChange({ translationModel: value })}
           />
           <ComboField
@@ -298,7 +341,7 @@ export function SettingsTab({
             theme={theme}
             label="文脈統合モデル (Context Merge)"
             value={adminSettings.contextMergeModel}
-            placeholder="gpt-4.1"
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : 'gpt-5.5'}
             listId="available-models-list"
             hint="文脈依存の短い断片を前後どちらに統合するか判断する高精度モデル"
             onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
@@ -340,33 +383,6 @@ export function SettingsTab({
           >
             {refreshLabel}
           </button>
-        </FieldCard>
-
-        <FieldCard theme={theme}>
-          <Field
-            theme={theme}
-            label={t.settingsOpenAiApiKey}
-            value={adminSettings.openaiApiKey}
-            placeholder="sk-..."
-            type="password"
-            onChange={(value) => onAdminSettingsChange({ openaiApiKey: value })}
-          />
-          <Field
-            theme={theme}
-            label={t.settingsGeminiApiKey}
-            value={adminSettings.geminiApiKey}
-            placeholder="AIza..."
-            type="password"
-            onChange={(value) => onAdminSettingsChange({ geminiApiKey: value })}
-          />
-          <Field
-            theme={theme}
-            label={t.settingsDeepLApiKey}
-            value={adminSettings.deeplApiKey}
-            placeholder="DeepL key"
-            type="password"
-            onChange={(value) => onAdminSettingsChange({ deeplApiKey: value })}
-          />
         </FieldCard>
 
         <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>

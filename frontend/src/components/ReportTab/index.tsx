@@ -53,6 +53,17 @@ function attemptLabel(attempt: NonNullable<PipelineReviewItem['attempts']>[numbe
   return `${attempt.strategy}: ${result}${deltaText} / ${attempt.beforeViolation} → ${attempt.afterViolation}`
 }
 
+type ReportAttempt = NonNullable<PipelineReviewItem['attempts']>[number]
+
+function hasAttemptTextFlow(attempt: ReportAttempt): boolean {
+  return Boolean(
+    attempt.beforeTranscriptText ||
+    attempt.beforeSubtitleText ||
+    attempt.afterTranscriptText ||
+    attempt.afterSubtitleText,
+  )
+}
+
 function formatDurationMs(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   return `${(ms / 1000).toFixed(2)}s`
@@ -368,8 +379,51 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                     </div>
                   )}
                   {item.attempts && item.attempts.length > 0 && (
-                    <div style={{ marginTop: 4, color: theme.textMuted }}>
-                      自動修正履歴: {item.attempts.slice(-3).map(attemptLabel).join(' / ')}
+                    <div style={{ marginTop: 6, display: 'grid', gap: 5 }}>
+                      <div style={{ color: theme.textMuted, fontWeight: 700 }}>このブロックの自動処理履歴</div>
+                      {item.attempts.slice(-3).map((attempt, attemptIndex) => (
+                        <div
+                          key={`${attempt.strategy}-${attemptIndex}`}
+                          style={{
+                            border: `1px solid ${theme.panelBorder}`,
+                            borderRadius: 6,
+                            background: theme.cardBg,
+                            padding: '6px 8px',
+                            display: 'grid',
+                            gap: 4,
+                          }}
+                        >
+                          <div style={{ color: theme.textSecondary, fontWeight: 700 }}>
+                            {attemptLabel(attempt)}
+                          </div>
+                          {hasAttemptTextFlow(attempt) && (
+                            <div style={{ display: 'grid', gap: 3, color: theme.textMuted }}>
+                              {(attempt.beforeTranscriptText || attempt.afterTranscriptText) && (
+                                <div style={{ display: 'grid', gridTemplateColumns: '64px 1fr', gap: 6 }}>
+                                  <span style={{ fontWeight: 700 }}>書き起こし</span>
+                                  <span style={{ color: theme.textSecondary, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                                    {attempt.beforeTranscriptText || '（なし）'}
+                                    {attempt.afterTranscriptText && attempt.afterTranscriptText !== attempt.beforeTranscriptText
+                                      ? `\n→ ${attempt.afterTranscriptText}`
+                                      : ''}
+                                  </span>
+                                </div>
+                              )}
+                              {(attempt.beforeSubtitleText || attempt.afterSubtitleText) && (
+                                <div style={{ display: 'grid', gridTemplateColumns: '64px 1fr', gap: 6 }}>
+                                  <span style={{ fontWeight: 700 }}>字幕</span>
+                                  <span style={{ color: theme.textSecondary, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                                    {attempt.beforeSubtitleText || '（なし）'}
+                                    {attempt.afterSubtitleText && attempt.afterSubtitleText !== attempt.beforeSubtitleText
+                                      ? `\n→ ${attempt.afterSubtitleText}`
+                                      : ''}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
                   {item.category && (

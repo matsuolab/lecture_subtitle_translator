@@ -1,6 +1,7 @@
 import type { CorrectedSegment, TranslatedSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
+import { requireAiConnection } from './aiProvider'
 
 const JA_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/g
 const MAX_SEGMENTS_PER_REQUEST = 40
@@ -149,19 +150,12 @@ async function translateInBatches(
 }
 
 function resolveApiConfig(settings: AdminSettings): { apiKey: string; baseUrl: string; providerLabel: string } {
-  const provider = settings.translationProvider === 'local' ? 'openai' : settings.translationProvider
-  if (provider === 'gemini') throw new Error('Gemini translation provider is not implemented yet')
-  if (provider === 'deepl') throw new Error('DeepL translation provider is not implemented yet')
-
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = 'https://api.openai.com/v1'
-
-  if (provider === 'openai' && !apiKey) {
-    throw new Error('OpenAI API key is required before running the pipeline')
+  const connection = requireAiConnection(settings)
+  return {
+    apiKey: connection.apiKey,
+    baseUrl: connection.baseUrl,
+    providerLabel: connection.providerLabel,
   }
-
-  const providerLabel = 'OpenAI'
-  return { apiKey, baseUrl, providerLabel }
 }
 
 export async function translateSegments(

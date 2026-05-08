@@ -2,6 +2,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId } from '../../prompts'
+import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 
 function buildCoreSystemPrompt(): string {
@@ -20,16 +21,15 @@ async function callCore(
   jaText: string,
   settings: AdminSettings,
 ): Promise<string> {
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-  const model = resolveCompressModelId(settings)
+  const connection = requireAiConnection(settings)
+  const model = resolveChatModelForProvider(settings, resolveCompressModelId(settings))
   const systemPrompt = buildCoreSystemPrompt()
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      Authorization: `Bearer ${connection.apiKey}`,
     },
     body: JSON.stringify({
       model,

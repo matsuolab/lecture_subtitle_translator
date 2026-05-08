@@ -37,6 +37,7 @@ import { applyGlossaryToText } from '@/utils/glossaryApply'
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
 type VideoSource = { name: string; path?: string; file?: File }
+type PendingVideoLoad = { name: string; load: () => void }
 
 function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
   return blocks.map((block) => ({
@@ -71,6 +72,13 @@ function withEditHistory(
   }
 }
 
+function joinTextParts(parts: Array<string | undefined>, separator = ' '): string {
+  return parts
+    .map(part => (part ?? '').trim())
+    .filter(Boolean)
+    .join(separator)
+}
+
 function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> {
   return {
     serviceMode: settings.serviceMode,
@@ -92,7 +100,6 @@ function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> 
     hfToken: settings.hfToken ? '[configured]' : '',
     openaiApiKey: settings.openaiApiKey ? '[configured]' : '',
     geminiApiKey: settings.geminiApiKey ? '[configured]' : '',
-    deeplApiKey: settings.deeplApiKey ? '[configured]' : '',
   }
 }
 
@@ -134,6 +141,7 @@ export default function App() {
         }
       : null,
   )
+  const [pendingVideoLoad, setPendingVideoLoad] = useState<PendingVideoLoad | null>(null)
   const [isDragOverRight, setIsDragOverRight] = useState(false)
   const lastHtmlDropRef = useRef(0)
   const [pipelineRun, setPipelineRun] = useState<PipelineRunResult>(
@@ -763,21 +771,21 @@ export default function App() {
     },
   }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
 
-  const confirmAndLoadVideo = useCallback((doLoad: () => void) => {
+  const confirmAndLoadVideo = useCallback((name: string, doLoad: () => void) => {
     if (blocks.length > 0) {
-      const ok = window.confirm('新しい動画を読み込むと現在の字幕がリセットされます。続けますか？')
-      if (!ok) return
-      reset([])
+      setPendingVideoLoad({ name, load: doLoad })
+      return
     }
     doLoad()
-  }, [blocks.length, reset])
+  }, [blocks.length])
 
   const handleVideoInput = useCallback((file: File) => {
-    confirmAndLoadVideo(() => loadVideoFile(file))
+    confirmAndLoadVideo(file.name, () => loadVideoFile(file))
   }, [confirmAndLoadVideo, loadVideoFile])
 
   const handleVideoPathInput = useCallback((path: string) => {
-    confirmAndLoadVideo(() => loadVideoPath(path))
+    const name = path.split(/[\\/]/).pop() ?? path
+    confirmAndLoadVideo(name, () => loadVideoPath(path))
   }, [confirmAndLoadVideo, loadVideoPath])
 
   const handleRunPipelineFromReport = useCallback(() => {
@@ -1086,30 +1094,47 @@ export default function App() {
     const dragIdx = blocks.findIndex(b => b.id === dragId)
     const dropIdx = blocks.findIndex(b => b.id === dropId)
     if (dragIdx === -1 || dropIdx === -1) return
+    if (Math.abs(dragIdx - dropIdx) !== 1) return
 
     const firstIdx = Math.min(dragIdx, dropIdx)
     const secondIdx = Math.max(dragIdx, dropIdx)
     const first = blocks[firstIdx]
     const second = blocks[secondIdx]
-    const mergedText = first.source + ' ' + second.source
+    const mergedText = joinTextParts([first.source, second.source])
+    const mergedTarget = joinTextParts([first.target, second.target])
     const duration = second.endTime - first.startTime
     const merged: SubtitleBlock = withEditHistory(
       {
         ...first,
         endTime: second.endTime,
-        target: first.target + second.target,
+        target: mergedTarget,
         source: mergedText,
         cps: duration > 0 ? Math.round(mergedText.length / duration * 10) / 10 : 0,
         charCount: mergedText.length,
         status: 'pending',
         glossaryTerms: [...first.glossaryTerms, ...second.glossaryTerms],
+        correctionAttempts: [
+          ...(first.correctionAttempts ?? []),
+          ...(second.correctionAttempts ?? []),
+        ].slice(-10),
+        editHistory: [
+          ...(first.editHistory ?? []),
+          ...(second.editHistory ?? []),
+        ].slice(-49),
       },
       'merge',
       {
+        method: dragIdx < dropIdx ? 'manual_merge_next' : 'manual_merge_previous',
         first: { id: first.id, source: first.source, target: first.target, startTime: first.startTime, endTime: first.endTime },
         second: { id: second.id, source: second.source, target: second.target, startTime: second.startTime, endTime: second.endTime },
       },
-      { id: first.id, source: mergedText, startTime: first.startTime, endTime: second.endTime },
+      {
+        id: first.id,
+        source: mergedText,
+        target: mergedTarget,
+        startTime: first.startTime,
+        endTime: second.endTime,
+      },
     )
     const next = blocks.filter((_, i) => i !== secondIdx)
     next[firstIdx] = merged
@@ -1362,6 +1387,102 @@ export default function App() {
           pointerEvents: 'none',
         }}>
           {t.restored}
+        </div>
+      )}
+      {pendingVideoLoad && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="video-load-choice-title"
+          onClick={() => setPendingVideoLoad(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+            background: theme.id === 'poc' ? 'rgba(2,6,16,0.82)' : 'rgba(20,24,32,0.45)',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: 'min(480px, 100%)',
+              borderRadius: 8,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.id === 'poc' ? '#121a2b' : '#ffffff',
+              boxShadow: '0 16px 40px rgba(0,0,0,0.35)',
+              padding: 16,
+              display: 'grid',
+              gap: 12,
+            }}
+          >
+            <div id="video-load-choice-title" style={{ fontSize: 15, fontWeight: 700, color: theme.textPrimary }}>
+              {t.videoLoadChoiceTitle}
+            </div>
+            <div style={{ fontSize: 12, lineHeight: 1.7, color: theme.textSecondary }}>
+              {t.videoLoadChoiceDesc(pendingVideoLoad.name, blocks.length)}
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => setPendingVideoLoad(null)}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: theme.btnText,
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                {t.videoLoadCancel}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const pending = pendingVideoLoad
+                  setPendingVideoLoad(null)
+                  pending.load()
+                }}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: theme.btnText,
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                {t.videoLoadKeep}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const pending = pendingVideoLoad
+                  setPendingVideoLoad(null)
+                  reset([])
+                  pending.load()
+                }}
+                style={{
+                  border: `1px solid ${theme.accent}`,
+                  background: theme.accent,
+                  color: '#fff',
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                {t.videoLoadReset}
+              </button>
+            </div>
+          </div>
         </div>
       )}
       <main
