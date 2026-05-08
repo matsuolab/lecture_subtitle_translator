@@ -2,7 +2,7 @@
 
 React + TypeScript + Vite + Tauri v2 で実装した字幕編集アプリです。
 
-> この README の操作手順・設定説明は次回リリース予定の `subtitle-editor v0.4.3` 準拠です。
+> この README の操作手順・設定説明は `subtitle-editor v0.4.4` 準拠です。
 
 ## 主な機能
 
