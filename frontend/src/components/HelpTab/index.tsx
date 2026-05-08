@@ -108,6 +108,9 @@ export function HelpTab() {
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
+      <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 8 }}>
+        このヘルプの操作手順・設定説明は次回リリース予定の subtitle-editor v0.4.3 準拠です。
+      </div>
 
       {/* セクション切り替えタブ */}
       <div style={{
@@ -157,7 +160,7 @@ export function HelpTab() {
                 <strong style={{ color: theme.textPrimary }}>レポートタブ</strong>からパイプラインを実行できます。動画を読み込んだ状態で「パイプラインを実行」ボタンを押すと、書き起こし → 日本語補正 → 英語翻訳 → 字幕ブロック生成を自動で行います。
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                パイプラインを使用するには、管理者から共有された Service URL、認証トークン、必要に応じて OpenAI API Key を設定タブに入力します。
+                初回は設定タブで実行先と接続先AIプロバイダを設定します。リモート実行する場合は Service URL と Service Auth Token を入力し、接続テストで OK が表示されることを確認してから実行します。
               </p>
             </div>
           </SectionCard>
@@ -219,9 +222,9 @@ export function HelpTab() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <SectionCard title="初回設定で確認する項目">
             <BulletList items={[
-              'Service URL: 管理者が用意したパイプラインAPIのURLを入力します。',
-              'Service Auth Token: APIの認証トークンを入力します。READMEやチャットに公開しないでください。',
-              'OpenAI API Key: ローカル後段でOpenAIを使う運用では必要です。Managed Service側で鍵を管理する運用では不要な場合があります。',
+              '実行先: AWS / リモート実行を使うか、このPCで実行するかを選びます。',
+              'Service URL / Service Auth Token: リモート実行する場合の接続先と認証情報です。入力後、接続テストでOKが出ればアクセス確認済みです。',
+              '接続先AIプロバイダ: OpenAI または Gemini を選び、対応する API Key を入力します。READMEやチャットに公開しないでください。',
               'OpenAI Compatible Base URL: OpenAI互換APIを使う場合だけ入力します。通常は空欄です。',
               '用語辞書: CSV/XLSXを読み込み、確定済み用語をハイライト・用語漏れ・タイポ候補に使います。',
             ]} />
@@ -272,12 +275,12 @@ export function HelpTab() {
             ]} />
           </SectionCard>
 
-          <SectionCard title="障害調査・PDCAで共有する情報">
+          <SectionCard title="障害調査で共有する情報">
             <BulletList items={[
               'プロジェクトJSON: 字幕、レビュー状態、自動処理ログ、編集履歴、設定スナップショットを含みます。',
               'ReportTab の処理ログ: モジュール別ログ、進行イベント、設定スナップショットを確認できます。',
               'job_id または runId: Managed Service の実行結果を追跡するときに必要です。',
-              '不要な提案、危険な自動修正、良かった自動修正、UIで迷った点をPDCAメモとして残してください。',
+              '不要な提案、危険な自動修正、良かった自動修正、UIで迷った点をメモとして残してください。',
             ]} />
           </SectionCard>
         </div>

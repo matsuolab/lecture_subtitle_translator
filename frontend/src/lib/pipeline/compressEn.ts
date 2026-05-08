@@ -4,22 +4,22 @@ import { computeMetrics, classifyViolation } from './metrics'
 import { formatLines } from './formatLines'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from './prompts'
 import { normalizeSpaces } from './textUtils'
+import { requireAiConnection, resolveChatModelForProvider } from './aiProvider'
 
 async function callCompress(
   enText: string,
   jaText: string,
   settings: AdminSettings,
 ): Promise<string> {
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-  const model = resolveCompressModelId(settings)
+  const connection = requireAiConnection(settings)
+  const model = resolveChatModelForProvider(settings, resolveCompressModelId(settings))
   const systemPrompt = resolveCompressSystemPrompt(settings, settings.compressPromptOverride)
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      Authorization: `Bearer ${connection.apiKey}`,
     },
     body: JSON.stringify({
       model,

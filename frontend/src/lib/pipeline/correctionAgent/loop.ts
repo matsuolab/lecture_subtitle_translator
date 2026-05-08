@@ -41,6 +41,10 @@ export async function correctionEngine(
     afterChars: attempt.afterChars,
     beforeViolation: attempt.beforeViolation,
     afterViolation: attempt.afterViolation,
+    beforeTranscriptText: attempt.beforeTranscriptText,
+    beforeSubtitleText: attempt.beforeSubtitleText,
+    afterTranscriptText: attempt.afterTranscriptText,
+    afterSubtitleText: attempt.afterSubtitleText,
     rationale: attempt.rationale,
   })
 
@@ -81,6 +85,8 @@ export async function correctionEngine(
 
     const beforeViolation = block.violation
     const beforeChars = block.enChars
+    const beforeTranscriptText = block.jaText
+    const beforeSubtitleText = block.enText
 
     let patch: ReturnType<typeof normalizeAndValidate>
     try {
@@ -103,18 +109,37 @@ export async function correctionEngine(
         afterChars: beforeChars,
         beforeViolation,
         afterViolation: beforeViolation,
+        beforeTranscriptText,
+        beforeSubtitleText,
+        afterTranscriptText: beforeTranscriptText,
+        afterSubtitleText: beforeSubtitleText,
         rationale: message,
       })
       continue
     }
 
+    const afterTranscriptText = patch.replaceBlocks
+      .map(replacement => replacement.jaText)
+      .filter(Boolean)
+      .join(' / ') || beforeTranscriptText
+    const afterSubtitleText = patch.replaceBlocks
+      .map(replacement => replacement.enText)
+      .filter(Boolean)
+      .join(' / ') || beforeSubtitleText
+    const afterChars = patch.replaceBlocks
+      .reduce((sum, replacement) => sum + replacement.enChars, 0) || beforeChars
+
     const attempt: CorrectionAttempt = {
       strategy,
       changed: patch.changed,
       beforeChars,
-      afterChars: patch.replaceBlocks[0]?.enChars ?? beforeChars,
+      afterChars,
       beforeViolation,
       afterViolation: patch.replaceBlocks[0]?.violation ?? beforeViolation,
+      beforeTranscriptText,
+      beforeSubtitleText,
+      afterTranscriptText,
+      afterSubtitleText,
       rationale: patch.warning,
     }
     history.push(attempt)

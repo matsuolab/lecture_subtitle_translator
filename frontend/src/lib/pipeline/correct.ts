@@ -1,6 +1,7 @@
 import type { TranscriptSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
+import { requireAiConnection } from './aiProvider'
 
 const MAX_SEGMENTS_PER_REQUEST = 20
 const COUNT_MISMATCH_RE = /correction API returned (\d+) items for (\d+) inputs/
@@ -205,23 +206,15 @@ async function correctWithLlm(
   })
 }
 
-function resolveCorrectionApiBaseUrl(settings?: AdminSettings): string {
-  const configured = settings?.openaiCompatibleBaseUrl?.trim()
-  return (configured || 'https://api.openai.com/v1').replace(/\/$/, '')
-}
-
 export async function correctSegments(
   segments: TranscriptSegment[],
   options: CorrectionOptions = {},
   settings?: AdminSettings,
   glossaryTerms: string[] = [],
 ): Promise<CorrectedSegmentLite[]> {
-  const apiKey = settings?.openaiApiKey?.trim() ?? ''
-  if (!apiKey) {
-    throw new Error('OpenAI API key is required before running the pipeline')
-  }
+  if (!settings) throw new Error('AI provider settings are required before running the pipeline')
+  const connection = requireAiConnection(settings)
 
   const threshold = options.threshold ?? 0.2
-  const baseUrl = resolveCorrectionApiBaseUrl(settings)
-  return correctWithLlm(segments, apiKey, baseUrl, glossaryTerms, threshold)
+  return correctWithLlm(segments, connection.apiKey, connection.baseUrl, glossaryTerms, threshold)
 }

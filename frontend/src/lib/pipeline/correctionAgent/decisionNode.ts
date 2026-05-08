@@ -8,6 +8,7 @@ import type {
   DecisionNode,
 } from './types'
 import { buildMetrics } from './metrics'
+import { requireAiConnection, resolveChatModelForProvider } from '../aiProvider'
 
 // ---------------------------------------------------------------------------
 // RuleBasedDecisionNode
@@ -157,17 +158,16 @@ export class LLMDecisionNode implements DecisionNode {
     feasible: CorrectionStrategy[],
   ): Promise<CorrectionStrategy> {
     const { settings } = ctx
-    const apiKey = settings.openaiApiKey.trim()
-    const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
-    const model = settings.correctionModel || 'gpt-4.1-nano'
+    const connection = requireAiConnection(settings, 'LLM decision')
+    const model = resolveChatModelForProvider(settings, settings.correctionModel)
 
     const prompt = buildDecisionPrompt(ctx, feasible)
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetch(`${connection.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        Authorization: `Bearer ${connection.apiKey}`,
       },
       body: JSON.stringify({
         model,

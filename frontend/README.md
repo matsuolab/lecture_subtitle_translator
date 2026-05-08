@@ -2,6 +2,8 @@
 
 React + TypeScript + Vite + Tauri v2 で実装した字幕編集アプリです。
 
+> この README の操作手順・設定説明は次回リリース予定の `subtitle-editor v0.4.3` 準拠です。
+
 ## 主な機能
 
 - SRT 読み込み・編集・書き出し
@@ -22,7 +24,7 @@ GitHub Releases から OS に合ったファイルをダウンロードします
 | macOS Apple Silicon | `subtitle-editor-macos-arm64.app.zip` | zip を展開して `.app` を開く |
 | Linux x64 | `subtitle-editor-linux-x64.AppImage` | 実行権限を付けて起動 |
 
-初回利用時は、設定タブで管理者から共有された `Service URL`、`Service Auth Token`、必要に応じて `OpenAI API Key` を入力します。
+初回利用時は、設定タブで実行先と接続先AIプロバイダを設定します。リモート実行する場合は `Service URL` と `Service Auth Token` を入力し、接続テストで OK が表示されることを確認してから実行します。
 
 既定モデルは `gpt-5.4-mini`、文脈統合モデルは `gpt-5.5` です。
 

@@ -2,6 +2,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from '../../prompts'
+import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 
 async function callCompress(
@@ -11,17 +12,17 @@ async function callCompress(
   settings: AdminSettings,
   model: string,
 ): Promise<string> {
-  const apiKey = settings.openaiApiKey.trim()
-  const baseUrl = (settings.openaiCompatibleBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/$/, '')
+  const connection = requireAiConnection(settings)
+  const resolvedModel = resolveChatModelForProvider(settings, model)
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      Authorization: `Bearer ${connection.apiKey}`,
     },
     body: JSON.stringify({
-      model,
+      model: resolvedModel,
       temperature: 0.0,
       response_format: { type: 'json_object' },
       messages: [

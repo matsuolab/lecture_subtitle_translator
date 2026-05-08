@@ -38,6 +38,10 @@ export interface SubtitleBlock {
     afterChars: number
     beforeViolation: string
     afterViolation: string
+    beforeTranscriptText?: string
+    beforeSubtitleText?: string
+    afterTranscriptText?: string
+    afterSubtitleText?: string
     rationale?: string
   }>
   editHistory?: Array<{

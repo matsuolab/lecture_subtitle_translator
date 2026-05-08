@@ -11,8 +11,6 @@ interface SubtitleBlockProps {
   block: SubtitleBlockType
   isActive: boolean
   isCurrentlyPlaying: boolean
-  isDragging: boolean
-  isDragOver: boolean
   playProgress: number // 0-100
   onSelect: (id: number) => void
   onApprove: (id: number) => void
@@ -28,10 +26,10 @@ interface SubtitleBlockProps {
   onEqualSplit: (id: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
-  onDragStart: (id: number) => void
-  onDragEnd: () => void
-  onDragOver: (id: number) => void
-  onDrop: (id: number) => void
+  canMergePrevious: boolean
+  canMergeNext: boolean
+  onMergeWithPrevious: (id: number) => void
+  onMergeWithNext: (id: number) => void
   maxCps: number
   maxCharsPerLine: number
 }
@@ -242,6 +240,70 @@ function correctionAttemptReason(attempt: CorrectionAttempt): string | undefined
   return attempt.rationale
 }
 
+function hasAttemptTextFlow(attempt: CorrectionAttempt): boolean {
+  return Boolean(
+    attempt.beforeTranscriptText ||
+    attempt.beforeSubtitleText ||
+    attempt.afterTranscriptText ||
+    attempt.afterSubtitleText,
+  )
+}
+
+function AttemptTextFlow({ attempt, theme }: { attempt: CorrectionAttempt; theme: Theme }) {
+  if (!hasAttemptTextFlow(attempt)) return null
+  const rowStyle: React.CSSProperties = {
+    display: 'grid',
+    gridTemplateColumns: '52px 1fr',
+    gap: 6,
+    alignItems: 'start',
+    minWidth: 0,
+  }
+  const labelStyle: React.CSSProperties = {
+    color: theme.textMuted,
+    fontWeight: 700,
+    whiteSpace: 'nowrap',
+  }
+  const textStyle: React.CSSProperties = {
+    color: theme.textSecondary,
+    overflowWrap: 'anywhere',
+    whiteSpace: 'pre-wrap',
+  }
+  return (
+    <div style={{
+      marginTop: 5,
+      display: 'grid',
+      gap: 4,
+      padding: '6px 8px',
+      borderRadius: 6,
+      background: theme.cardBg,
+      border: `1px solid ${theme.panelBorder}`,
+    }}>
+      {(attempt.beforeTranscriptText || attempt.afterTranscriptText) && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>書き起こし</span>
+          <span style={textStyle}>
+            {attempt.beforeTranscriptText || '（なし）'}
+            {attempt.afterTranscriptText && attempt.afterTranscriptText !== attempt.beforeTranscriptText
+              ? `\n→ ${attempt.afterTranscriptText}`
+              : ''}
+          </span>
+        </div>
+      )}
+      {(attempt.beforeSubtitleText || attempt.afterSubtitleText) && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>字幕</span>
+          <span style={textStyle}>
+            {attempt.beforeSubtitleText || '（なし）'}
+            {attempt.afterSubtitleText && attempt.afterSubtitleText !== attempt.beforeSubtitleText
+              ? `\n→ ${attempt.afterSubtitleText}`
+              : ''}
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const splitBtnStyle: React.CSSProperties = {
   fontSize: 11,
   padding: '3px 9px',
@@ -258,8 +320,6 @@ function SubtitleBlockInner({
   block,
   isActive,
   isCurrentlyPlaying,
-  isDragging,
-  isDragOver,
   playProgress,
   onSelect,
   onApprove,
@@ -275,10 +335,10 @@ function SubtitleBlockInner({
   onEqualSplit,
   onIgnoreWarning,
   onDraftChange,
-  onDragStart,
-  onDragEnd,
-  onDragOver,
-  onDrop,
+  canMergePrevious,
+  canMergeNext,
+  onMergeWithPrevious,
+  onMergeWithNext,
   maxCps,
   maxCharsPerLine,
 }: SubtitleBlockProps) {
@@ -341,6 +401,7 @@ function SubtitleBlockInner({
   const [showTypoList, setShowTypoList] = useState(false)
   const [showMissingList, setShowMissingList] = useState(false)
   const [showAutoLog, setShowAutoLog] = useState(false)
+  const [showMergeMenu, setShowMergeMenu] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState(block.source)
   // 編集中のタイポ候補（editText に対してライブ計算）
@@ -478,9 +539,7 @@ function SubtitleBlockInner({
   const blockStyle: React.CSSProperties = {
     position: 'relative',
     border: '1px solid',
-    borderColor: isDragOver
-      ? theme.cardBorderDragOver
-      : isActive
+    borderColor: isActive
         ? theme.cardBorderActive
         : isApproved
           ? theme.cardBorderApproved
@@ -489,9 +548,7 @@ function SubtitleBlockInner({
             : theme.cardBorder,
     borderRadius: 8,
     padding: 10,
-    background: isDragOver
-      ? theme.cardBgDragOver
-      : isActive
+    background: isActive
         ? theme.cardBgActive
         : isApproved
           ? theme.cardBgApproved
@@ -499,10 +556,8 @@ function SubtitleBlockInner({
             ? theme.cardBgFlagged
             : theme.cardBg,
     cursor: isApproved ? 'default' : 'pointer',
-    opacity: isDragging ? 0.4 : 1,
-    boxShadow: isDragOver
-      ? theme.cardShadowDragOver
-      : isActive
+    opacity: 1,
+    boxShadow: isActive
         ? theme.cardShadowActive
         : undefined,
     transition: 'border-color 0.15s, box-shadow 0.15s',
@@ -512,11 +567,6 @@ function SubtitleBlockInner({
     <div
       style={blockStyle}
       onClick={() => onSelect(block.id)}
-      draggable={!isApproved}
-      onDragStart={e => { if (isApproved) { e.preventDefault(); return }; e.dataTransfer.effectAllowed = 'move'; onDragStart(block.id) }}
-      onDragEnd={onDragEnd}
-      onDragOver={e => { e.preventDefault(); if (!isApproved) { e.dataTransfer.dropEffect = 'move'; onDragOver(block.id) } else { e.dataTransfer.dropEffect = 'none' } }}
-      onDrop={e => { e.preventDefault(); if (!isApproved) onDrop(block.id) }}
     >
       {/* 再生進行バー（背景） */}
       <div style={{
@@ -531,6 +581,101 @@ function SubtitleBlockInner({
       }} />
       {/* コンテンツ（背景バーの上） */}
       <div style={{ position: 'relative', zIndex: 1 }}>
+      {!isApproved && (
+        <div style={{ position: 'absolute', top: -3, right: -3, zIndex: 3 }}>
+          <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation()
+              setShowMergeMenu(v => !v)
+            }}
+            onMouseDown={e => e.stopPropagation()}
+            title="前後の字幕ブロックと結合"
+            aria-label="前後の字幕ブロックと結合"
+            aria-expanded={showMergeMenu}
+            style={{
+              width: 22,
+              height: 22,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 5,
+              border: `1px solid ${theme.panelBorder}`,
+              background: showMergeMenu ? theme.cardBg : theme.panelBg,
+              color: showMergeMenu ? theme.textPrimary : theme.textMuted,
+              cursor: 'pointer',
+              fontSize: 14,
+              lineHeight: 1,
+              userSelect: 'none',
+            }}
+          >
+            ↕
+          </button>
+          {showMergeMenu && (
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                position: 'absolute',
+                top: 26,
+                right: 0,
+                minWidth: 124,
+                display: 'grid',
+                gap: 4,
+                padding: 6,
+                borderRadius: 6,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.cardBg,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+              }}
+            >
+              <button
+                type="button"
+                disabled={!canMergePrevious}
+                onClick={e => {
+                  e.stopPropagation()
+                  if (!canMergePrevious) return
+                  setShowMergeMenu(false)
+                  onMergeWithPrevious(block.id)
+                }}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: canMergePrevious ? theme.btnText : theme.textMuted,
+                  borderRadius: 5,
+                  padding: '5px 8px',
+                  fontSize: 12,
+                  cursor: canMergePrevious ? 'pointer' : 'not-allowed',
+                  textAlign: 'left',
+                }}
+              >
+                前と結合
+              </button>
+              <button
+                type="button"
+                disabled={!canMergeNext}
+                onClick={e => {
+                  e.stopPropagation()
+                  if (!canMergeNext) return
+                  setShowMergeMenu(false)
+                  onMergeWithNext(block.id)
+                }}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: canMergeNext ? theme.btnText : theme.textMuted,
+                  borderRadius: 5,
+                  padding: '5px 8px',
+                  fontSize: 12,
+                  cursor: canMergeNext ? 'pointer' : 'not-allowed',
+                  textAlign: 'left',
+                }}
+              >
+                次と結合
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {/* 訳文テキスト（編集可能） */}
       {isEditingTarget ? (
         <>
@@ -932,14 +1077,15 @@ function SubtitleBlockInner({
           </span>
         )}
         {(block.correctionAttempts?.length ?? 0) > 0 && (
-          <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center' }}>
             <button
               onClick={e => { e.stopPropagation(); setShowAutoLog(v => !v) }}
               title="この字幕に対する自動処理ログ"
+              aria-expanded={showAutoLog}
               style={{
                 border: `1px solid ${theme.panelBorder}`,
-                background: theme.panelBg,
-                color: theme.textSecondary,
+                background: showAutoLog ? theme.cardBg : theme.panelBg,
+                color: showAutoLog ? theme.textPrimary : theme.textSecondary,
                 borderRadius: 999,
                 padding: '2px 7px',
                 fontSize: 10,
@@ -949,55 +1095,58 @@ function SubtitleBlockInner({
             >
               自動処理 {block.correctionAttempts?.length ?? 0}
             </button>
-            {showAutoLog && (
-              <div
-                onClick={e => e.stopPropagation()}
-                style={{
-                  position: 'absolute',
-                  top: '100%',
-                  left: 0,
-                  zIndex: 22,
-                  marginTop: 4,
-                  background: theme.cardBg,
-                  border: `1px solid ${theme.panelBorder}`,
-                  borderRadius: 6,
-                  padding: '8px 10px',
-                  minWidth: 280,
-                  maxWidth: 380,
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                  display: 'grid',
-                  gap: 7,
-                }}
-              >
-                <div style={{ fontSize: 11, fontWeight: 700, color: theme.textPrimary }}>
-                  この字幕で試した自動処理
-                </div>
-                {block.correctionAttempts!.slice(-6).map((attempt, index) => (
-                  <div
-                    key={`${attempt.strategy}-${index}`}
-                    style={{
-                      borderTop: index === 0 ? 'none' : `1px solid ${theme.panelBorder}`,
-                      paddingTop: index === 0 ? 0 : 6,
-                      fontSize: 11,
-                      color: theme.textSecondary,
-                      lineHeight: 1.45,
-                    }}
-                  >
-                    <div style={{ color: attempt.changed ? theme.textPrimary : theme.textMuted, fontWeight: 600 }}>
-                      {correctionAttemptSummary(attempt)}
-                    </div>
-                    {correctionAttemptReason(attempt) && (
-                      <div style={{ marginTop: 2, color: theme.textMuted }}>
-                        理由: {correctionAttemptReason(attempt)}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
           </span>
         )}
       </div>
+
+      {showAutoLog && (block.correctionAttempts?.length ?? 0) > 0 && (
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            marginTop: 8,
+            background: theme.panelBg,
+            border: `1px solid ${theme.panelBorder}`,
+            borderRadius: 6,
+            padding: '8px 10px',
+            display: 'grid',
+            gap: 7,
+            width: '100%',
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 700, color: theme.textPrimary }}>
+            この字幕で試した自動処理
+          </div>
+          {block.correctionAttempts!.slice(-6).map((attempt, index) => (
+            <div
+              key={`${attempt.strategy}-${index}`}
+              style={{
+                borderTop: index === 0 ? 'none' : `1px solid ${theme.panelBorder}`,
+                paddingTop: index === 0 ? 0 : 6,
+                fontSize: 11,
+                color: theme.textSecondary,
+                lineHeight: 1.45,
+                minWidth: 0,
+              }}
+            >
+              <div style={{
+                color: attempt.changed ? theme.textPrimary : theme.textMuted,
+                fontWeight: 600,
+                overflowWrap: 'anywhere',
+              }}>
+                {correctionAttemptSummary(attempt)}
+              </div>
+              {correctionAttemptReason(attempt) && (
+                <div style={{ marginTop: 2, color: theme.textMuted, overflowWrap: 'anywhere' }}>
+                  理由: {correctionAttemptReason(attempt)}
+                </div>
+              )}
+              <AttemptTextFlow attempt={attempt} theme={theme} />
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* アクションボタン */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>

@@ -16,6 +16,11 @@ export interface LocaleStrings {
   saveProjectTitle: string
   exportSrtTitle: string
   restored: string
+  videoLoadChoiceTitle: string
+  videoLoadChoiceDesc: (name: string, count: number) => string
+  videoLoadReset: string
+  videoLoadKeep: string
+  videoLoadCancel: string
   approvedCount: (approved: number, total: number) => string
   reSplitAlert: (id: number) => string
   reTranslateAlert: (id: number) => string
@@ -96,11 +101,8 @@ export interface LocaleStrings {
   settingsTranslatorProvider: string
   settingsTranslatorProviderOpenAi: string
   settingsTranslatorProviderGemini: string
-  settingsTranslatorProviderDeepL: string
-  settingsTranslatorProviderLocal: string
   settingsOpenAiApiKey: string
   settingsGeminiApiKey: string
-  settingsDeepLApiKey: string
   settingsOpenAiBaseUrl: string
   settingsOpenAiBaseUrlPlaceholder: string
   settingsStorageNotice: string

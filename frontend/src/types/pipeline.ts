@@ -60,6 +60,10 @@ export interface PipelineCorrectionAttemptSummary {
   afterChars: number
   beforeViolation: string
   afterViolation: string
+  beforeTranscriptText?: string
+  beforeSubtitleText?: string
+  afterTranscriptText?: string
+  afterSubtitleText?: string
   rationale?: string
 }
 
