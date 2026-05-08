@@ -37,6 +37,7 @@ import { applyGlossaryToText } from '@/utils/glossaryApply'
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
 type VideoSource = { name: string; path?: string; file?: File }
+type PendingVideoLoad = { name: string; load: () => void }
 
 function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
   return blocks.map((block) => ({
@@ -44,7 +45,38 @@ function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
     glossaryTerms: block.glossaryTerms.map((term) => ({ ...term })),
     ignoredTypos: block.ignoredTypos ? [...block.ignoredTypos] : undefined,
     ignoredMissing: block.ignoredMissing ? [...block.ignoredMissing] : undefined,
+    correctionAttempts: block.correctionAttempts ? block.correctionAttempts.map((attempt) => ({ ...attempt })) : undefined,
+    editHistory: block.editHistory ? block.editHistory.map((entry) => ({ ...entry })) : undefined,
   }))
+}
+
+type SubtitleEditType = NonNullable<SubtitleBlock['editHistory']>[number]['type']
+
+function withEditHistory(
+  block: SubtitleBlock,
+  type: SubtitleEditType,
+  before?: Record<string, unknown>,
+  after?: Record<string, unknown>,
+): SubtitleBlock {
+  return {
+    ...block,
+    editHistory: [
+      ...(block.editHistory ?? []),
+      {
+        at: new Date().toISOString(),
+        type,
+        before,
+        after,
+      },
+    ].slice(-50),
+  }
+}
+
+function joinTextParts(parts: Array<string | undefined>, separator = ' '): string {
+  return parts
+    .map(part => (part ?? '').trim())
+    .filter(Boolean)
+    .join(separator)
 }
 
 function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> {
@@ -53,12 +85,21 @@ function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> 
     serviceUrl: settings.serviceUrl,
     translationProvider: settings.translationProvider,
     translationModel: settings.translationModel,
+    correctionModel: settings.correctionModel,
+    compressModel: settings.compressModel,
+    expandModel: settings.expandModel,
+    contextMergeModel: settings.contextMergeModel,
+    subtitleLanguageLabel: settings.subtitleLanguageLabel,
+    transcriptLanguageLabel: settings.transcriptLanguageLabel,
+    languageProfileConfigJson: settings.languageProfileConfigJson,
     openaiCompatibleBaseUrl: settings.openaiCompatibleBaseUrl,
+    enMaxCharsPerLine: settings.enMaxCharsPerLine,
+    enMaxCps: settings.enMaxCps,
+    pipelineVerboseEnRatio: settings.pipelineVerboseEnRatio,
     serviceAuthToken: settings.serviceAuthToken ? '[configured]' : '',
     hfToken: settings.hfToken ? '[configured]' : '',
     openaiApiKey: settings.openaiApiKey ? '[configured]' : '',
     geminiApiKey: settings.geminiApiKey ? '[configured]' : '',
-    deeplApiKey: settings.deeplApiKey ? '[configured]' : '',
   }
 }
 
@@ -100,6 +141,7 @@ export default function App() {
         }
       : null,
   )
+  const [pendingVideoLoad, setPendingVideoLoad] = useState<PendingVideoLoad | null>(null)
   const [isDragOverRight, setIsDragOverRight] = useState(false)
   const lastHtmlDropRef = useRef(0)
   const [pipelineRun, setPipelineRun] = useState<PipelineRunResult>(
@@ -260,8 +302,8 @@ export default function App() {
 
   const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
     const totalBlocks = Math.max(1, generated.length)
-    const cpsViolationCount = generated.filter(b => b.cps > 15).length
-    const overLengthCount = generated.filter(b => b.target.split('\n').some(line => line.length > 42)).length
+    const cpsViolationCount = generated.filter(b => b.cps > adminSettings.enMaxCps).length
+    const overLengthCount = generated.filter(b => b.source.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)).length
     const flaggedCount = generated.filter(b => b.status === 'flagged').length
 
     const sourceChars = generated.reduce((sum, b) => sum + b.source.length, 0)
@@ -287,28 +329,28 @@ export default function App() {
         durationMs: Math.max(0, finishedAt - startedAt),
       },
     }
-  }, [])
+  }, [adminSettings.enMaxCharsPerLine, adminSettings.enMaxCps])
 
   const buildAuditReport = useCallback((generated: SubtitleBlock[], traces: PipelineNodeTrace[]): PipelineAuditReport => {
     const items: PipelineReviewItem[] = []
 
     generated.forEach(block => {
-      if (block.cps > 15) {
+      if (block.cps > adminSettings.enMaxCps) {
         items.push({
           id: `cps-${block.id}`,
           nodeId: 'cps_guard',
-          reason: `CPS超過 (${block.cps.toFixed(1)} > 15.0)`,
+          reason: `CPS超過 (${block.cps.toFixed(1)} > ${adminSettings.enMaxCps.toFixed(1)})`,
           priority: 'must_review',
-          score: Math.min(1, (block.cps - 15) / 10),
+          score: Math.min(1, (block.cps - adminSettings.enMaxCps) / 10),
           blockId: block.id,
         })
       }
-      const overLen = block.target.split('\n').some(line => line.length > 42)
+      const overLen = block.source.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)
       if (overLen) {
         items.push({
           id: `len-${block.id}`,
           nodeId: 'subtitle_format',
-          reason: '42文字超過行あり',
+          reason: `${adminSettings.enMaxCharsPerLine}文字超過行あり`,
           priority: 'should_review',
           score: 0.6,
           blockId: block.id,
@@ -345,7 +387,7 @@ export default function App() {
       reviewItems: items,
       nodeTraces: traces,
     }
-  }, [])
+  }, [adminSettings.enMaxCharsPerLine, adminSettings.enMaxCps])
 
   const persistSessionSnapshot = useCallback((
     next: {
@@ -729,21 +771,21 @@ export default function App() {
     },
   }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
 
-  const confirmAndLoadVideo = useCallback((doLoad: () => void) => {
+  const confirmAndLoadVideo = useCallback((name: string, doLoad: () => void) => {
     if (blocks.length > 0) {
-      const ok = window.confirm('新しい動画を読み込むと現在の字幕がリセットされます。続けますか？')
-      if (!ok) return
-      reset([])
+      setPendingVideoLoad({ name, load: doLoad })
+      return
     }
     doLoad()
-  }, [blocks.length, reset])
+  }, [blocks.length])
 
   const handleVideoInput = useCallback((file: File) => {
-    confirmAndLoadVideo(() => loadVideoFile(file))
+    confirmAndLoadVideo(file.name, () => loadVideoFile(file))
   }, [confirmAndLoadVideo, loadVideoFile])
 
   const handleVideoPathInput = useCallback((path: string) => {
-    confirmAndLoadVideo(() => loadVideoPath(path))
+    const name = path.split(/[\\/]/).pop() ?? path
+    confirmAndLoadVideo(name, () => loadVideoPath(path))
   }, [confirmAndLoadVideo, loadVideoPath])
 
   const handleRunPipelineFromReport = useCallback(() => {
@@ -920,7 +962,13 @@ export default function App() {
   const handleApprove = useCallback((id: number) => {
     push(blocks.map(b => {
       if (b.id !== id) return b
-      return { ...b, status: b.status === 'approved' ? 'pending' as const : 'approved' as const }
+      const nextStatus = b.status === 'approved' ? 'pending' as const : 'approved' as const
+      return withEditHistory(
+        { ...b, status: nextStatus },
+        'approve',
+        { status: b.status },
+        { status: nextStatus },
+      )
     }))
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blocks])
@@ -928,7 +976,13 @@ export default function App() {
   const handleFlag = useCallback((id: number) => {
     push(blocks.map(b => {
       if (b.id !== id) return b
-      return { ...b, status: b.status === 'flagged' ? 'pending' as const : 'flagged' as const }
+      const nextStatus = b.status === 'flagged' ? 'pending' as const : 'flagged' as const
+      return withEditHistory(
+        { ...b, status: nextStatus },
+        'flag',
+        { status: b.status },
+        { status: nextStatus },
+      )
     }))
   }, [blocks, push])
 
@@ -993,7 +1047,10 @@ export default function App() {
     const block = blocks[idx]
     const ratio = textBefore.length / Math.max(1, textBefore.length + textAfter.length)
     const splitTime = block.startTime + (block.endTime - block.startTime) * ratio
-    const [b1, b2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    const [rawB1, rawB2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    const before = { id: block.id, source: block.source, startTime: block.startTime, endTime: block.endTime }
+    const b1 = withEditHistory(rawB1, 'split', before, { part: 'first', source: rawB1.source, startTime: rawB1.startTime, endTime: rawB1.endTime })
+    const b2 = withEditHistory(rawB2, 'split', before, { part: 'second', source: rawB2.source, startTime: rawB2.startTime, endTime: rawB2.endTime })
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
@@ -1008,7 +1065,10 @@ export default function App() {
     if (splitTime <= block.startTime || splitTime >= block.endTime) return
     const ratio = (splitTime - block.startTime) / (block.endTime - block.startTime)
     const [textBefore, textAfter] = splitAtWordBoundary(block.source, Math.round(block.source.length * ratio))
-    const [b1, b2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    const [rawB1, rawB2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    const before = { id: block.id, source: block.source, startTime: block.startTime, endTime: block.endTime }
+    const b1 = withEditHistory(rawB1, 'split', before, { method: 'playhead', part: 'first', source: rawB1.source, startTime: rawB1.startTime, endTime: rawB1.endTime })
+    const b2 = withEditHistory(rawB2, 'split', before, { method: 'playhead', part: 'second', source: rawB2.source, startTime: rawB2.startTime, endTime: rawB2.endTime })
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
@@ -1021,7 +1081,10 @@ export default function App() {
     const block = blocks[idx]
     const splitTime = (block.startTime + block.endTime) / 2
     const [textBefore, textAfter] = splitAtWordBoundary(block.source, Math.round(block.source.length / 2))
-    const [b1, b2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    const [rawB1, rawB2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
+    const before = { id: block.id, source: block.source, startTime: block.startTime, endTime: block.endTime }
+    const b1 = withEditHistory(rawB1, 'split', before, { method: 'equal', part: 'first', source: rawB1.source, startTime: rawB1.startTime, endTime: rawB1.endTime })
+    const b2 = withEditHistory(rawB2, 'split', before, { method: 'equal', part: 'second', source: rawB2.source, startTime: rawB2.startTime, endTime: rawB2.endTime })
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
@@ -1031,23 +1094,48 @@ export default function App() {
     const dragIdx = blocks.findIndex(b => b.id === dragId)
     const dropIdx = blocks.findIndex(b => b.id === dropId)
     if (dragIdx === -1 || dropIdx === -1) return
+    if (Math.abs(dragIdx - dropIdx) !== 1) return
 
     const firstIdx = Math.min(dragIdx, dropIdx)
     const secondIdx = Math.max(dragIdx, dropIdx)
     const first = blocks[firstIdx]
     const second = blocks[secondIdx]
-    const mergedText = first.source + ' ' + second.source
+    const mergedText = joinTextParts([first.source, second.source])
+    const mergedTarget = joinTextParts([first.target, second.target])
     const duration = second.endTime - first.startTime
-    const merged: SubtitleBlock = {
-      ...first,
-      endTime: second.endTime,
-      target: first.target + second.target,
-      source: mergedText,
-      cps: duration > 0 ? Math.round(mergedText.length / duration * 10) / 10 : 0,
-      charCount: mergedText.length,
-      status: 'pending',
-      glossaryTerms: [...first.glossaryTerms, ...second.glossaryTerms],
-    }
+    const merged: SubtitleBlock = withEditHistory(
+      {
+        ...first,
+        endTime: second.endTime,
+        target: mergedTarget,
+        source: mergedText,
+        cps: duration > 0 ? Math.round(mergedText.length / duration * 10) / 10 : 0,
+        charCount: mergedText.length,
+        status: 'pending',
+        glossaryTerms: [...first.glossaryTerms, ...second.glossaryTerms],
+        correctionAttempts: [
+          ...(first.correctionAttempts ?? []),
+          ...(second.correctionAttempts ?? []),
+        ].slice(-10),
+        editHistory: [
+          ...(first.editHistory ?? []),
+          ...(second.editHistory ?? []),
+        ].slice(-49),
+      },
+      'merge',
+      {
+        method: dragIdx < dropIdx ? 'manual_merge_next' : 'manual_merge_previous',
+        first: { id: first.id, source: first.source, target: first.target, startTime: first.startTime, endTime: first.endTime },
+        second: { id: second.id, source: second.source, target: second.target, startTime: second.startTime, endTime: second.endTime },
+      },
+      {
+        id: first.id,
+        source: mergedText,
+        target: mergedTarget,
+        startTime: first.startTime,
+        endTime: second.endTime,
+      },
+    )
     const next = blocks.filter((_, i) => i !== secondIdx)
     next[firstIdx] = merged
     push(next)
@@ -1067,9 +1155,16 @@ export default function App() {
         const newStart = currentTimeRef.current
         if (newStart >= block.endTime) return
         const dur = Math.max(0.01, block.endTime - newStart)
-        push(blocks.map(b => b.id !== activeBlockId ? b : {
-          ...b, startTime: newStart, cps: Math.round(b.charCount / dur * 10) / 10,
-        }))
+        push(blocks.map(b => b.id !== activeBlockId ? b : withEditHistory(
+          {
+            ...b,
+            startTime: newStart,
+            cps: Math.round(b.charCount / dur * 10) / 10,
+          },
+          'time_edit',
+          { startTime: b.startTime, endTime: b.endTime },
+          { startTime: newStart, endTime: b.endTime },
+        )))
         return
       }
 
@@ -1081,9 +1176,16 @@ export default function App() {
         const newEnd = currentTimeRef.current
         if (newEnd <= block.startTime) return
         const dur = Math.max(0.01, newEnd - block.startTime)
-        push(blocks.map(b => b.id !== activeBlockId ? b : {
-          ...b, endTime: newEnd, cps: Math.round(b.charCount / dur * 10) / 10,
-        }))
+        push(blocks.map(b => b.id !== activeBlockId ? b : withEditHistory(
+          {
+            ...b,
+            endTime: newEnd,
+            cps: Math.round(b.charCount / dur * 10) / 10,
+          },
+          'time_edit',
+          { startTime: b.startTime, endTime: b.endTime },
+          { startTime: b.startTime, endTime: newEnd },
+        )))
         return
       }
 
@@ -1115,7 +1217,12 @@ export default function App() {
     push(blocks.map(b => {
       if (b.id !== id) return b
       const dur = Math.max(0.01, endTime - startTime)
-      return { ...b, startTime, endTime, cps: Math.round(b.charCount / dur * 10) / 10 }
+      return withEditHistory(
+        { ...b, startTime, endTime, cps: Math.round(b.charCount / dur * 10) / 10 },
+        'time_edit',
+        { startTime: b.startTime, endTime: b.endTime },
+        { startTime, endTime },
+      )
     }))
   }, [blocks, push])
 
@@ -1123,18 +1230,33 @@ export default function App() {
     push(blocks.map(b => {
       if (b.id === id1) {
         const dur = Math.max(0.01, newTime - b.startTime)
-        return { ...b, endTime: newTime, cps: Math.round(b.charCount / dur * 10) / 10 }
+        return withEditHistory(
+          { ...b, endTime: newTime, cps: Math.round(b.charCount / dur * 10) / 10 },
+          'time_edit',
+          { startTime: b.startTime, endTime: b.endTime },
+          { startTime: b.startTime, endTime: newTime },
+        )
       }
       if (b.id === id2) {
         const dur = Math.max(0.01, b.endTime - newTime)
-        return { ...b, startTime: newTime, cps: Math.round(b.charCount / dur * 10) / 10 }
+        return withEditHistory(
+          { ...b, startTime: newTime, cps: Math.round(b.charCount / dur * 10) / 10 },
+          'time_edit',
+          { startTime: b.startTime, endTime: b.endTime },
+          { startTime: newTime, endTime: b.endTime },
+        )
       }
       return b
     }))
   }, [blocks, push])
 
   const handleUpdateTarget = useCallback((id: number, text: string) => {
-    push(blocks.map(b => b.id !== id ? b : { ...b, target: text }))
+    push(blocks.map(b => b.id !== id ? b : withEditHistory(
+      { ...b, target: text },
+      'target_edit',
+      { target: b.target },
+      { target: text },
+    )))
   }, [blocks, push])
 
   /** ターゲット分割: targetBefore/After で2ブロックに分割。sourceは両方コピー */
@@ -1147,23 +1269,34 @@ export default function App() {
     const dur1 = Math.max(0.01, splitTime - block.startTime)
     const dur2 = Math.max(0.01, block.endTime - splitTime)
     const newId = Math.max(...blocks.map(b => b.id)) + 1
-    const b1: SubtitleBlock = {
-      ...block,
-      endTime: splitTime,
-      target: targetBefore,
-      // source はそのままコピー（言語が違うため比率分割しない）
-      cps: Math.round(block.source.length / dur1 * 10) / 10,
-    }
-    const b2: SubtitleBlock = {
-      ...block,
-      id: newId,
-      startTime: splitTime,
-      target: targetAfter,
-      // source はそのままコピー
-      cps: Math.round(block.source.length / dur2 * 10) / 10,
-      status: 'pending' as const,
-      glossaryTerms: [],
-    }
+    const before = { id: block.id, target: block.target, startTime: block.startTime, endTime: block.endTime }
+    const b1: SubtitleBlock = withEditHistory(
+      {
+        ...block,
+        endTime: splitTime,
+        target: targetBefore,
+        // source はそのままコピー（言語が違うため比率分割しない）
+        cps: Math.round(block.source.length / dur1 * 10) / 10,
+      },
+      'split',
+      before,
+      { part: 'first', target: targetBefore, startTime: block.startTime, endTime: splitTime },
+    )
+    const b2: SubtitleBlock = withEditHistory(
+      {
+        ...block,
+        id: newId,
+        startTime: splitTime,
+        target: targetAfter,
+        // source はそのままコピー
+        cps: Math.round(block.source.length / dur2 * 10) / 10,
+        status: 'pending' as const,
+        glossaryTerms: [],
+      },
+      'split',
+      before,
+      { part: 'second', target: targetAfter, startTime: splitTime, endTime: block.endTime },
+    )
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
@@ -1173,7 +1306,12 @@ export default function App() {
     push(blocks.map(b => {
       if (b.id !== id) return b
       const duration = b.endTime - b.startTime
-      return { ...b, source: text, cps: Math.round(text.length / Math.max(0.1, duration) * 10) / 10, charCount: text.length }
+      return withEditHistory(
+        { ...b, source: text, cps: Math.round(text.length / Math.max(0.1, duration) * 10) / 10, charCount: text.length },
+        'source_edit',
+        { source: b.source },
+        { source: text },
+      )
     }))
   }, [blocks, push])
 
@@ -1183,11 +1321,21 @@ export default function App() {
       if (type === 'typo') {
         const cur = b.ignoredTypos ?? []
         const next = cur.includes(key) ? cur.filter(k => k !== key) : [...cur, key]
-        return { ...b, ignoredTypos: next }
+        return withEditHistory(
+          { ...b, ignoredTypos: next },
+          'ignore_warning',
+          { type, ignoredTypos: cur },
+          { type, ignoredTypos: next },
+        )
       } else {
         const cur = b.ignoredMissing ?? []
         const next = cur.includes(key) ? cur.filter(k => k !== key) : [...cur, key]
-        return { ...b, ignoredMissing: next }
+        return withEditHistory(
+          { ...b, ignoredMissing: next },
+          'ignore_warning',
+          { type, ignoredMissing: cur },
+          { type, ignoredMissing: next },
+        )
       }
     }))
   }, [blocks, push])
@@ -1239,6 +1387,102 @@ export default function App() {
           pointerEvents: 'none',
         }}>
           {t.restored}
+        </div>
+      )}
+      {pendingVideoLoad && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="video-load-choice-title"
+          onClick={() => setPendingVideoLoad(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+            background: theme.id === 'poc' ? 'rgba(2,6,16,0.82)' : 'rgba(20,24,32,0.45)',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: 'min(480px, 100%)',
+              borderRadius: 8,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.id === 'poc' ? '#121a2b' : '#ffffff',
+              boxShadow: '0 16px 40px rgba(0,0,0,0.35)',
+              padding: 16,
+              display: 'grid',
+              gap: 12,
+            }}
+          >
+            <div id="video-load-choice-title" style={{ fontSize: 15, fontWeight: 700, color: theme.textPrimary }}>
+              {t.videoLoadChoiceTitle}
+            </div>
+            <div style={{ fontSize: 12, lineHeight: 1.7, color: theme.textSecondary }}>
+              {t.videoLoadChoiceDesc(pendingVideoLoad.name, blocks.length)}
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => setPendingVideoLoad(null)}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: theme.btnText,
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                {t.videoLoadCancel}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const pending = pendingVideoLoad
+                  setPendingVideoLoad(null)
+                  pending.load()
+                }}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: theme.btnText,
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                {t.videoLoadKeep}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const pending = pendingVideoLoad
+                  setPendingVideoLoad(null)
+                  reset([])
+                  pending.load()
+                }}
+                style={{
+                  border: `1px solid ${theme.accent}`,
+                  background: theme.accent,
+                  color: '#fff',
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                {t.videoLoadReset}
+              </button>
+            </div>
+          </div>
         </div>
       )}
       <main
@@ -1308,6 +1552,7 @@ export default function App() {
             onBlockSelect={handleBlockSelect}
             onAdjustBoundary={handleAdjustBoundary}
             trackHeight={timelineH}
+            maxCps={adminSettings.enMaxCps}
           />
         </section>
 
@@ -1514,7 +1759,7 @@ export default function App() {
                     CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%
                   </span>
                   <span>
-                    42文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%
+                    {adminSettings.enMaxCharsPerLine}文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%
                   </span>
                   <span>
                     要確認: {pipelineRun.metrics.quality.flaggedCount}件
@@ -1572,6 +1817,8 @@ export default function App() {
                 onUpdateTimes={handleUpdateTimes}
                 onIgnoreWarning={handleIgnoreWarning}
                 onDraftChange={handleDraftChange}
+                maxCps={adminSettings.enMaxCps}
+                maxCharsPerLine={adminSettings.enMaxCharsPerLine}
               />
             )}
             {!isResizing && activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}
@@ -1582,6 +1829,7 @@ export default function App() {
                 pipelineRun={pipelineRun}
                 videoSourceName={videoSource?.name ?? null}
                 onRunPipeline={handleRunPipelineFromReport}
+                maxCharsPerLine={adminSettings.enMaxCharsPerLine}
               />
             )}
             {!isResizing && activeTab === 'settings' && (

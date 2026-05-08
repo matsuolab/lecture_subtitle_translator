@@ -25,6 +25,8 @@ interface SubtitleBlockListProps {
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
+  maxCps: number
+  maxCharsPerLine: number
 }
 
 interface BoundaryDrag {
@@ -174,6 +176,8 @@ export function SubtitleBlockList({
   onUpdateTimes,
   onIgnoreWarning,
   onDraftChange,
+  maxCps,
+  maxCharsPerLine,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -182,8 +186,6 @@ export function SubtitleBlockList({
   const [scrollRatio, setScrollRatio] = useState(0)
   const [viewportRatio, setViewportRatio] = useState(1)
   const [thumbDragging, setThumbDragging] = useState(false)
-  const [draggingId, setDraggingId] = useState<number | null>(null)
-  const [dragOverId, setDragOverId] = useState<number | null>(null)
   const [boundaryDrag, setBoundaryDrag] = useState<BoundaryDrag | null>(null)
   const [previewBoundaryTime, setPreviewBoundaryTime] = useState<number | null>(null)
   // stale closure 回避: ref で最新値を保持
@@ -377,18 +379,6 @@ export function SubtitleBlockList({
     })
   }, [onApprove, onBlockSelect, displayBlocks])
 
-  const handleDragStart = useCallback((id: number) => setDraggingId(id), [])
-  const handleDragEnd = useCallback(() => { setDraggingId(null); setDragOverId(null) }, [])
-  const handleDragOver = useCallback((id: number) => setDragOverId(id), [])
-
-  const handleDrop = useCallback((dropId: number) => {
-    setDraggingId(prev => {
-      if (prev !== null && prev !== dropId) onMerge(prev, dropId)
-      return null
-    })
-    setDragOverId(null)
-  }, [onMerge])
-
   const handleBoundaryMouseDown = (
     e: React.MouseEvent,
     id1: number,
@@ -437,8 +427,6 @@ export function SubtitleBlockList({
                 : currentTime > block.endTime ? 100
                 : (currentTime - block.startTime) / (block.endTime - block.startTime) * 100
               }
-              isDragging={draggingId === block.id}
-              isDragOver={dragOverId === block.id && draggingId !== block.id}
               onSelect={onBlockSelect}
               onApprove={handleApprove}
               onFlag={onFlag}
@@ -453,10 +441,20 @@ export function SubtitleBlockList({
               onUpdateTimes={onUpdateTimes}
               onIgnoreWarning={onIgnoreWarning}
               onDraftChange={onDraftChange}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-              onDragOver={handleDragOver}
-              onDrop={handleDrop}
+              canMergePrevious={idx > 0 && displayBlocks[idx - 1].status !== 'approved'}
+              canMergeNext={idx < displayBlocks.length - 1 && displayBlocks[idx + 1].status !== 'approved'}
+              onMergeWithPrevious={id => {
+                const currentIdx = displayBlocks.findIndex(b => b.id === id)
+                const prev = currentIdx > 0 ? displayBlocks[currentIdx - 1] : undefined
+                if (prev && prev.status !== 'approved') onMerge(prev.id, id)
+              }}
+              onMergeWithNext={id => {
+                const currentIdx = displayBlocks.findIndex(b => b.id === id)
+                const next = currentIdx >= 0 ? displayBlocks[currentIdx + 1] : undefined
+                if (next && next.status !== 'approved') onMerge(id, next.id)
+              }}
+              maxCps={maxCps}
+              maxCharsPerLine={maxCharsPerLine}
             />
           </div>
           {idx < displayBlocks.length - 1 && (() => {
@@ -524,7 +522,7 @@ export function SubtitleBlockList({
           >
             {/* 各ブロックをCPS色でストライプ表示：問題あるほど目立つ */}
             {displayBlocks.map((b, i) => {
-              const level = getCpsLevel(b.cps)
+              const level = getCpsLevel(b.cps, maxCps)
               const color = level === 'ok'
                 ? theme.cpsBadgeOk[0]
                 : level === 'warn'
