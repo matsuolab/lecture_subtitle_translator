@@ -208,12 +208,31 @@ function buildAuthHeaders(settings: AdminSettings): Record<string, string> {
   return { Authorization: token.toLowerCase().startsWith('bearer ') ? token : `Bearer ${token}` }
 }
 
-function formatFetchError(stage: string, error: unknown, extra?: string): Error {
-  const suffix = extra ? ` (${extra})` : ''
-  if (error instanceof Error) {
-    return new Error(`${stage} failed${suffix}: ${error.message}`)
+function getFetchRuntimeContext(): string {
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown-origin'
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown-user-agent'
+  return `origin=${origin}; userAgent=${userAgent}`
+}
+
+function normalizeFetchTarget(target?: string): string {
+  if (!target) return ''
+  try {
+    const url = new URL(target)
+    return `${url.protocol}//${url.host}${url.pathname}`
+  } catch {
+    return target
   }
-  return new Error(`${stage} failed${suffix}`)
+}
+
+function formatFetchError(stage: string, error: unknown, extra?: string): Error {
+  const target = normalizeFetchTarget(extra)
+  const suffix = target ? ` (${target})` : ''
+  const context = getFetchRuntimeContext()
+  const hint = 'HTTPレスポンス前に失敗しました。CORS、DNS/TLS、WebKitのネットワーク制限、またはService URLを確認してください。'
+  if (error instanceof Error) {
+    return new Error(`${stage} failed${suffix}: ${error.name}: ${error.message} / ${hint} / ${context}`)
+  }
+  return new Error(`${stage} failed${suffix}: ${String(error || 'unknown error')} / ${hint} / ${context}`)
 }
 
 function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
@@ -815,10 +834,15 @@ function validateManagedServiceConnectionInputs(settings: AdminSettings): string
 
 async function fetchManagedConnectionCheck(settings: AdminSettings, signal?: AbortSignal): Promise<ManagedConnectionCheck> {
   const apiBase = validateManagedServiceConnectionInputs(settings)
-  const response = await fetch(`${apiBase}/v1/connection-check`, {
-    headers: buildAuthHeaders(settings),
-    signal,
-  })
+  let response: Response
+  try {
+    response = await fetch(`${apiBase}/v1/connection-check`, {
+      headers: buildAuthHeaders(settings),
+      signal,
+    })
+  } catch (error) {
+    throw formatFetchError('managed connection check request', error, `${apiBase}/v1/connection-check`)
+  }
   if (response.status === 401 || response.status === 403) {
     throw new Error(`認証に失敗しました: HTTP ${response.status}`)
   }
