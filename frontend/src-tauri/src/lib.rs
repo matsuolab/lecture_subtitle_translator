@@ -470,10 +470,28 @@ impl VideoServerState {
     }
 }
 
+fn cors_headers() -> Vec<tiny_http::Header> {
+    vec![
+        tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+        tiny_http::Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, OPTIONS, HEAD"[..]).unwrap(),
+        tiny_http::Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Range, If-Range, If-None-Match, If-Modified-Since"[..]).unwrap(),
+        tiny_http::Header::from_bytes(&b"Access-Control-Expose-Headers"[..], &b"Content-Length, Content-Range, Accept-Ranges"[..]).unwrap(),
+    ]
+}
+
 fn handle_video_request(
     request: tiny_http::Request,
     tokens: Arc<Mutex<HashMap<String, PathBuf>>>,
 ) -> std::io::Result<()> {
+    // OPTIONS preflight 対応
+    if request.method() == &tiny_http::Method::Options {
+        let mut response = tiny_http::Response::empty(204);
+        for h in cors_headers() {
+            response.add_header(h);
+        }
+        return request.respond(response);
+    }
+
     let url = request.url().to_string();
     let token = match url.strip_prefix("/video/") {
         Some(s) => s.split('?').next().unwrap_or(s),
@@ -537,6 +555,7 @@ fn handle_video_request(
         }
     };
 
+    let has_range = range_str.is_some();
     let (start, end) = if let Some(range) = range_str
         .as_deref()
         .and_then(|r| parse_range_header(r, file_size))
@@ -545,7 +564,8 @@ fn handle_video_request(
         let actual_end = e.min(s + VIDEO_CHUNK_MAX - 1).min(file_size.saturating_sub(1));
         (s, actual_end)
     } else {
-        (0, file_size.saturating_sub(1).min(64 * 1024 - 1))
+        // Rangeなしの初回要求: 全長ヒントを返しつつ最初のチャンクを送る
+        (0, file_size.saturating_sub(1).min(VIDEO_CHUNK_MAX - 1))
     };
     let length = end.saturating_sub(start) + 1;
 
@@ -556,8 +576,11 @@ fn handle_video_request(
     }
 
     let limited = file.take(length);
+    // Rangeリクエスト → 206 Partial Content
+    // 通常GET → 200 OK
+    let status = if has_range { 206 } else { 200 };
     let mut response = tiny_http::Response::new(
-        tiny_http::StatusCode(206),
+        tiny_http::StatusCode(status),
         Vec::new(),
         limited,
         Some(length as usize),
@@ -566,16 +589,28 @@ fn handle_video_request(
     response.add_header(
         tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap(),
     );
-    response.add_header(
-        tiny_http::Header::from_bytes(
-            &b"Content-Range"[..],
-            format!("bytes {start}-{end}/{file_size}").as_bytes(),
-        )
-        .unwrap(),
-    );
+    if has_range {
+        response.add_header(
+            tiny_http::Header::from_bytes(
+                &b"Content-Range"[..],
+                format!("bytes {start}-{end}/{file_size}").as_bytes(),
+            )
+            .unwrap(),
+        );
+    }
     response.add_header(
         tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
     );
+    response.add_header(
+        tiny_http::Header::from_bytes(
+            &b"Cache-Control"[..],
+            &b"no-cache, no-store, must-revalidate"[..],
+        )
+        .unwrap(),
+    );
+    for h in cors_headers() {
+        response.add_header(h);
+    }
 
     request.respond(response)
 }
