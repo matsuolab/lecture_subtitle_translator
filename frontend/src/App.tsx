@@ -312,13 +312,15 @@ export default function App() {
   const loadVideoPath = useCallback(async (path: string) => {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
-    // Windows(WebView2): convertFileSrc → http://asset.localhost が動作するため変更不要
-    // Linux(WebKitGTK)/Mac(WKWebView): カスタムURIスキームから<video>要素にデータを供給できない
-    //   WebKit仕様の制限のため、Rust側で127.0.0.1にローカルHTTPサーバを起動し
-    //   Range対応でストリーミング配信する。トークン付きURLで他プロセスからの参照を防止
-    const isWindows = navigator.userAgent.includes('Windows')
+    // 各OSのWebView動作:
+    //   Windows (WebView2/Chromium): convertFileSrc → http://asset.localhost で動作
+    //   macOS (WKWebView): convertFileSrc → asset://localhost で動作 (カスタムスキーム対応)
+    //   Linux (WebKitGTK): asset://がGStreamer経由のメディアロードで機能しない
+    //     → ローカルHTTPサーバ(127.0.0.1) からRange対応で配信
+    // ※ Linux以外を一律HTTPサーバにすると macOS の ATS で別問題が出るため、Linuxのみ分岐
+    const isLinux = /\bLinux\b/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)
     let url: string
-    if (isWindows) {
+    if (!isLinux) {
       url = convertFileSrc(path)
     } else {
       try {
