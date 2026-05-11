@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io,
+    io::{self, Read, Seek, SeekFrom},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -20,6 +20,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(backend_state)
         .plugin(tauri_plugin_fs::init())
+        .register_uri_scheme_protocol("videofile", |_app, request| {
+            serve_video_file(request)
+        })
         .invoke_handler(tauri::generate_handler![
             ensure_local_legacy_backend_ready,
             check_local_whisperx,
@@ -345,6 +348,108 @@ fn run_whisperx_cli(audio_path: &str, _language: &str) -> Result<serde_json::Val
 
     let _ = fs::remove_dir_all(&output_dir);
     result
+}
+
+// videofile:// カスタムスキームハンドラ
+// asset:// はLinux(WebKitGTK)でRangeリクエストが機能しないため独自実装
+const VIDEO_CHUNK_MAX: u64 = 32 * 1024 * 1024; // 32MiB per Range response
+
+fn serve_video_file(request: tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    let path_raw = request.uri().path().to_string();
+    let path_decoded = percent_decode(&path_raw);
+
+    #[cfg(target_os = "windows")]
+    let file_path_str = path_decoded.trim_start_matches('/').to_string();
+    #[cfg(not(target_os = "windows"))]
+    let file_path_str = path_decoded.clone();
+
+    let file_path = Path::new(&file_path_str);
+
+    let file_size = match fs::metadata(file_path) {
+        Ok(m) => m.len(),
+        Err(_) => return error_response(404, "Not found"),
+    };
+
+    let mime = match file_path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("mp4") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("mkv") => "video/x-matroska",
+        Some("webm") => "video/webm",
+        _ => "video/mp4",
+    };
+
+    let mut file = match fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return error_response(500, "Failed to open file"),
+    };
+
+    let range = request.headers()
+        .get("Range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| parse_range_header(s, file_size));
+
+    let (start, requested_end) = range.unwrap_or((0, file_size.saturating_sub(1)));
+    // Rangeヘッダーなしの場合は先頭64KBのみ返してRangeサポートを通知する
+    let actual_end = if range.is_none() {
+        file_size.saturating_sub(1).min(64 * 1024 - 1)
+    } else {
+        requested_end.min(start + VIDEO_CHUNK_MAX - 1)
+    };
+    let length = actual_end.saturating_sub(start) + 1;
+
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return error_response(416, "Range not satisfiable");
+    }
+
+    let mut buffer = vec![0u8; length as usize];
+    let read = file.read(&mut buffer).unwrap_or(0);
+    buffer.truncate(read);
+    let actual_end = start + read.saturating_sub(1) as u64;
+
+    tauri::http::Response::builder()
+        .status(206)
+        .header("Content-Type", mime)
+        .header("Content-Range", format!("bytes {start}-{actual_end}/{file_size}"))
+        .header("Content-Length", read.to_string())
+        .header("Accept-Ranges", "bytes")
+        .body(buffer)
+        .unwrap_or_else(|_| error_response(500, "Response build error"))
+}
+
+fn error_response(status: u16, msg: &str) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .body(msg.as_bytes().to_vec())
+        .unwrap()
+}
+
+fn parse_range_header(range: &str, file_size: u64) -> Option<(u64, u64)> {
+    let range = range.strip_prefix("bytes=")?;
+    let mut parts = range.splitn(2, '-');
+    let start: u64 = parts.next()?.parse().ok()?;
+    let end: u64 = parts.next()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(file_size.saturating_sub(1))
+        .min(file_size.saturating_sub(1));
+    (start <= end && start < file_size).then_some((start, end))
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let h1 = chars.next().unwrap_or('0');
+            let h2 = chars.next().unwrap_or('0');
+            if let Ok(b) = u8::from_str_radix(&format!("{h1}{h2}"), 16) {
+                out.push(b as char);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn resolve_repo_root() -> Result<PathBuf, String> {

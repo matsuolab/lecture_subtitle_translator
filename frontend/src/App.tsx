@@ -307,19 +307,16 @@ export default function App() {
     })
   }, [])
 
-  const loadVideoPath = useCallback(async (path: string) => {
+  const loadVideoPath = useCallback((path: string) => {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
-    const ext = name.split('.').pop()?.toLowerCase() ?? ''
-    const mimeMap: Record<string, string> = {
-      mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', webm: 'video/webm',
-    }
-    const mime = mimeMap[ext] ?? 'video/mp4'
-    const bytes = await readFile(path)
-    const blob = new Blob([bytes], { type: mime })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
-      return URL.createObjectURL(blob)
+      // パスをセグメント単位でパーセントエンコードしてカスタムスキームURLに変換
+      const normalized = path.replace(/\\/g, '/')
+      const withSlash = normalized.startsWith('/') ? normalized : '/' + normalized
+      const encoded = withSlash.split('/').map(encodeURIComponent).join('/')
+      return `videofile://localhost${encoded}`
     })
   }, [])
 
