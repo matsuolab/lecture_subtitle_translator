@@ -47,6 +47,25 @@ def test_service_config_endpoint() -> None:
     assert payload["auth"]["mode"] in ("none", "bearer_token")
 
 
+def test_service_config_requires_bearer_token() -> None:
+    app = _load_app_with_env({
+        "MANAGED_SERVICE_BACKEND": "local",
+        "MANAGED_SERVICE_AUTH_MODE": "bearer_token",
+        "MANAGED_SERVICE_BEARER_TOKEN": "secret-token",
+    })
+    client = TestClient(app)
+
+    no_auth = client.get("/v1/service-config")
+    assert no_auth.status_code == 401
+
+    bad_auth = client.get("/v1/service-config", headers={"Authorization": "Bearer wrong-token"})
+    assert bad_auth.status_code == 401
+
+    good_auth = client.get("/v1/service-config", headers={"Authorization": "Bearer secret-token"})
+    assert good_auth.status_code == 200
+    assert good_auth.json()["service"] == "subtitle-managed-service"
+
+
 def test_managed_upload_and_job_flow() -> None:
     app = _load_app_with_env({"MANAGED_SERVICE_BACKEND": "local", "MANAGED_SERVICE_AUTH_MODE": "none"})
     client = TestClient(app)
