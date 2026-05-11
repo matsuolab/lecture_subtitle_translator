@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useTransition } from 'react'
-import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { Download, Save, FolderOpen, Settings, Film, Pin, PinOff } from 'lucide-react'
@@ -189,6 +189,8 @@ export default function App() {
   const srtImportRef = useRef<HTMLInputElement>(null)
   const videoFileRef = useRef<HTMLInputElement>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  // TODO: session復元時にvideoSource.pathがある場合、loadVideoPath(path)で
+  //       自動再ロード（新トークンでURL再生成）。現状ユーザー手動再ロードが必要。
   const [videoSource, setVideoSource] = useState<VideoSource | null>(
     restoredSession?.session?.videoSource
       ? {
@@ -307,12 +309,43 @@ export default function App() {
     })
   }, [])
 
-  const loadVideoPath = useCallback((path: string) => {
+  const loadVideoPath = useCallback(async (path: string) => {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
+    // 各OSのWebView動作:
+    //   Windows (WebView2/Chromium): convertFileSrc → http://asset.localhost で動作
+    //   macOS (WKWebView): convertFileSrc → asset://localhost で動作 (カスタムスキーム対応)
+    //   Linux (WebKitGTK): asset://がGStreamer経由のメディアロードで機能しない
+    //     → ローカルHTTPサーバ(127.0.0.1) からRange対応で配信
+    // ※ Linux以外を一律HTTPサーバにすると macOS の ATS で別問題が出るため、Linuxのみ分岐
+    const isLinux = /\bLinux\b/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)
+    let url: string
+    if (!isLinux) {
+      url = convertFileSrc(path)
+    } else {
+      try {
+        url = await invoke<string>('register_video', { path })
+        console.info('[video] using local HTTP server URL:', url)
+        // 診断: JSのfetchで /healthz と HEAD /video を試して、CSPで弾かれてるか実通信失敗か切り分け
+        try {
+          const base = url.replace(/\/video\/.+$/, '')
+          const healthRes = await fetch(`${base}/healthz`)
+          console.info('[video][diag] /healthz fetch:', healthRes.status, await healthRes.text())
+          const headRes = await fetch(url, { method: 'HEAD' })
+          console.info('[video][diag] HEAD /video:', headRes.status, 'content-type:', headRes.headers.get('content-type'))
+        } catch (diagErr) {
+          console.error('[video][diag] direct fetch failed (likely CSP block):', diagErr)
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[video] register_video failed:', msg)
+        alert(`動画読込失敗: register_video → ${msg}`)
+        return
+      }
+    }
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
-      return convertFileSrc(path)
+      return url
     })
   }, [])
 
@@ -883,10 +916,12 @@ export default function App() {
   const handleRightDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOverRight(false)
-    lastHtmlDropRef.current = Date.now()
     const file = e.dataTransfer.files[0]
     if (!file) return
     const name = file.name.toLowerCase()
+    // 動画ファイルはTauriネイティブD&Dハンドラに委ねる（ファイルパス取得のため）
+    if (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.mkv') || name.endsWith('.webm')) return
+    lastHtmlDropRef.current = Date.now()
     if (name.endsWith('.srt') || name.endsWith('.txt')) {
       try {
         const imported = await importSrt(file)
@@ -985,6 +1020,29 @@ export default function App() {
     handleVideoInput(file)
     e.target.value = ''
   }, [handleVideoInput])
+
+  // Tauri環境ではdialog APIでパスを取得（HTMLのFileオブジェクトだとpathが取れず
+  // S3アップロードでブラウザfetchに落ちてLinuxのtauri://オリジン拒否で失敗する）
+  const handleOpenVideoFile = useCallback(async () => {
+    if (!isTauri()) {
+      videoFileRef.current?.click()
+      return
+    }
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi'] }],
+      })
+      if (typeof selected === 'string' && selected) {
+        handleVideoPathInput(selected)
+      }
+    } catch (err) {
+      console.error('failed to open video dialog', err)
+      videoFileRef.current?.click()
+    }
+  }, [handleVideoPathInput])
 
   // I/O ショートカット用: currentTime は毎フレーム変わるため ref で保持
   const currentTimeRef = useRef(currentTime)
@@ -1548,7 +1606,7 @@ export default function App() {
             <input ref={videoFileRef} type="file" accept="video/*" onChange={handleLoadVideo} style={{ display: 'none' }} />
             <button
               className="flex items-center gap-1 ml-auto"
-              onClick={() => videoFileRef.current?.click()}
+              onClick={handleOpenVideoFile}
               style={{
                 fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
                 borderRadius: 5, border: `1px solid ${theme.panelBorder}`,

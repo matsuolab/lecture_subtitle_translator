@@ -5,6 +5,7 @@ import { formatLines } from './formatLines'
 import { resolveExpandModelId, resolveExpandSystemPrompt } from './prompts'
 import { normalizeSpaces } from './textUtils'
 import { requireAiConnection, resolveChatModelForProvider } from './aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 async function callExpand(
   enText: string,
@@ -15,7 +16,7 @@ async function callExpand(
   const model = resolveChatModelForProvider(settings, resolveExpandModelId(settings))
   const systemPrompt = resolveExpandSystemPrompt(settings, settings.expandPromptOverride)
 
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

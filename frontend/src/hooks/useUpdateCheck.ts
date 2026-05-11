@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 const REPO = 'matsuolab/lecture_subtitle_translator'
 const CACHE_DATE_KEY = 'update_check_last_date'
@@ -86,9 +87,9 @@ async function fetchLatestRelease(): Promise<GitHubRelease> {
   const token = import.meta.env.VITE_GITHUB_TOKEN as string | undefined
   const headers: Record<string, string> = { Accept: 'application/vnd.github+json' }
   if (token) headers['Authorization'] = `Bearer ${token}`
-  const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers })
+  const res = await tauriFetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers })
   if (!res.ok) throw new FetchReleaseHttpError({ httpStatus: res.status })
-  return res.json() as Promise<GitHubRelease>
+  return res.json<GitHubRelease>()
 }
 
 export function useUpdateCheck(): UseUpdateCheckReturn {
@@ -116,13 +117,13 @@ export function useUpdateCheck(): UseUpdateCheckReturn {
 
     const controller = new AbortController()
 
-    fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+    tauriFetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
       headers: { Accept: 'application/vnd.github+json' },
       signal: controller.signal,
     })
       .then(res => {
         if (!res.ok) throw new FetchReleaseHttpError({ httpStatus: res.status })
-        return res.json() as Promise<GitHubRelease>
+        return res.json<GitHubRelease>()
       })
       .then(data => {
         const today = todayString()
