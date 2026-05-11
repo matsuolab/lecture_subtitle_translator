@@ -813,10 +813,11 @@ function validateManagedServiceConnectionInputs(settings: AdminSettings): string
   return apiBase
 }
 
-async function fetchManagedConnectionCheck(settings: AdminSettings): Promise<ManagedConnectionCheck> {
+async function fetchManagedConnectionCheck(settings: AdminSettings, signal?: AbortSignal): Promise<ManagedConnectionCheck> {
   const apiBase = validateManagedServiceConnectionInputs(settings)
   const response = await fetch(`${apiBase}/v1/connection-check`, {
     headers: buildAuthHeaders(settings),
+    signal,
   })
   if (response.status === 401 || response.status === 403) {
     throw new Error(`認証に失敗しました: HTTP ${response.status}`)
@@ -861,7 +862,7 @@ function validateManagedConnectionCheckPayload(config: ManagedConnectionCheck): 
   }
 }
 
-export async function testServiceConnection(settings: AdminSettings): Promise<ServiceConnectionCheck> {
+export async function testServiceConnection(settings: AdminSettings, signal?: AbortSignal): Promise<ServiceConnectionCheck> {
   try {
     const apiBase = resolveServiceBase(settings)
     if (!apiBase) {
@@ -869,7 +870,7 @@ export async function testServiceConnection(settings: AdminSettings): Promise<Se
     }
 
     if (settings.serviceMode === 'managed_service') {
-      const config = await fetchManagedConnectionCheck(settings)
+      const config = await fetchManagedConnectionCheck(settings, signal)
       validateManagedConnectionCheckPayload(config)
       if (!config.ok) {
         const failed = config.checks
