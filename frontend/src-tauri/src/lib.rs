@@ -23,6 +23,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(backend_state)
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("videofile", |_app, request| {
             serve_video_file(request)
         })

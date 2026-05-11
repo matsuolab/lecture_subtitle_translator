@@ -997,6 +997,29 @@ export default function App() {
     e.target.value = ''
   }, [handleVideoInput])
 
+  // Tauri環境ではdialog APIでパスを取得（HTMLのFileオブジェクトだとpathが取れず
+  // S3アップロードでブラウザfetchに落ちてLinuxのtauri://オリジン拒否で失敗する）
+  const handleOpenVideoFile = useCallback(async () => {
+    if (!isTauri()) {
+      videoFileRef.current?.click()
+      return
+    }
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi'] }],
+      })
+      if (typeof selected === 'string' && selected) {
+        handleVideoPathInput(selected)
+      }
+    } catch (err) {
+      console.error('failed to open video dialog', err)
+      videoFileRef.current?.click()
+    }
+  }, [handleVideoPathInput])
+
   // I/O ショートカット用: currentTime は毎フレーム変わるため ref で保持
   const currentTimeRef = useRef(currentTime)
   useEffect(() => { currentTimeRef.current = currentTime }, [currentTime])
@@ -1559,7 +1582,7 @@ export default function App() {
             <input ref={videoFileRef} type="file" accept="video/*" onChange={handleLoadVideo} style={{ display: 'none' }} />
             <button
               className="flex items-center gap-1 ml-auto"
-              onClick={() => videoFileRef.current?.click()}
+              onClick={handleOpenVideoFile}
               style={{
                 fontSize: 11, color: theme.textSecondary, padding: '3px 8px',
                 borderRadius: 5, border: `1px solid ${theme.panelBorder}`,
