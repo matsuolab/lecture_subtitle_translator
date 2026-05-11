@@ -5,7 +5,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -19,20 +19,21 @@ pub fn run() {
     configure_webview2_user_data_dir();
 
     let backend_state = LocalBackendState::default();
+    let video_server_state = VideoServerState::start()
+        .expect("failed to start local video server");
 
     tauri::Builder::default()
         .manage(backend_state)
+        .manage(video_server_state)
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .register_uri_scheme_protocol("videofile", |_app, request| {
-            serve_video_file(request)
-        })
         .invoke_handler(tauri::generate_handler![
             ensure_local_legacy_backend_ready,
             check_local_whisperx,
             transcribe_local,
             extract_audio,
             http_request,
+            register_video,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
@@ -426,84 +427,165 @@ fn run_whisperx_cli(audio_path: &str, _language: &str) -> Result<serde_json::Val
     result
 }
 
-// videofile:// カスタムスキームハンドラ
-// asset:// はLinux(WebKitGTK)でRangeリクエストが機能しないため独自実装
+// ローカル動画HTTPサーバ
+// WebKitGTK(Linux)/WKWebView(Mac) はカスタムURIスキーム(asset:// videofile://)
+// から <video> 要素にデータを供給できないため、127.0.0.1 上にHTTPサーバを起動して
+// Range対応でストリーミング配信する。
+// セキュリティ:
+// - 127.0.0.1 のみバインド(外部ネットワーク不可)
+// - 動画ごとに128bitランダムトークンを発行(任意パス読取不可)
+// - トークンはメモリ上のみ(セッション終了で消失)
 const VIDEO_CHUNK_MAX: u64 = 32 * 1024 * 1024; // 32MiB per Range response
 
-fn serve_video_file(request: tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
-    let path_raw = request.uri().path().to_string();
-    let path_decoded = percent_decode(&path_raw);
+struct VideoServerState {
+    port: u16,
+    tokens: Arc<Mutex<HashMap<String, PathBuf>>>,
+}
 
-    #[cfg(target_os = "windows")]
-    let file_path_str = path_decoded.trim_start_matches('/').to_string();
-    #[cfg(not(target_os = "windows"))]
-    let file_path_str = path_decoded.clone();
+impl VideoServerState {
+    fn start() -> Result<Self, String> {
+        let server = tiny_http::Server::http("127.0.0.1:0")
+            .map_err(|e| format!("failed to bind video server: {e}"))?;
+        let port = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| String::from("video server has no IP address"))?
+            .port();
 
-    let file_path = Path::new(&file_path_str);
+        let tokens: Arc<Mutex<HashMap<String, PathBuf>>> = Arc::new(Mutex::new(HashMap::new()));
+        let tokens_clone = Arc::clone(&tokens);
 
-    let file_size = match fs::metadata(file_path) {
-        Ok(m) => m.len(),
-        Err(_) => return error_response(404, "Not found"),
+        std::thread::spawn(move || {
+            for request in server.incoming_requests() {
+                let tokens = Arc::clone(&tokens_clone);
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_video_request(request, tokens) {
+                        eprintln!("video server request error: {e}");
+                    }
+                });
+            }
+        });
+
+        Ok(Self { port, tokens })
+    }
+}
+
+fn handle_video_request(
+    request: tiny_http::Request,
+    tokens: Arc<Mutex<HashMap<String, PathBuf>>>,
+) -> std::io::Result<()> {
+    let url = request.url().to_string();
+    let token = match url.strip_prefix("/video/") {
+        Some(s) => s.split('?').next().unwrap_or(s),
+        None => {
+            return request.respond(
+                tiny_http::Response::from_string("not found").with_status_code(404),
+            );
+        }
     };
 
-    let mime = match file_path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("mp4") => "video/mp4",
+    let path = {
+        let guard = tokens.lock().unwrap();
+        guard.get(token).cloned()
+    };
+
+    let path = match path {
+        Some(p) => p,
+        None => {
+            return request.respond(
+                tiny_http::Response::from_string("invalid token").with_status_code(403),
+            );
+        }
+    };
+
+    let metadata = match fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => {
+            return request.respond(
+                tiny_http::Response::from_string("file not found").with_status_code(404),
+            );
+        }
+    };
+    let file_size = metadata.len();
+
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mp4") | Some("m4v") => "video/mp4",
         Some("mov") => "video/quicktime",
         Some("mkv") => "video/x-matroska",
         Some("webm") => "video/webm",
+        Some("avi") => "video/x-msvideo",
         _ => "video/mp4",
     };
 
-    let mut file = match fs::File::open(file_path) {
+    let range_str = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .map(|h| h.value.as_str().to_string());
+
+    let mut file = match fs::File::open(&path) {
         Ok(f) => f,
-        Err(_) => return error_response(500, "Failed to open file"),
+        Err(_) => {
+            return request.respond(
+                tiny_http::Response::from_string("open failed").with_status_code(500),
+            );
+        }
     };
 
-    let range = request.headers()
-        .get("Range")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| parse_range_header(s, file_size));
-
-    let (start, requested_end) = range.unwrap_or((0, file_size.saturating_sub(1)));
-    // Rangeヘッダーなしの場合は先頭64KBのみ返してRangeサポートを通知する
-    let actual_end = if range.is_none() {
-        file_size.saturating_sub(1).min(64 * 1024 - 1)
+    let (start, end) = if let Some(range) = range_str
+        .as_deref()
+        .and_then(|r| parse_range_header(r, file_size))
+    {
+        let (s, e) = range;
+        let actual_end = e.min(s + VIDEO_CHUNK_MAX - 1).min(file_size.saturating_sub(1));
+        (s, actual_end)
     } else {
-        requested_end.min(start + VIDEO_CHUNK_MAX - 1)
+        (0, file_size.saturating_sub(1).min(64 * 1024 - 1))
     };
-    let length = actual_end.saturating_sub(start) + 1;
+    let length = end.saturating_sub(start) + 1;
 
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return error_response(416, "Range not satisfiable");
+        return request.respond(
+            tiny_http::Response::from_string("seek failed").with_status_code(416),
+        );
     }
 
-    let mut buffer = vec![0u8; length as usize];
-    let read = file.read(&mut buffer).unwrap_or(0);
-    buffer.truncate(read);
-    let actual_end = start + read.saturating_sub(1) as u64;
+    let limited = file.take(length);
+    let mut response = tiny_http::Response::new(
+        tiny_http::StatusCode(206),
+        Vec::new(),
+        limited,
+        Some(length as usize),
+        None,
+    );
+    response.add_header(
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap(),
+    );
+    response.add_header(
+        tiny_http::Header::from_bytes(
+            &b"Content-Range"[..],
+            format!("bytes {start}-{end}/{file_size}").as_bytes(),
+        )
+        .unwrap(),
+    );
+    response.add_header(
+        tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+    );
 
-    tauri::http::Response::builder()
-        .status(206)
-        .header("Content-Type", mime)
-        .header("Content-Range", format!("bytes {start}-{actual_end}/{file_size}"))
-        .header("Content-Length", read.to_string())
-        .header("Accept-Ranges", "bytes")
-        .body(buffer)
-        .unwrap_or_else(|_| error_response(500, "Response build error"))
-}
-
-fn error_response(status: u16, msg: &str) -> tauri::http::Response<Vec<u8>> {
-    tauri::http::Response::builder()
-        .status(status)
-        .body(msg.as_bytes().to_vec())
-        .unwrap()
+    request.respond(response)
 }
 
 fn parse_range_header(range: &str, file_size: u64) -> Option<(u64, u64)> {
     let range = range.strip_prefix("bytes=")?;
     let mut parts = range.splitn(2, '-');
     let start: u64 = parts.next()?.parse().ok()?;
-    let end: u64 = parts.next()
+    let end: u64 = parts
+        .next()
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse().ok())
         .unwrap_or(file_size.saturating_sub(1))
@@ -511,21 +593,28 @@ fn parse_range_header(range: &str, file_size: u64) -> Option<(u64, u64)> {
     (start <= end && start < file_size).then_some((start, end))
 }
 
-fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let h1 = chars.next().unwrap_or('0');
-            let h2 = chars.next().unwrap_or('0');
-            if let Ok(b) = u8::from_str_radix(&format!("{h1}{h2}"), 16) {
-                out.push(b as char);
-            }
-        } else {
-            out.push(c);
-        }
+fn generate_video_token() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("getrandom failed");
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[tauri::command]
+fn register_video(
+    state: tauri::State<'_, VideoServerState>,
+    path: String,
+) -> Result<String, String> {
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.exists() {
+        return Err(format!("video file not found: {path}"));
     }
-    out
+    let token = generate_video_token();
+    state
+        .tokens
+        .lock()
+        .map_err(|e| format!("token lock poisoned: {e}"))?
+        .insert(token.clone(), path_buf);
+    Ok(format!("http://127.0.0.1:{}/video/{}", state.port, token))
 }
 
 fn resolve_repo_root() -> Result<PathBuf, String> {

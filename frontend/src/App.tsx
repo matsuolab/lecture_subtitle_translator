@@ -189,6 +189,8 @@ export default function App() {
   const srtImportRef = useRef<HTMLInputElement>(null)
   const videoFileRef = useRef<HTMLInputElement>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  // TODO: session復元時にvideoSource.pathがある場合、loadVideoPath(path)で
+  //       自動再ロード（新トークンでURL再生成）。現状ユーザー手動再ロードが必要。
   const [videoSource, setVideoSource] = useState<VideoSource | null>(
     restoredSession?.session?.videoSource
       ? {
@@ -307,21 +309,28 @@ export default function App() {
     })
   }, [])
 
-  const loadVideoPath = useCallback((path: string) => {
+  const loadVideoPath = useCallback(async (path: string) => {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
+    // Windows(WebView2): convertFileSrc → http://asset.localhost が動作するため変更不要
+    // Linux(WebKitGTK)/Mac(WKWebView): カスタムURIスキームから<video>要素にデータを供給できない
+    //   WebKit仕様の制限のため、Rust側で127.0.0.1にローカルHTTPサーバを起動し
+    //   Range対応でストリーミング配信する。トークン付きURLで他プロセスからの参照を防止
+    const isWindows = navigator.userAgent.includes('Windows')
+    let url: string
+    if (isWindows) {
+      url = convertFileSrc(path)
+    } else {
+      try {
+        url = await invoke<string>('register_video', { path })
+      } catch (err) {
+        console.error('register_video failed, falling back to convertFileSrc', err)
+        url = convertFileSrc(path)
+      }
+    }
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
-      // Windows(WebView2): http://asset.localhostスキームが動作するためconvertFileSrcを使用
-      // Linux/Mac(WebKit): asset://はRangeリクエスト非対応のためvideofile://カスタムスキームを使用
-      // Tauriのオリジンスキームで判別: Windows=http: / Linux・Mac=tauri:
-      if (window.location.protocol === 'http:') {
-        return convertFileSrc(path)
-      }
-      const normalized = path.replace(/\\/g, '/')
-      const withSlash = normalized.startsWith('/') ? normalized : '/' + normalized
-      const encoded = withSlash.split('/').map(encodeURIComponent).join('/')
-      return `videofile://localhost${encoded}`
+      return url
     })
   }, [])
 
