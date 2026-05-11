@@ -215,6 +215,7 @@ export default function App() {
   const latestPipelineDebugRef = useRef<PipelineRunDebug | undefined>(
     restoredSession?.session?.pipelineRun?.debug,
   )
+  const serviceCheckAbortRef = useRef<AbortController | null>(null)
   const [serviceCheck, setServiceCheck] = useState<{ status: 'idle' | 'checking' | 'success' | 'error'; message: string }>({
     status: 'idle',
     message: 'サービス接続は未確認です',
@@ -343,16 +344,36 @@ export default function App() {
     setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
   }, [])
 
-  const handleServiceCheck = useCallback(async () => {
-    setServiceCheck({ status: 'checking', message: '接続確認中...' })
-    const result = await testServiceConnection(adminSettings)
-    setServiceCheck({
-      status: result.ok ? 'success' : 'error',
-      message: result.message,
-    })
+  // ref で最新の adminSettings を保持し、handleServiceCheck の closure 経由ではなく
+  // クリック時点の最新値を確実に使う（古い値で叩く事故を防ぐ）
+  const adminSettingsRef = useRef(adminSettings)
+  useEffect(() => {
+    adminSettingsRef.current = adminSettings
   }, [adminSettings])
 
+  const handleServiceCheck = useCallback(async () => {
+    serviceCheckAbortRef.current?.abort()
+    const controller = new AbortController()
+    serviceCheckAbortRef.current = controller
+
+    setServiceCheck({ status: 'checking', message: '接続確認中...' })
+    // Yield to React so the 'checking' state actually renders before the
+    // (potentially fast) fetch resolves and triggers the next setState.
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    const result = await testServiceConnection(adminSettingsRef.current, controller.signal)
+
+    if (controller.signal.aborted) return
+    const stamp = new Date().toLocaleTimeString()
+    setServiceCheck({
+      status: result.ok ? 'success' : 'error',
+      message: `${result.message} (${stamp})`,
+    })
+  }, [])
+
   useEffect(() => {
+    // 設定変更時は前回の結果を idle に戻すのみ。in-flight リクエストを abort すると
+    // 入力中の useEffect 連発で、クリック直後のテスト自身が abort される事故を招くため abort はしない。
     setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
   }, [adminSettings.serviceMode, adminSettings.serviceUrl, adminSettings.serviceAuthToken])
 
