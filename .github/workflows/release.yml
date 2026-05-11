@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -96,7 +97,85 @@ jobs:
           cp "$appimage_path" "${{ matrix.asset }}"
 
       - name: Upload to GitHub Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           files: ${{ matrix.asset }}
+
+      - name: Upload workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  build-fedora-rpm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Fedora RPM in container
+        shell: bash
+        env:
+          VITE_APP_VERSION: ${{ github.ref_name }}
+          VITE_GITHUB_TOKEN: ${{ secrets.RELEASE_CHECK_TOKEN }}
+        run: |
+          docker run --rm \
+            -e VITE_APP_VERSION \
+            -e VITE_GITHUB_TOKEN \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            fedora:43 \
+            bash -lc '
+              set -euo pipefail
+              dnf install -y \
+                nodejs \
+                npm \
+                rust \
+                cargo \
+                gcc \
+                gcc-c++ \
+                make \
+                webkit2gtk4.1-devel \
+                openssl-devel \
+                curl \
+                wget \
+                file \
+                libappindicator-gtk3-devel \
+                librsvg2-devel \
+                libxdo-devel \
+                rpm-build \
+                patchelf
+
+              cd frontend
+              npm ci
+              npx @tauri-apps/cli icon src-tauri/app-icon.png
+              npx @tauri-apps/cli build --bundles rpm
+              chown -R '"$(id -u):$(id -g)"' /work/frontend
+            '
+
+      - name: Prepare Fedora RPM artifact
+        shell: bash
+        run: |
+          rpm_path="$(find frontend/src-tauri/target/release/bundle/rpm -maxdepth 1 -name '*.rpm' -print -quit)"
+          if [[ -z "$rpm_path" ]]; then
+            echo "RPM not found"
+            exit 1
+          fi
+          cp "$rpm_path" subtitle-editor-linux-fedora-x64.rpm
+
+      - name: Upload Fedora RPM to GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: subtitle-editor-linux-fedora-x64.rpm
+
+      - name: Upload Fedora RPM workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: subtitle-editor-linux-fedora-x64.rpm
+          path: subtitle-editor-linux-fedora-x64.rpm
