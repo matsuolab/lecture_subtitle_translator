@@ -24,6 +24,7 @@ resource "aws_s3_bucket_cors_configuration" "input" {
       "http://localhost:5173",
       "http://tauri.localhost",
       "https://tauri.localhost",
+      "tauri://localhost",
     ]
     expose_headers = ["ETag"]
     max_age_seconds = 300
@@ -487,6 +488,7 @@ resource "aws_apigatewayv2_api" "managed" {
       "http://localhost:5173",
       "http://tauri.localhost",
       "https://tauri.localhost",
+      "tauri://localhost",
     ]
     expose_headers = ["content-type"]
     max_age        = 300
