@@ -22,6 +22,75 @@ AWS MCP が使えないとは判断しないこと。
 直接の tool 呼び出しが失敗した場合にのみ、
 AWS MCP がこのターンで使えない可能性を検討する。
 
+### 専用 tool がモデルに露出していない場合の扱い
+
+現ターンの callable tool 一覧に `mcp__aws_mcp__aws___list_regions` /
+`mcp__aws_mcp__aws___search_documentation` が存在しない場合でも、
+それだけを根拠に「AWS MCP が無効」「AWS MCP が使えない」と断定しないこと。
+
+この状態は、AWS MCP サーバの無効化ではなく、次のどれかである可能性が高い。
+
+- Codex 側の progressive tool discovery / tool 注入の都合で、当該 turn のモデルに schema が渡っていない
+- MCP サーバ初期化時に `uvx` / Python / 認証 / cache 権限で失敗し、tools が注入されていない
+- 長時間セッションや context compaction 後に、過去の `Unknown tool` を誤って現在状態として一般化している
+
+この場合は、警告を出す前に以下を実施・記録すること。
+
+1. `tool_search` が利用可能なら `AWS MCP aws list_regions search_documentation call_aws` で検索する
+   - 検索後に AWS MCP tool 群が遅延注入されることがある
+   - 注入された場合は `mcp__aws_mcp__aws___list_regions` または `mcp__aws_mcp__aws___search_documentation` を canary として実行する
+2. ローカル設定を確認する
+   - `%USERPROFILE%\.codex\config.toml`
+   - プロジェクトの `.codex/config.toml`
+3. MCP proxy のローカル起動前提を確認する
+   - `uvx --version`
+   - `uvx mcp-proxy-for-aws@latest --help`
+   - `codex mcp list`
+   - `codex mcp get aws-mcp`
+   - `aws sts get-caller-identity --profile dev`
+4. `uv` cache / Python shim / AWS credential expiry のエラーを、AWS MCP 不可ではなく初期化失敗候補として分類する
+
+報告文では、次のように区別して書くこと。
+
+- NG: 「AWS MCP が使えません」
+- OK: 「現ターンのモデルには AWS MCP 専用 tool が注入されていません。設定上は有効なので、初期化失敗または tool 注入の問題として切り分けます」
+
+### フルアクセス要否の判断
+
+AWS MCP は常にフルアクセス必須とは限らない。
+ただし、この環境では `uvx mcp-proxy-for-aws@latest` が workspace 外の
+`%LOCALAPPDATA%\uv\cache`、WindowsApps Python shim、または Python 実体を検査するため、
+`workspace-write` では access denied になることがある。
+
+以下のようなエラーが出た場合は、AWS MCP 無効ではなく sandbox / `uvx` 初期化問題として扱うこと。
+
+```text
+C:\Users\n3oti\AppData\Local\uv\cache\sdists-v9\.git: アクセスが拒否されました
+C:\Users\n3oti\AppData\Local\Microsoft\WindowsApps\python.exe: アクセスが拒否されました
+C:\Users\n3oti\AppData\Local\Programs\Python\Python313\python.exe: アクセスが拒否されました
+```
+
+この場合の報告・依頼は次の形にする。
+
+- 「AWS MCP 設定は有効だが、現 sandbox では `uvx` が workspace 外 cache / Python を検査できず proxy 起動前に落ちています」
+- 「フルアクセスで `uvx mcp-proxy-for-aws@latest --help` と canary を再確認してください」
+- 「フルアクセスで成功した場合、通常利用時も毎回フルアクセス必須とは断定せず、初期化・cache 修復時に必要になりやすい、と分類します」
+
+現在の推奨 `~/.codex/config.toml` 設定:
+
+```toml
+[mcp_servers.aws-mcp]
+command = "uvx"
+args = ["mcp-proxy-for-aws@latest", "https://aws-mcp.us-east-1.api.aws/mcp"]
+enabled = true
+startup_timeout_sec = 60
+tool_timeout_sec = 300
+
+[mcp_servers.aws-mcp.env]
+AWS_PROFILE = "dev"
+AWS_REGION = "us-east-1"
+```
+
 ### `call_aws` 単発失敗の扱い
 
 `mcp__aws_mcp__aws___call_aws` の単発失敗だけを根拠に、

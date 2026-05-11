@@ -83,6 +83,12 @@ def get_service_config(request: Request) -> dict[str, Any]:
     return managed_adapter.get_service_config().to_dict()
 
 
+@app.get("/v1/connection-check")
+def check_connection(request: Request) -> dict[str, Any]:
+    _require_managed_auth(request)
+    return managed_adapter.check_connection()
+
+
 @app.post("/v1/uploads")
 def create_upload(req: CreateUploadRequest, request: Request) -> dict[str, Any]:
     _require_managed_auth(request)

@@ -154,6 +154,15 @@ export interface ManagedServiceConfig {
   }
 }
 
+interface ManagedConnectionCheck extends ManagedServiceConfig {
+  ok: boolean
+  checks: Array<{
+    name: string
+    ok: boolean
+    detail?: string
+  }>
+}
+
 export interface ServiceConnectionCheck {
   ok: boolean
   message: string
@@ -195,7 +204,8 @@ function resolveServiceBase(settings: AdminSettings): string {
 
 function buildAuthHeaders(settings: AdminSettings): Record<string, string> {
   const token = settings.serviceAuthToken.trim()
-  return token ? { Authorization: `Bearer ${token}` } : {}
+  if (!token) return {}
+  return { Authorization: token.toLowerCase().startsWith('bearer ') ? token : `Bearer ${token}` }
 }
 
 function formatFetchError(stage: string, error: unknown, extra?: string): Error {
@@ -782,36 +792,76 @@ export async function runPipelineViaService(
 
 export const runPipelineViaApi = runPipelineViaService
 
-const CONNECTION_TEST_TIMEOUT_MS = 10_000
 
-async function readBodySnippet(response: Response): Promise<string> {
+function validateManagedServiceConnectionInputs(settings: AdminSettings): string {
+  const apiBase = resolveServiceBase(settings)
+  if (!apiBase) {
+    throw new Error('Service URL を入力してください')
+  }
+  let parsed: URL
   try {
-    const text = await response.text()
-    const trimmed = text.trim()
-    if (!trimmed) return ''
-    return trimmed.length > 300 ? `${trimmed.slice(0, 300)}…` : trimmed
+    parsed = new URL(apiBase)
   } catch {
-    return ''
+    throw new Error('Service URL が正しい URL 形式ではありません')
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Service URL は http:// または https:// で始めてください')
+  }
+  if (!settings.serviceAuthToken.trim()) {
+    throw new Error('Service Auth Token を入力してください')
+  }
+  return apiBase
+}
+
+async function fetchManagedConnectionCheck(settings: AdminSettings): Promise<ManagedConnectionCheck> {
+  const apiBase = validateManagedServiceConnectionInputs(settings)
+  const response = await fetch(`${apiBase}/v1/connection-check`, {
+    headers: buildAuthHeaders(settings),
+  })
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`認証に失敗しました: HTTP ${response.status}`)
+  }
+  if (!response.ok) {
+    throw new Error(`connection check request failed: ${response.status}`)
+  }
+
+  const json = await response.json() as ManagedConnectionCheck
+  const checks = Array.isArray(json.checks) ? json.checks : []
+  return {
+    service: String(json.service ?? 'unknown'),
+    version: String(json.version ?? 'unknown'),
+    upload: {
+      strategy: String(json.upload?.strategy ?? 'unknown'),
+      max_size_bytes: json.upload?.max_size_bytes,
+    },
+    jobs: {
+      workflow: String(json.jobs?.workflow ?? 'unknown'),
+    },
+    ok: Boolean(json.ok),
+    checks: checks.map((check) => ({
+      name: String(check.name ?? 'unknown'),
+      ok: Boolean(check.ok),
+      detail: check.detail === undefined ? undefined : String(check.detail),
+    })),
   }
 }
 
-function describeFetchFailure(stage: string, url: string, error: unknown): string {
-  if (error instanceof Error) {
-    if (error.name === 'AbortError') {
-      return `${stage}: aborted (${url})`
-    }
-    // ブラウザの fetch は CORS / DNS / connection refused を区別せず "Failed to fetch" を返す
-    return `${stage}: ${error.message} (${url}) — DNS/CORS/接続拒否のいずれか。ブラウザ DevTools の Network タブを確認してください`
+function validateManagedConnectionCheckPayload(config: ManagedConnectionCheck): void {
+  if (config.service === 'unknown' || config.version === 'unknown') {
+    throw new Error('接続先が字幕パイプラインサービスとして識別できません')
   }
-  return `${stage}: ${String(error)} (${url})`
+  if (!['local-put', 's3-presigned-put'].includes(config.upload.strategy)) {
+    throw new Error(`未対応の upload strategy です: ${config.upload.strategy}`)
+  }
+  if (!config.jobs.workflow || config.jobs.workflow === 'unknown') {
+    throw new Error('サービスの workflow 設定を確認できません')
+  }
+  if (config.checks.length === 0) {
+    throw new Error('サービス利用可否のチェック結果が返っていません')
+  }
 }
 
-export async function testServiceConnection(settings: AdminSettings, signal?: AbortSignal): Promise<ServiceConnectionCheck> {
-  const timeout = AbortSignal.timeout(CONNECTION_TEST_TIMEOUT_MS)
-  const combined = signal
-    ? AbortSignal.any([signal, timeout])
-    : timeout
-
+export async function testServiceConnection(settings: AdminSettings): Promise<ServiceConnectionCheck> {
   try {
     const apiBase = resolveServiceBase(settings)
     if (!apiBase) {
@@ -819,73 +869,19 @@ export async function testServiceConnection(settings: AdminSettings, signal?: Ab
     }
 
     if (settings.serviceMode === 'managed_service') {
-      // ─── Stage 1: URL 到達確認 (認証不要の /health) ───────────────
-      const healthUrl = `${apiBase}/health`
-      let healthRes: Response
-      try {
-        healthRes = await fetch(healthUrl, {
-          signal: combined,
-          cache: 'no-store',
-        })
-      } catch (networkError) {
-        throw new Error(`[URL到達不可] ${describeFetchFailure('GET /health', healthUrl, networkError)}`)
-      }
-      if (!healthRes.ok) {
-        const body = await readBodySnippet(healthRes)
-        throw new Error(
-          `[URL到達不可] GET ${healthUrl} → HTTP ${healthRes.status}${body ? ` / body: ${body}` : ''}`,
-        )
-      }
-
-      // ─── Stage 2: 認証確認 (要認証の /v1/service-config) ──────────
-      const configUrl = `${apiBase}/v1/service-config`
-      const hasToken = settings.serviceAuthToken.trim().length > 0
-      let configRes: Response
-      try {
-        configRes = await fetch(configUrl, {
-          headers: buildAuthHeaders(settings),
-          signal: combined,
-          cache: 'no-store',
-        })
-      } catch (networkError) {
-        throw new Error(`[認証確認失敗] ${describeFetchFailure('GET /v1/service-config', configUrl, networkError)}`)
-      }
-
-      if (configRes.status === 401 || configRes.status === 403) {
-        const body = await readBodySnippet(configRes)
-        const tokenHint = hasToken
-          ? 'Service Auth Token の値が一致していません'
-          : 'Service Auth Token が空です。サーバーが認証を要求しています'
-        throw new Error(
-          `[Token無効] ${tokenHint} (GET ${configUrl} → HTTP ${configRes.status}${body ? ` / body: ${body}` : ''})`,
-        )
-      }
-
-      if (!configRes.ok) {
-        const body = await readBodySnippet(configRes)
-        throw new Error(
-          `[サーバーエラー] GET ${configUrl} → HTTP ${configRes.status}${body ? ` / body: ${body}` : ''}`,
-        )
-      }
-
-      // 認証無しでも 200 が返るサーバーは古い実装（認証チェック未実装）
-      // ここではユーザーが入力した Token が "実際に検証されたか" を一応注意喚起
-      const config = await configRes.json() as ManagedServiceConfig
-      const normalized: ManagedServiceConfig = {
-        service: String(config.service ?? 'unknown'),
-        version: String(config.version ?? 'unknown'),
-        upload: {
-          strategy: String(config.upload?.strategy ?? 'unknown'),
-          max_size_bytes: config.upload?.max_size_bytes,
-        },
-        jobs: {
-          workflow: String(config.jobs?.workflow ?? 'unknown'),
-        },
+      const config = await fetchManagedConnectionCheck(settings)
+      validateManagedConnectionCheckPayload(config)
+      if (!config.ok) {
+        const failed = config.checks
+          .filter((check) => !check.ok)
+          .map((check) => `${check.name}${check.detail ? `: ${check.detail}` : ''}`)
+          .join(', ')
+        throw new Error(failed ? `サービス利用不可: ${failed}` : 'サービス利用不可')
       }
       return {
         ok: true,
-        message: `OK: URL到達 + 認証通過 (${normalized.service} ${normalized.version})`,
-        config: normalized,
+        message: `OK: ${config.service} ${config.version} / auth + ${config.checks.length} checks`,
+        config,
       }
     }
 
@@ -895,13 +891,6 @@ export async function testServiceConnection(settings: AdminSettings, signal?: Ab
     const message = await invoke<string>('check_local_whisperx')
     return { ok: true, message }
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      const isTimeout = !signal?.aborted
-      return {
-        ok: false,
-        message: isTimeout ? `接続タイムアウト (${CONNECTION_TEST_TIMEOUT_MS / 1000}秒)` : 'キャンセルされました',
-      }
-    }
     return {
       ok: false,
       message: error instanceof Error ? error.message : String(error || 'service connection failed'),

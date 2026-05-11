@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,62 @@ class AwsManagedAdapter(ManagedAdapter):
             workflow=self.settings.default_workflow,
             auth_mode=self.settings.auth_mode,
         )
+
+    def check_connection(self) -> dict[str, Any]:
+        config = self.get_service_config().to_dict()
+        checks: list[dict[str, Any]] = []
+
+        def record(name: str, fn: Callable[[], Any], detail: str) -> None:
+            try:
+                fn()
+                checks.append({"name": name, "ok": True, "detail": detail})
+            except Exception as exc:
+                checks.append({"name": name, "ok": False, "detail": f"{type(exc).__name__}: {exc}"})
+
+        record(
+            "input_bucket",
+            lambda: self.s3.head_bucket(Bucket=self.settings.aws_input_bucket),
+            str(self.settings.aws_input_bucket),
+        )
+        record(
+            "result_bucket",
+            lambda: self.s3.head_bucket(Bucket=self.settings.aws_result_bucket),
+            str(self.settings.aws_result_bucket),
+        )
+        record(
+            "jobs_table",
+            lambda: self.ddb.describe_table(TableName=self.settings.aws_jobs_table),
+            str(self.settings.aws_jobs_table),
+        )
+
+        def check_job_queue() -> None:
+            response = self.batch.describe_job_queues(jobQueues=[self.settings.aws_batch_job_queue])
+            queues = response.get("jobQueues", [])
+            if not queues:
+                raise RuntimeError("job queue not found")
+            state = queues[0].get("state")
+            status = queues[0].get("status")
+            if state != "ENABLED" or status != "VALID":
+                raise RuntimeError(f"job queue is not ready: state={state}, status={status}")
+
+        record("batch_job_queue", check_job_queue, str(self.settings.aws_batch_job_queue))
+
+        def check_job_definition() -> None:
+            response = self.batch.describe_job_definitions(
+                jobDefinitions=[self.settings.aws_batch_job_definition],
+                status="ACTIVE",
+            )
+            definitions = response.get("jobDefinitions", [])
+            if not definitions:
+                raise RuntimeError("active job definition not found")
+
+        record("batch_job_definition", check_job_definition, str(self.settings.aws_batch_job_definition))
+
+        return {
+            **config,
+            "ok": all(check["ok"] for check in checks),
+            "checks": checks,
+        }
 
     def create_upload(self, filename: str, upload_url_factory: callable | None = None) -> ManagedUploadTarget:
         upload_id = str(uuid.uuid4())

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import time
@@ -42,6 +43,30 @@ class LocalManagedAdapter(ManagedAdapter):
             workflow=self.settings.default_workflow,
             auth_mode=self.settings.auth_mode,
         )
+
+    def check_connection(self) -> dict[str, Any]:
+        config = self.get_service_config().to_dict()
+        probe_path = self._upload_root / f".connection-check-{uuid.uuid4().hex}"
+        checks: list[dict[str, Any]] = []
+        try:
+            self._upload_root.mkdir(parents=True, exist_ok=True)
+            probe_path.write_bytes(b"ok")
+            checks.append({"name": "upload_storage", "ok": True, "detail": str(self._upload_root)})
+        except OSError as exc:
+            checks.append({"name": "upload_storage", "ok": False, "detail": str(exc)})
+        finally:
+            try:
+                os.unlink(probe_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+        return {
+            **config,
+            "ok": all(check["ok"] for check in checks),
+            "checks": checks,
+        }
 
     def create_upload(self, filename: str, upload_url_factory: callable | None = None) -> ManagedUploadTarget:
         if upload_url_factory is None:

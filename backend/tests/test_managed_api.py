@@ -66,6 +66,59 @@ def test_service_config_requires_bearer_token() -> None:
     assert good_auth.json()["service"] == "subtitle-managed-service"
 
 
+def test_service_config_requires_bearer_token_when_enabled() -> None:
+    app = _load_app_with_env(
+        {
+            "MANAGED_SERVICE_BACKEND": "local",
+            "MANAGED_SERVICE_AUTH_MODE": "bearer_token",
+            "MANAGED_SERVICE_BEARER_TOKEN": "test-token",
+        }
+    )
+    client = TestClient(app)
+
+    unauthorized = client.get("/v1/service-config")
+    assert unauthorized.status_code == 401
+
+    authorized = client.get(
+        "/v1/service-config",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert authorized.status_code == 200
+    assert authorized.json()["auth"]["mode"] == "bearer_token"
+
+
+def test_connection_check_requires_token_and_verifies_service() -> None:
+    app = _load_app_with_env(
+        {
+            "MANAGED_SERVICE_BACKEND": "local",
+            "MANAGED_SERVICE_AUTH_MODE": "bearer_token",
+            "MANAGED_SERVICE_BEARER_TOKEN": "test-token",
+        }
+    )
+    client = TestClient(app)
+
+    unauthorized = client.get("/v1/connection-check")
+    assert unauthorized.status_code == 401
+
+    authorized = client.get(
+        "/v1/connection-check",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert authorized.status_code == 200
+    payload = authorized.json()
+    assert payload["ok"] is True
+    assert payload["service"] == "subtitle-managed-service"
+    assert payload["upload"]["strategy"] == "local-put"
+    assert payload["jobs"]["workflow"] == "managed_transcript_v1"
+    assert payload["checks"] == [
+        {
+            "name": "upload_storage",
+            "ok": True,
+            "detail": payload["checks"][0]["detail"],
+        }
+    ]
+
+
 def test_managed_upload_and_job_flow() -> None:
     app = _load_app_with_env({"MANAGED_SERVICE_BACKEND": "local", "MANAGED_SERVICE_AUTH_MODE": "none"})
     client = TestClient(app)
