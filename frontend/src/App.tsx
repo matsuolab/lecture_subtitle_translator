@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useTransition } from 'react'
-import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
+import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { Download, Save, FolderOpen, Settings, Film, Pin, PinOff } from 'lucide-react'
@@ -307,12 +307,19 @@ export default function App() {
     })
   }, [])
 
-  const loadVideoPath = useCallback((path: string) => {
+  const loadVideoPath = useCallback(async (path: string) => {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
+    const ext = name.split('.').pop()?.toLowerCase() ?? ''
+    const mimeMap: Record<string, string> = {
+      mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', webm: 'video/webm',
+    }
+    const mime = mimeMap[ext] ?? 'video/mp4'
+    const bytes = await readFile(path)
+    const blob = new Blob([bytes], { type: mime })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
-      return convertFileSrc(path)
+      return URL.createObjectURL(blob)
     })
   }, [])
 
