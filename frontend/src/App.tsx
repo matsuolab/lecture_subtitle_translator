@@ -324,6 +324,16 @@ export default function App() {
       try {
         url = await invoke<string>('register_video', { path })
         console.info('[video] using local HTTP server URL:', url)
+        // 診断: JSのfetchで /healthz と HEAD /video を試して、CSPで弾かれてるか実通信失敗か切り分け
+        try {
+          const base = url.replace(/\/video\/.+$/, '')
+          const healthRes = await fetch(`${base}/healthz`)
+          console.info('[video][diag] /healthz fetch:', healthRes.status, await healthRes.text())
+          const headRes = await fetch(url, { method: 'HEAD' })
+          console.info('[video][diag] HEAD /video:', headRes.status, 'content-type:', headRes.headers.get('content-type'))
+        } catch (diagErr) {
+          console.error('[video][diag] direct fetch failed (likely CSP block):', diagErr)
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error('[video] register_video failed:', msg)

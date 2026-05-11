@@ -483,6 +483,33 @@ fn handle_video_request(
     request: tiny_http::Request,
     tokens: Arc<Mutex<HashMap<String, PathBuf>>>,
 ) -> std::io::Result<()> {
+    let method = request.method().to_string();
+    let url_log = request.url().to_string();
+    let range_log = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .map(|h| h.value.as_str().to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    let ua_log = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("User-Agent"))
+        .map(|h| h.value.as_str().to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    eprintln!(
+        "[video-server] {method} {url_log} | Range: {range_log} | UA: {ua_log}"
+    );
+
+    // GETヘルスチェック (デバッグ用)
+    if url_log == "/healthz" {
+        let mut response = tiny_http::Response::from_string("ok").with_status_code(200);
+        for h in cors_headers() {
+            response.add_header(h);
+        }
+        return request.respond(response);
+    }
+
     // OPTIONS preflight 対応
     if request.method() == &tiny_http::Method::Options {
         let mut response = tiny_http::Response::empty(204);
