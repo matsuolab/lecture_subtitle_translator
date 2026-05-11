@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::{self, Read, Seek, SeekFrom},
     net::{SocketAddr, TcpStream},
@@ -7,6 +8,8 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
+
+use serde::{Deserialize, Serialize};
 
 use tauri::{Manager, State};
 
@@ -28,6 +31,7 @@ pub fn run() {
             check_local_whisperx,
             transcribe_local,
             extract_audio,
+            http_request,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
@@ -237,6 +241,77 @@ async fn extract_audio(app: tauri::AppHandle, video_path: String) -> Result<Stri
     } else {
         Err(String::from_utf8_lossy(&result.stderr).into_owned())
     }
+}
+
+// WebKit/CORS制限を迂回するための汎用HTTPクライアント
+// Linux/Mac の tauri://localhost オリジンが外部API(S3/OpenAI等)のCORSで拒否されるため、
+// ブラウザのfetchではなく Rust の reqwest で直接通信する
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpRequestOptions {
+    url: String,
+    method: String,
+    headers: HashMap<String, String>,
+    body_text: Option<String>,
+    body_file: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HttpResponsePayload {
+    status: u16,
+    headers: HashMap<String, String>,
+    body: String,
+}
+
+#[tauri::command]
+async fn http_request(options: HttpRequestOptions) -> Result<HttpResponsePayload, String> {
+    let method = options
+        .method
+        .parse::<reqwest::Method>()
+        .map_err(|e| format!("invalid HTTP method '{}': {e}", options.method))?;
+
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let mut req = client.request(method, &options.url);
+    for (key, value) in &options.headers {
+        req = req.header(key.as_str(), value.as_str());
+    }
+
+    if let Some(file_path) = options.body_file.as_ref() {
+        let path_clone = file_path.clone();
+        let bytes = tauri::async_runtime::spawn_blocking(move || fs::read(&path_clone))
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+            .map_err(|e| format!("failed to read upload file '{file_path}': {e}"))?;
+        req = req.body(bytes);
+    } else if let Some(body) = options.body_text {
+        req = req.body(body);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request to {} failed: {e}", options.url))?;
+
+    let status = response.status().as_u16();
+    let response_headers: HashMap<String, String> = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("failed to read response body: {e}"))?;
+
+    Ok(HttpResponsePayload {
+        status,
+        headers: response_headers,
+        body,
+    })
 }
 
 #[tauri::command]
