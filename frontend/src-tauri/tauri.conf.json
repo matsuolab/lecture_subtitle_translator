@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' tauri: asset: data: blob:; media-src 'self' tauri: asset: data: blob: http://127.0.0.1:* https://127.0.0.1:*; img-src 'self' data: blob: tauri: asset:; connect-src 'self' tauri: asset: ipc: http://ipc.localhost http://127.0.0.1:* https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://*.openai.azure.com https://api.github.com https://*.execute-api.ap-northeast-1.amazonaws.com https://*.s3.amazonaws.com https://*.s3.ap-northeast-1.amazonaws.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' tauri: asset: data: blob: http: https:; media-src 'self' tauri: asset: data: blob: http: https:; img-src 'self' data: blob: tauri: asset: http: https:; connect-src 'self' tauri: asset: ipc: http: https: ws: wss:; style-src 'self' 'unsafe-inline' http: https:; font-src 'self' data: http: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "assetProtocol": {
         "enable": true,
         "scope": [
