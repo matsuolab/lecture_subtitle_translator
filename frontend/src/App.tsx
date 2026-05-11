@@ -883,10 +883,12 @@ export default function App() {
   const handleRightDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOverRight(false)
-    lastHtmlDropRef.current = Date.now()
     const file = e.dataTransfer.files[0]
     if (!file) return
     const name = file.name.toLowerCase()
+    // 動画ファイルはTauriネイティブD&Dハンドラに委ねる（ファイルパス取得のため）
+    if (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.mkv') || name.endsWith('.webm')) return
+    lastHtmlDropRef.current = Date.now()
     if (name.endsWith('.srt') || name.endsWith('.txt')) {
       try {
         const imported = await importSrt(file)
