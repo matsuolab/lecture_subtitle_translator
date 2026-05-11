@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useTransition } from 'react'
-import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { Download, Save, FolderOpen, Settings, Film, Pin, PinOff } from 'lucide-react'
