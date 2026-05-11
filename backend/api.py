@@ -78,7 +78,8 @@ def health() -> dict[str, str]:
 
 
 @app.get("/v1/service-config")
-def get_service_config() -> dict[str, Any]:
+def get_service_config(request: Request) -> dict[str, Any]:
+    _require_managed_auth(request)
     return managed_adapter.get_service_config().to_dict()
 
 
