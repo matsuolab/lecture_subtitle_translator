@@ -5,6 +5,7 @@ import { classifyViolation, computeMetrics } from './metrics'
 import { formatLines } from './formatLines'
 import { normalizeSpaces } from './textUtils'
 import { requireAiConnection, resolveAiConnection, resolveChatModelForProvider } from './aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 import {
   hasContinuationEnd,
   hasFragmentStart,
@@ -207,7 +208,7 @@ async function decideContextMerge(
   const model = resolveChatModelForProvider(settings, settings.contextMergeModel.trim() || settings.correctionModel)
   const config = loadLanguageProfileConfig(settings)
 
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

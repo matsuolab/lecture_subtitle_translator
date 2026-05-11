@@ -1,5 +1,5 @@
-import { readFile } from '@tauri-apps/plugin-fs'
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import { tauriFetch, type TauriFetchResponse } from '@/lib/tauriFetch'
 import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection } from '@/lib/pipeline/aiProvider'
 import type { PipelineAuditReport, PipelineNodeTrace } from '@/types/pipeline'
@@ -208,12 +208,31 @@ function buildAuthHeaders(settings: AdminSettings): Record<string, string> {
   return { Authorization: token.toLowerCase().startsWith('bearer ') ? token : `Bearer ${token}` }
 }
 
-function formatFetchError(stage: string, error: unknown, extra?: string): Error {
-  const suffix = extra ? ` (${extra})` : ''
-  if (error instanceof Error) {
-    return new Error(`${stage} failed${suffix}: ${error.message}`)
+function getFetchRuntimeContext(): string {
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown-origin'
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown-user-agent'
+  return `origin=${origin}; userAgent=${userAgent}`
+}
+
+function normalizeFetchTarget(target?: string): string {
+  if (!target) return ''
+  try {
+    const url = new URL(target)
+    return `${url.protocol}//${url.host}${url.pathname}`
+  } catch {
+    return target
   }
-  return new Error(`${stage} failed${suffix}`)
+}
+
+function formatFetchError(stage: string, error: unknown, extra?: string): Error {
+  const target = normalizeFetchTarget(extra)
+  const suffix = target ? ` (${target})` : ''
+  const context = getFetchRuntimeContext()
+  const hint = 'HTTPレスポンス前に失敗しました。CORS、DNS/TLS、WebKitのネットワーク制限、またはService URLを確認してください。'
+  if (error instanceof Error) {
+    return new Error(`${stage} failed${suffix}: ${error.name}: ${error.message} / ${hint} / ${context}`)
+  }
+  return new Error(`${stage} failed${suffix}: ${String(error || 'unknown error')} / ${hint} / ${context}`)
 }
 
 function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
@@ -422,31 +441,48 @@ async function uploadSourceToManagedService(
     throw new Error('managed upload target response is missing upload URL or object key')
   }
 
-  let uploadBody: ArrayBuffer
+  const uploadMethod = (uploadTarget.upload_method ?? uploadTarget.method ?? 'PUT').toUpperCase()
+  const uploadHeaders = uploadTarget.upload_headers ?? uploadTarget.headers ?? {}
+  const uploadHost = (() => {
+    try {
+      return new URL(uploadUrl).host
+    } catch {
+      return uploadUrl
+    }
+  })()
+
+  // Tauri + ローカルパス: Rust経由でアップロード（ブラウザCORSを迂回、メモリも消費しない）
+  // S3はtauri://オリジンを拒否するため、JSのfetchではLinux/Macで失敗する
   if (sourceInput.path) {
-    const fileBytes = await readFile(sourceInput.path)
-    uploadBody = fileBytes.buffer.slice(fileBytes.byteOffset, fileBytes.byteOffset + fileBytes.byteLength)
-  } else if (sourceInput.file) {
-    uploadBody = await sourceInput.file.arrayBuffer()
-  } else {
+    let uploadRes: TauriFetchResponse
+    try {
+      uploadRes = await tauriFetch(uploadUrl, {
+        method: uploadMethod,
+        headers: uploadHeaders,
+        filePath: sourceInput.path,
+      })
+    } catch (error) {
+      throw formatFetchError('managed file upload', error, uploadHost)
+    }
+    if (!uploadRes.ok) {
+      throw new Error(`file upload failed: ${uploadRes.status}`)
+    }
+    return objectKey
+  }
+
+  // Web/dev環境（File オブジェクトのみ）: 通常のfetchでブラウザからPUT
+  if (!sourceInput.file) {
     throw new Error('managed service mode requires a local source file or file path')
   }
 
   let uploadRes: Response
   try {
     uploadRes = await fetch(uploadUrl, {
-      method: (uploadTarget.upload_method ?? uploadTarget.method ?? 'PUT').toUpperCase(),
-      headers: uploadTarget.upload_headers ?? uploadTarget.headers ?? {},
-      body: uploadBody,
+      method: uploadMethod,
+      headers: uploadHeaders,
+      body: await sourceInput.file.arrayBuffer(),
     })
   } catch (error) {
-    const uploadHost = (() => {
-      try {
-        return new URL(uploadUrl).host
-      } catch {
-        return uploadUrl
-      }
-    })()
     throw formatFetchError('managed file upload', error, uploadHost)
   }
 
@@ -815,10 +851,15 @@ function validateManagedServiceConnectionInputs(settings: AdminSettings): string
 
 async function fetchManagedConnectionCheck(settings: AdminSettings, signal?: AbortSignal): Promise<ManagedConnectionCheck> {
   const apiBase = validateManagedServiceConnectionInputs(settings)
-  const response = await fetch(`${apiBase}/v1/connection-check`, {
-    headers: buildAuthHeaders(settings),
-    signal,
-  })
+  let response: Response
+  try {
+    response = await fetch(`${apiBase}/v1/connection-check`, {
+      headers: buildAuthHeaders(settings),
+      signal,
+    })
+  } catch (error) {
+    throw formatFetchError('managed connection check request', error, `${apiBase}/v1/connection-check`)
+  }
   if (response.status === 401 || response.status === 403) {
     throw new Error(`認証に失敗しました: HTTP ${response.status}`)
   }

@@ -5,6 +5,7 @@ import { formatLines } from './formatLines'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from './prompts'
 import { normalizeSpaces } from './textUtils'
 import { requireAiConnection, resolveChatModelForProvider } from './aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 async function callCompress(
   enText: string,
@@ -15,7 +16,7 @@ async function callCompress(
   const model = resolveChatModelForProvider(settings, resolveCompressModelId(settings))
   const systemPrompt = resolveCompressSystemPrompt(settings, settings.compressPromptOverride)
 
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

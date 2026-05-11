@@ -4,6 +4,7 @@ import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId } from '../../prompts'
 import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 function buildTrimSystemPrompt(settings: { enMaxCharsPerLine: number; enMaxLines: number }): string {
   return (
@@ -26,7 +27,7 @@ async function callTrim(
   const model = resolveChatModelForProvider(settings, resolveCompressModelId(settings))
   const systemPrompt = buildTrimSystemPrompt(settings)
 
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
