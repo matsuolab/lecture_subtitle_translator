@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useTransition } from 'react'
-import { isTauri } from '@tauri-apps/api/core'
+import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
 import { Download, Save, FolderOpen, Settings, Film, Pin, PinOff } from 'lucide-react'
@@ -312,7 +312,12 @@ export default function App() {
     setVideoSource({ name, path })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
-      // パスをセグメント単位でパーセントエンコードしてカスタムスキームURLに変換
+      // Windows(WebView2): http://asset.localhostスキームが動作するためconvertFileSrcを使用
+      // Linux/Mac(WebKit): asset://はRangeリクエスト非対応のためvideofile://カスタムスキームを使用
+      // Tauriのオリジンスキームで判別: Windows=http: / Linux・Mac=tauri:
+      if (window.location.protocol === 'http:') {
+        return convertFileSrc(path)
+      }
       const normalized = path.replace(/\\/g, '/')
       const withSlash = normalized.startsWith('/') ? normalized : '/' + normalized
       const encoded = withSlash.split('/').map(encodeURIComponent).join('/')
