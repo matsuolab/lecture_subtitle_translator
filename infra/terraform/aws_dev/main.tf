@@ -480,19 +480,6 @@ resource "aws_lambda_function" "managed_api" {
 resource "aws_apigatewayv2_api" "managed" {
   name          = "${local.prefix}-managed-api"
   protocol_type = "HTTP"
-  cors_configuration {
-    allow_headers = ["authorization", "content-type", "accept", "origin", "x-requested-with"]
-    allow_methods = ["GET", "POST", "PUT", "OPTIONS"]
-    allow_origins = [
-      "http://127.0.0.1:5173",
-      "http://localhost:5173",
-      "http://tauri.localhost",
-      "https://tauri.localhost",
-      "tauri://localhost",
-    ]
-    expose_headers = ["content-type"]
-    max_age        = 300
-  }
   tags          = local.common_tags
 }
 

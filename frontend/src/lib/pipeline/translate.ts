@@ -2,6 +2,7 @@ import type { CorrectedSegment, TranslatedSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection } from './aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 const JA_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/g
 const MAX_SEGMENTS_PER_REQUEST = 40
@@ -23,7 +24,7 @@ async function callOpenAICompatible(
   apiKey: string,
   baseUrl: string,
 ): Promise<string[]> {
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

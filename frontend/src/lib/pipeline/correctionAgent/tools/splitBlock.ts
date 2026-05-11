@@ -7,6 +7,7 @@ import { computeMetrics } from '../../metrics'
 import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 interface SplitResult {
   units: SplitUnit[]
@@ -150,7 +151,7 @@ async function splitJaText(
   const connection = requireAiConnection(settings)
   const model = resolveChatModelForProvider(settings, settings.correctionModel)
 
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -217,7 +218,7 @@ async function translateSingle(
   const connection = requireAiConnection(settings)
   const model = resolveChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel))
 
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

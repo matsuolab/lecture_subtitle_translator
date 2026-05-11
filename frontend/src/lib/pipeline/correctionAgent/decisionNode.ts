@@ -9,6 +9,7 @@ import type {
 } from './types'
 import { buildMetrics } from './metrics'
 import { requireAiConnection, resolveChatModelForProvider } from '../aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 // ---------------------------------------------------------------------------
 // RuleBasedDecisionNode
@@ -163,7 +164,7 @@ export class LLMDecisionNode implements DecisionNode {
 
     const prompt = buildDecisionPrompt(ctx, feasible)
 
-    const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+    const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
