@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' tauri: asset: data: blob: http: https:; media-src 'self' tauri: asset: data: blob: http: https:; img-src 'self' data: blob: tauri: asset: http: https:; connect-src 'self' tauri: asset: ipc: http: https: ws: wss:; style-src 'self' 'unsafe-inline' http: https:; font-src 'self' data: http: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "assetProtocol": {
         "enable": true,
         "scope": [

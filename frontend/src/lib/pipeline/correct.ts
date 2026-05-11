@@ -2,6 +2,7 @@ import type { TranscriptSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection } from './aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 const MAX_SEGMENTS_PER_REQUEST = 20
 const COUNT_MISMATCH_RE = /correction API returned (\d+) items for (\d+) inputs/
@@ -69,7 +70,7 @@ async function callCorrectionApi(
       ? `【専門用語リスト】\n${glossaryTerms.slice(0, 100).join('、')}\n\n`
       : ''
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

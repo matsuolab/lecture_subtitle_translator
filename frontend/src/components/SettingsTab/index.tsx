@@ -10,6 +10,7 @@ import {
   DEFAULT_OPENAI_CHAT_MODEL,
   resolveAiConnection,
 } from '@/lib/pipeline/aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -52,11 +53,11 @@ export function SettingsTab({
     setModelRefreshState('loading')
     try {
       const connection = resolveAiConnection(adminSettings)
-      const res = await fetch(`${connection.baseUrl}/models`, {
+      const res = await tauriFetch(`${connection.baseUrl}/models`, {
         headers: connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {},
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
+      const data = await res.json<{ data?: Array<{ id: string }> }>()
       const ids: string[] = ((data.data ?? []) as Array<{ id: string }>)
         .map((m) => m.id)
         .sort()

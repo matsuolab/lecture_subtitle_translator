@@ -4,6 +4,7 @@ import { computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
 import { pickTranslateSystemPrompt, resolveTranslateModelId } from './prompts'
 import { requireAiConnection, resolveChatModelForProvider } from './aiProvider'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 const MAX_SEGMENTS_PER_REQUEST = 40
 const JA_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/g
@@ -41,7 +42,7 @@ async function callOpenAICompatible(
   texts: string[],
   config: ReturnType<typeof resolveApiConfig>,
 ): Promise<string[]> {
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

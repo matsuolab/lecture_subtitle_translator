@@ -1,5 +1,5 @@
-import { readFile } from '@tauri-apps/plugin-fs'
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import { tauriFetch, type TauriFetchResponse } from '@/lib/tauriFetch'
 import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection } from '@/lib/pipeline/aiProvider'
 import type { PipelineAuditReport, PipelineNodeTrace } from '@/types/pipeline'
@@ -441,31 +441,48 @@ async function uploadSourceToManagedService(
     throw new Error('managed upload target response is missing upload URL or object key')
   }
 
-  let uploadBody: ArrayBuffer
+  const uploadMethod = (uploadTarget.upload_method ?? uploadTarget.method ?? 'PUT').toUpperCase()
+  const uploadHeaders = uploadTarget.upload_headers ?? uploadTarget.headers ?? {}
+  const uploadHost = (() => {
+    try {
+      return new URL(uploadUrl).host
+    } catch {
+      return uploadUrl
+    }
+  })()
+
+  // Tauri + ローカルパス: Rust経由でアップロード（ブラウザCORSを迂回、メモリも消費しない）
+  // S3はtauri://オリジンを拒否するため、JSのfetchではLinux/Macで失敗する
   if (sourceInput.path) {
-    const fileBytes = await readFile(sourceInput.path)
-    uploadBody = fileBytes.buffer.slice(fileBytes.byteOffset, fileBytes.byteOffset + fileBytes.byteLength)
-  } else if (sourceInput.file) {
-    uploadBody = await sourceInput.file.arrayBuffer()
-  } else {
+    let uploadRes: TauriFetchResponse
+    try {
+      uploadRes = await tauriFetch(uploadUrl, {
+        method: uploadMethod,
+        headers: uploadHeaders,
+        filePath: sourceInput.path,
+      })
+    } catch (error) {
+      throw formatFetchError('managed file upload', error, uploadHost)
+    }
+    if (!uploadRes.ok) {
+      throw new Error(`file upload failed: ${uploadRes.status}`)
+    }
+    return objectKey
+  }
+
+  // Web/dev環境（File オブジェクトのみ）: 通常のfetchでブラウザからPUT
+  if (!sourceInput.file) {
     throw new Error('managed service mode requires a local source file or file path')
   }
 
   let uploadRes: Response
   try {
     uploadRes = await fetch(uploadUrl, {
-      method: (uploadTarget.upload_method ?? uploadTarget.method ?? 'PUT').toUpperCase(),
-      headers: uploadTarget.upload_headers ?? uploadTarget.headers ?? {},
-      body: uploadBody,
+      method: uploadMethod,
+      headers: uploadHeaders,
+      body: await sourceInput.file.arrayBuffer(),
     })
   } catch (error) {
-    const uploadHost = (() => {
-      try {
-        return new URL(uploadUrl).host
-      } catch {
-        return uploadUrl
-      }
-    })()
     throw formatFetchError('managed file upload', error, uploadHost)
   }
 
