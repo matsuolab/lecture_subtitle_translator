@@ -15,7 +15,8 @@ export interface TauriFetchResponse {
   status: number
   headers: Record<string, string>
   text(): Promise<string>
-  json<T = unknown>(): Promise<T>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  json<T = any>(): Promise<T>
 }
 
 interface RawTauriResponse {
@@ -42,7 +43,8 @@ export async function tauriFetch(url: string, options: TauriFetchOptions = {}): 
       status: res.status,
       headers: Object.fromEntries(res.headers.entries()),
       text: () => res.text(),
-      json: <T,>() => res.json() as Promise<T>,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      json: <T = any>() => res.json() as Promise<T>,
     }
   }
 
@@ -61,6 +63,7 @@ export async function tauriFetch(url: string, options: TauriFetchOptions = {}): 
     status: raw.status,
     headers: raw.headers,
     text: async () => raw.body,
-    json: async <T,>() => JSON.parse(raw.body) as T,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    json: async <T = any>() => JSON.parse(raw.body) as T,
   }
 }
