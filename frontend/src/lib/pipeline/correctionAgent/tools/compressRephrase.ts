@@ -4,6 +4,7 @@ import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from '../../prompts'
 import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
+import { tauriFetch } from '@/lib/tauriFetch'
 
 async function callCompress(
   enText: string,
@@ -15,7 +16,7 @@ async function callCompress(
   const connection = requireAiConnection(settings)
   const resolvedModel = resolveChatModelForProvider(settings, model)
 
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
