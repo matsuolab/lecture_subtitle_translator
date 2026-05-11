@@ -269,8 +269,8 @@ fn check_local_whisperx() -> Result<String, String> {
             "OK: Docker {docker_version} / イメージ {GHCR_WHISPERX_IMAGE} はローカルに存在します"
         ))
     } else {
-        Err(format!(
-            "イメージが見つかりません。初回転写時に自動で pull されます（約10GB）: {GHCR_WHISPERX_IMAGE}"
+        Ok(format!(
+            "OK: Docker {docker_version} / イメージ未取得。初回転写時に自動で pull されます（約10GB）: {GHCR_WHISPERX_IMAGE}"
         ))
     }
 }
