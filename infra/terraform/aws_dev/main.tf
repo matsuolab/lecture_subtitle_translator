@@ -108,12 +108,12 @@ resource "aws_iam_role_policy" "lambda_managed_service" {
       },
       {
         Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+        Action   = ["dynamodb:DescribeTable", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
         Resource = aws_dynamodb_table.jobs.arn
       },
       {
         Effect   = "Allow"
-        Action   = ["batch:SubmitJob"]
+        Action   = ["batch:DescribeJobDefinitions", "batch:DescribeJobQueues", "batch:SubmitJob"]
         Resource = "*"
       },
       {
@@ -523,7 +523,6 @@ resource "aws_lambda_permission" "apigw_invoke" {
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.managed.execution_arn}/*/*"
 }
-
 
 
 

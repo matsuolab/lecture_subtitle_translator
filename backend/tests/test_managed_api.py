@@ -8,6 +8,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from backend.managed.aws_adapter import AwsManagedAdapter
+from backend.managed.settings import ManagedServiceSettings
+
 
 def _load_app_with_env(env: dict[str, str]):
     original = {key: os.environ.get(key) for key in env}
@@ -117,6 +120,35 @@ def test_connection_check_requires_token_and_verifies_service() -> None:
             "detail": payload["checks"][0]["detail"],
         }
     ]
+
+
+def test_aws_connection_check_finds_active_job_definition_by_name() -> None:
+    settings = ManagedServiceSettings(
+        aws_input_bucket="input-bucket",
+        aws_result_bucket="result-bucket",
+        aws_jobs_table="jobs-table",
+        aws_batch_job_queue="queue-name",
+        aws_batch_job_definition="worker-name",
+    )
+    adapter = AwsManagedAdapter.__new__(AwsManagedAdapter)
+    adapter.settings = settings
+    adapter.s3 = Mock()
+    adapter.ddb = Mock()
+    adapter.batch = Mock()
+    adapter.batch.describe_job_queues.return_value = {
+        "jobQueues": [{"state": "ENABLED", "status": "VALID"}],
+    }
+    adapter.batch.describe_job_definitions.return_value = {
+        "jobDefinitions": [
+            {"jobDefinitionName": "other-worker"},
+            {"jobDefinitionName": "worker-name"},
+        ],
+    }
+
+    payload = adapter.check_connection()
+
+    assert payload["ok"] is True
+    adapter.batch.describe_job_definitions.assert_called_once_with(status="ACTIVE")
 
 
 def test_managed_upload_and_job_flow() -> None:

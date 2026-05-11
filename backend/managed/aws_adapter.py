@@ -72,12 +72,14 @@ class AwsManagedAdapter(ManagedAdapter):
         record("batch_job_queue", check_job_queue, str(self.settings.aws_batch_job_queue))
 
         def check_job_definition() -> None:
-            response = self.batch.describe_job_definitions(
-                jobDefinitions=[self.settings.aws_batch_job_definition],
-                status="ACTIVE",
-            )
+            response = self.batch.describe_job_definitions(status="ACTIVE")
             definitions = response.get("jobDefinitions", [])
-            if not definitions:
+            matching_definitions = [
+                definition
+                for definition in definitions
+                if definition.get("jobDefinitionName") == self.settings.aws_batch_job_definition
+            ]
+            if not matching_definitions:
                 raise RuntimeError("active job definition not found")
 
         record("batch_job_definition", check_job_definition, str(self.settings.aws_batch_job_definition))
