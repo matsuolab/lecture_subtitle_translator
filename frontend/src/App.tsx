@@ -323,9 +323,12 @@ export default function App() {
     } else {
       try {
         url = await invoke<string>('register_video', { path })
+        console.info('[video] using local HTTP server URL:', url)
       } catch (err) {
-        console.error('register_video failed, falling back to convertFileSrc', err)
-        url = convertFileSrc(path)
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[video] register_video failed:', msg)
+        alert(`動画読込失敗: register_video → ${msg}`)
+        return
       }
     }
     setVideoUrl(prev => {

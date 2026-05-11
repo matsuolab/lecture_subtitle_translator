@@ -119,7 +119,21 @@ export function VideoPlayer({
             onPlay={onPlay}
             onPause={onPause}
             onLoadedMetadata={onLoadedMetadata}
-            onError={() => { onError(); setDropError('この形式は再生できませんでした') }}
+            onError={(e) => {
+              const target = e.currentTarget as HTMLVideoElement
+              const err = target.error
+              const codeMap: Record<number, string> = {
+                1: 'MEDIA_ERR_ABORTED',
+                2: 'MEDIA_ERR_NETWORK',
+                3: 'MEDIA_ERR_DECODE',
+                4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+              }
+              const detail = err ? `${codeMap[err.code] ?? `code=${err.code}`}: ${err.message}` : 'unknown'
+              const src = target.src
+              console.error('[video] onError:', detail, 'src:', src)
+              onError()
+              setDropError(`動画再生失敗: ${detail} (src=${src.slice(0, 80)}...)`)
+            }}
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center gap-3"
