@@ -13,6 +13,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use tauri::{Manager, State};
+use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::CommandEvent;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,6 +30,7 @@ pub fn run() {
         .manage(video_server_state)
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             ensure_local_legacy_backend_ready,
             check_local_whisperx,
@@ -225,28 +228,46 @@ async fn extract_audio(app: tauri::AppHandle, video_path: String) -> Result<Stri
         .join(format!("extracted_audio_{:x}.wav", hasher.finish()))
         .to_string_lossy()
         .into_owned();
-    let output_clone = output_path.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        std::process::Command::new("ffmpeg")
-            .args([
-                "-i", &video_path,
-                "-vn",
-                "-acodec", "pcm_s16le",
-                "-ar", "16000",
-                "-ac", "1",
-                &output_clone,
-                "-y",
-            ])
-            .output()
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-    .map_err(|e| format!("ffmpeg exec failed: {e}"))?;
+    // バンドルされた ffmpeg sidecar (binaries/ffmpeg-<target-triple>) を起動する。
+    // 各OSでシステム側に ffmpeg が無くても動作するよう、Tauri の externalBin 機構で同梱する。
+    let sidecar = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|e| format!("ffmpeg sidecar が見つかりません (binaries/ffmpeg-* が同梱されているか確認してください): {e}"))?;
 
-    if result.status.success() {
+    let (mut rx, _child) = sidecar
+        .args([
+            "-i", video_path.as_str(),
+            "-vn",
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            output_path.as_str(),
+            "-y",
+        ])
+        .spawn()
+        .map_err(|e| format!("ffmpeg sidecar の起動に失敗: {e}"))?;
+
+    let mut stderr_buf = String::new();
+    let mut exit_code: Option<i32> = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stderr(line) => {
+                stderr_buf.push_str(&String::from_utf8_lossy(&line));
+                stderr_buf.push('\n');
+            }
+            CommandEvent::Terminated(payload) => {
+                exit_code = payload.code;
+            }
+            _ => {}
+        }
+    }
+
+    if exit_code == Some(0) {
         Ok(output_path)
     } else {
-        Err(String::from_utf8_lossy(&result.stderr).into_owned())
+        let code_str = exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+        Err(format!("ffmpeg exit code={code_str}: {}", stderr_buf.trim()))
     }
 }
 

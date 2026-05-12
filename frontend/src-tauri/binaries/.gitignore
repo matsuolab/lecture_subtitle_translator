@@ -1,0 +1,5 @@
+# ffmpeg sidecar binaries are downloaded by CI (release.yml) or manually for local builds.
+# See README.md in this directory.
+ffmpeg-*
+!.gitignore
+!README.md

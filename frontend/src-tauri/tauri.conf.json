@@ -37,6 +37,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "binaries/ffmpeg"
+    ],
     "linux": {
       "appimage": {
         "bundleMediaFramework": true
