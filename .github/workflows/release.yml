@@ -118,6 +118,8 @@ jobs:
           mkdir -p subtitle-editor-windows-x64
           cp frontend/src-tauri/target/release/subtitle-editor.exe subtitle-editor-windows-x64/
           cp frontend/src-tauri/target/release/ffmpeg.exe subtitle-editor-windows-x64/
+          # 同梱 FFmpeg は LGPL ビルドのため、配布物にライセンス告知を含める必要がある
+          cp THIRD_PARTY_NOTICES.md subtitle-editor-windows-x64/
           7z a -tzip "${{ matrix.asset }}" subtitle-editor-windows-x64/
 
       - name: Prepare macOS artifact
