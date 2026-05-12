@@ -16,16 +16,19 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            asset: subtitle-editor-windows-x64.exe
+            asset: subtitle-editor-windows-x64.zip
             build_args: --no-bundle
+            ffmpeg_target: x86_64-pc-windows-msvc
 
           - os: macos-latest
             asset: subtitle-editor-macos-arm64.app.zip
             build_args: --bundles app
+            ffmpeg_target: aarch64-apple-darwin
 
           - os: ubuntu-22.04
             asset: subtitle-editor-linux-x64.AppImage
             build_args: --bundles appimage
+            ffmpeg_target: x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.os }}
 
@@ -58,6 +61,42 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Download ffmpeg sidecar (LGPL)
+        shell: bash
+        env:
+          FFMPEG_TARGET: ${{ matrix.ffmpeg_target }}
+        run: |
+          set -euo pipefail
+          mkdir -p frontend/src-tauri/binaries
+          case "$FFMPEG_TARGET" in
+            x86_64-pc-windows-msvc)
+              url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip"
+              curl -L -o /tmp/ffmpeg.zip "$url"
+              unzip -j /tmp/ffmpeg.zip "ffmpeg-master-latest-win64-lgpl/bin/ffmpeg.exe" -d /tmp/
+              mv /tmp/ffmpeg.exe "frontend/src-tauri/binaries/ffmpeg-${FFMPEG_TARGET}.exe"
+              ;;
+            x86_64-unknown-linux-gnu)
+              url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz"
+              curl -L -o /tmp/ffmpeg.tar.xz "$url"
+              mkdir -p /tmp/ffmpeg-extract
+              tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract --strip-components=1
+              cp /tmp/ffmpeg-extract/bin/ffmpeg "frontend/src-tauri/binaries/ffmpeg-${FFMPEG_TARGET}"
+              chmod +x "frontend/src-tauri/binaries/ffmpeg-${FFMPEG_TARGET}"
+              ;;
+            aarch64-apple-darwin)
+              url="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip"
+              curl -L -o /tmp/ffmpeg.zip "$url"
+              unzip /tmp/ffmpeg.zip -d /tmp/ffmpeg-extract
+              cp /tmp/ffmpeg-extract/ffmpeg "frontend/src-tauri/binaries/ffmpeg-${FFMPEG_TARGET}"
+              chmod +x "frontend/src-tauri/binaries/ffmpeg-${FFMPEG_TARGET}"
+              ;;
+            *)
+              echo "unknown ffmpeg target: $FFMPEG_TARGET" >&2
+              exit 1
+              ;;
+          esac
+          ls -lh "frontend/src-tauri/binaries/"
+
       - name: Generate icons
         working-directory: frontend
         run: npx @tauri-apps/cli icon src-tauri/app-icon.png
@@ -72,7 +111,14 @@ jobs:
       - name: Prepare Windows artifact
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: cp "frontend/src-tauri/target/release/subtitle-editor.exe" "${{ matrix.asset }}"
+        run: |
+          set -euo pipefail
+          # subtitle-editor.exe と ffmpeg.exe (Tauri が target/release/ に配置) を
+          # 1つの zip にまとめて配布する。ユーザーは解凍してフォルダごと配置すれば動く。
+          mkdir -p subtitle-editor-windows-x64
+          cp frontend/src-tauri/target/release/subtitle-editor.exe subtitle-editor-windows-x64/
+          cp frontend/src-tauri/target/release/ffmpeg.exe subtitle-editor-windows-x64/
+          7z a -tzip "${{ matrix.asset }}" subtitle-editor-windows-x64/
 
       - name: Prepare macOS artifact
         if: matrix.os == 'macos-latest'
@@ -115,6 +161,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download ffmpeg sidecar (LGPL, linux x64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p frontend/src-tauri/binaries
+          url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz"
+          curl -L -o /tmp/ffmpeg.tar.xz "$url"
+          mkdir -p /tmp/ffmpeg-extract
+          tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract --strip-components=1
+          cp /tmp/ffmpeg-extract/bin/ffmpeg frontend/src-tauri/binaries/ffmpeg-x86_64-unknown-linux-gnu
+          chmod +x frontend/src-tauri/binaries/ffmpeg-x86_64-unknown-linux-gnu
+          ls -lh frontend/src-tauri/binaries/
 
       - name: Build Fedora RPM in container
         shell: bash
