@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{hash_map::DefaultHasher, HashMap},
     fs::{self, OpenOptions},
+    hash::{Hash, Hasher},
     io::{self, Read, Seek, SeekFrom},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
@@ -216,8 +217,12 @@ async fn extract_audio(app: tauri::AppHandle, video_path: String) -> Result<Stri
         .map_err(|e| format!("cache dir unavailable: {e}"))?;
     fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("failed to create cache dir: {e}"))?;
+    // 同じディレクトリで複数動画を扱うとき、固定ファイル名だと前回抽出を上書きしてしまう。
+    // 入力パスのハッシュをファイル名に含めてユニーク化し、同一動画はキャッシュとして再利用できる形に。
+    let mut hasher = DefaultHasher::new();
+    video_path.hash(&mut hasher);
     let output_path = cache_dir
-        .join("extracted_audio.wav")
+        .join(format!("extracted_audio_{:x}.wav", hasher.finish()))
         .to_string_lossy()
         .into_owned();
     let output_clone = output_path.clone();
