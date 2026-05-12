@@ -2,7 +2,7 @@
 
 React + TypeScript + Vite + Tauri v2 で実装した字幕編集アプリです。
 
-> この README の操作手順・設定説明は `subtitle-editor v0.4.4` 準拠です。
+> この README の操作手順・設定説明は `subtitle-editor v0.4.7` 準拠です。
 
 ## 主な機能
 
@@ -20,7 +20,7 @@ GitHub Releases から OS に合ったファイルをダウンロードします
 
 | OS | ファイル | 起動方法 |
 |---|---|---|
-| Windows | `subtitle-editor-windows-x64.exe` | そのまま実行 |
+| Windows | `subtitle-editor-windows-x64.zip` | zip を展開し、フォルダ内の `subtitle-editor.exe` を実行（同フォルダの `ffmpeg.exe` を含めて配布されます） |
 | macOS Apple Silicon | `subtitle-editor-macos-arm64.app.zip` | zip を展開して `.app` を開く |
 | Linux x64 | `subtitle-editor-linux-x64.AppImage` | 実行権限を付けて起動 |
 
@@ -69,3 +69,4 @@ npm run tauri:build
 - Linux AppImage でも動画再生しやすくするため、`bundle.linux.appimage.bundleMediaFramework` を有効化
 - Windows EXE でHTML5 D&Dが取りこぼされるケースに備えて、`onDragDropEvent` のフォールバックを実装
 - 用語集インポートは `GlossaryContext.importEntries` で map インデックス化し、大量エントリ時の更新コストを削減
+- 音声抽出に使う FFmpeg は **Tauri sidecar (`bundle.externalBin`)** として同梱（v0.4.7〜）。バイナリ本体は `src-tauri/binaries/` に配置（`.gitignore` 対象、CI で `release.yml` が自動取得）。ローカルビルド手順は `src-tauri/binaries/README.md` を参照。

@@ -4,7 +4,7 @@
 
 このリポジトリでは、Desktop アプリ（Tauri + React）と、書き起こし・翻訳・字幕整形のパイプラインを開発しています。
 
-> この README の操作手順・設定説明は `subtitle-editor v0.4.4` 準拠です。
+> この README の操作手順・設定説明は `subtitle-editor v0.4.7` 準拠です。
 
 ---
 
@@ -16,11 +16,13 @@ GitHub の **Releases** ページから、自分の OS に合った最新版を�
 
 | OS | ダウンロードするファイル | 起動方法 |
 |---|---|---|
-| Windows | `subtitle-editor-windows-x64.exe` | ダウンロード後、そのまま実行 |
+| Windows | `subtitle-editor-windows-x64.zip` | zip を展開し、フォルダ内の `subtitle-editor.exe` を実行（同フォルダの `ffmpeg.exe` も移動・削除しないでください） |
 | macOS Apple Silicon | `subtitle-editor-macos-arm64.app.zip` | zip を展開して `.app` を開く |
 | Linux x64 | `subtitle-editor-linux-x64.AppImage` | 実行権限を付けて起動 |
 
 macOS や Windows で警告が出る場合は、配布元を確認したうえで OS の通常手順に従って許可してください。
+
+> v0.4.7 以降、動画から音声を抽出する処理に LGPL ビルドの **FFmpeg** を同梱しています。詳細は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。
 
 ### 2. 最低限必要な設定
 
@@ -119,3 +121,7 @@ SRT は英語字幕の出力用です。日本語原文、処理ログ、レビ�
 | `.github/workflows/` | build / release ワークフロー |
 
 ## License
+
+本リポジトリの本体コードのライセンスは別途定めます。
+
+第三者ソフトウェア（同梱する FFmpeg 等）のライセンス・告知は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。

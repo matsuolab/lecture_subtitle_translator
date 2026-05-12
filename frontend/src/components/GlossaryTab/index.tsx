@@ -5,6 +5,7 @@ import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
 import { parseGlossaryCsv, exportGlossaryCsv } from '@/lib/glossary/csvParser'
 import { convertMatsuoLabXlsx } from '@/lib/glossary/xlsxConverter'
+import { describeError } from '@/lib/describeError'
 
 interface GlossaryTabProps {
   onApplyAll: () => { blocksUpdated: number; replacements: number }
@@ -45,7 +46,7 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
         showMsg('非対応形式です（CSV または XLSX を使用してください）')
       }
     } catch (err) {
-      showMsg(`読み込みエラー: ${err instanceof Error ? err.message : '不明なエラー'}`)
+      showMsg(`読み込みエラー: ${describeError(err)}`)
     } finally {
       setIsImporting(false)
     }

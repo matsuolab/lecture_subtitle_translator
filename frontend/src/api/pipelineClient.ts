@@ -709,7 +709,9 @@ async function runManagedPipeline(
       totalNodes: 0,
       nodeElapsedSec: null,
     })
-    const audioPath = await invoke<string>('extract_audio', { videoPath: sourceInput.path })
+    const audioPath = await invoke<string>('extract_audio', { videoPath: sourceInput.path }).catch(
+      (e: unknown) => { throw new Error(`音声抽出失敗(managed): ${String(e)}`) },
+    )
     uploadInput = { path: audioPath }
   }
 

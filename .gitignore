@@ -27,7 +27,9 @@ poc/step2_pipeline/**/__pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/*.log
-frontend/src-tauri/binaries/
+frontend/src-tauri/binaries/*
+!frontend/src-tauri/binaries/.gitignore
+!frontend/src-tauri/binaries/README.md
 frontend/src-tauri/target*/
 
 # Python

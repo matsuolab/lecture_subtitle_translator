@@ -22,6 +22,16 @@
           "path": "**"
         }
       ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "ffmpeg",
+          "sidecar": true,
+          "args": true
+        }
+      ]
     }
   ]
 }
