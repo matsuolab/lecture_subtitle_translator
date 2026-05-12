@@ -511,6 +511,101 @@ resource "aws_lambda_permission" "apigw_invoke" {
   source_arn    = "${aws_apigatewayv2_api.managed.execution_arn}/*/*"
 }
 
+# ── コスト管理 ────────────────────────────────────────────────
+
+resource "aws_budgets_budget" "monthly" {
+  name         = "${local.prefix}-monthly-budget"
+  budget_type  = "COST"
+  limit_amount = tostring(var.monthly_budget_usd)
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+}
+
+# ── S3 ライフサイクル ─────────────────────────────────────────
+
+resource "aws_s3_bucket_lifecycle_configuration" "input" {
+  bucket = aws_s3_bucket.input.id
+
+  rule {
+    id     = "expire-uploaded-files"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = var.s3_input_expiration_days
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "result" {
+  bucket = aws_s3_bucket.result.id
+
+  rule {
+    id     = "tiering-and-expiration"
+    status = "Enabled"
+
+    filter {}
+
+    transition {
+      days          = var.s3_result_transition_days
+      storage_class = "STANDARD_IA"
+    }
+
+    expiration {
+      days = var.s3_result_expiration_days
+    }
+  }
+}
+
+# ── ECR ライフサイクル ────────────────────────────────────────
+
+resource "aws_ecr_lifecycle_policy" "worker" {
+  repository = aws_ecr_repository.worker.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "untagged images を1日後に削除"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "古いタグ付きイメージを ${var.ecr_keep_image_count} 件まで保持"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = var.ecr_keep_image_count
+        }
+        action = { type = "expire" }
+      }
+    ]
+  })
+}
+
 
 
 

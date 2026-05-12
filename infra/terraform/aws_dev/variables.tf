@@ -131,3 +131,38 @@ variable "batch_include_cpu_fallback" {
   default = false
 }
 
+variable "budget_alert_email" {
+  type        = string
+  description = "コストアラートの通知先メールアドレス"
+}
+
+variable "monthly_budget_usd" {
+  type        = number
+  default     = 10
+  description = "月次予算の上限 (USD)"
+}
+
+variable "s3_input_expiration_days" {
+  type        = number
+  default     = 1
+  description = "inputバケット: アップロードファイルを削除するまでの日数"
+}
+
+variable "s3_result_transition_days" {
+  type        = number
+  default     = 30
+  description = "resultバケット: Standard-IA に移行するまでの日数"
+}
+
+variable "s3_result_expiration_days" {
+  type        = number
+  default     = 120
+  description = "resultバケット: オブジェクトを削除するまでの日数"
+}
+
+variable "ecr_keep_image_count" {
+  type        = number
+  default     = 5
+  description = "ECR: 保持するタグ付きイメージの最大数"
+}
+
