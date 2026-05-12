@@ -25,6 +25,7 @@ import {
 } from '@/api/persistence'
 import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
 import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/pipelineClient'
+import { describeError } from '@/lib/describeError'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
@@ -313,15 +314,23 @@ export default function App() {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
     // 各OSのWebView動作:
-    //   Windows (WebView2/Chromium): convertFileSrc → http://asset.localhost で動作
-    //   macOS (WKWebView): convertFileSrc → asset://localhost で動作 (カスタムスキーム対応)
+    //   Windows (WebView2/Chromium): convertFileSrc → http://asset.localhost/<encodeURIComponent(path)> で動作
+    //   macOS (WKWebView): convertFileSrc は path 全体を encodeURIComponent するため "/" が "%2F" となり
+    //     WKWebView がパス区切りを認識できず MEDIA_ERR_SRC_NOT_SUPPORTED になる。
+    //     → 各セグメントを個別に encodeURIComponent して "/" を残したまま手動で URL を構築する。
     //   Linux (WebKitGTK): asset://がGStreamer経由のメディアロードで機能しない
     //     → ローカルHTTPサーバ(127.0.0.1) からRange対応で配信
     // ※ Linux以外を一律HTTPサーバにすると macOS の ATS で別問題が出るため、Linuxのみ分岐
     const isLinux = /\bLinux\b/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)
+    const isMac = /Mac/.test(navigator.userAgent) && !isLinux
     let url: string
     if (!isLinux) {
-      url = convertFileSrc(path)
+      if (isMac) {
+        const encodedPath = path.split('/').map(encodeURIComponent).join('/')
+        url = `asset://localhost${encodedPath}`
+      } else {
+        url = convertFileSrc(path)
+      }
     } else {
       try {
         url = await invoke<string>('register_video', { path })
@@ -806,13 +815,13 @@ export default function App() {
         at: finishedAt,
         status: 'error',
         step: 'done',
-        message: err instanceof Error ? err.message : '不明なエラー',
+        message: describeError(err),
         runId: managedRunId,
       })
       const result: PipelineRunResult = {
         status: 'error',
         step: 'done',
-        message: `パイプライン失敗: ${err instanceof Error ? err.message : '不明なエラー'}`,
+        message: `パイプライン失敗: ${describeError(err)}`,
         runId: managedRunId,
         sourceName,
         startedAt,
@@ -825,7 +834,7 @@ export default function App() {
             {
               id: 'pipeline-error',
               nodeId: 'pipeline',
-              reason: err instanceof Error ? err.message : '不明なエラー',
+              reason: describeError(err),
               priority: 'must_review',
               score: 0,
             },
@@ -950,7 +959,7 @@ export default function App() {
         }
         importEntries(entries)
       } catch (err) {
-        alert(`用語辞書の読み込みに失敗しました: ${err instanceof Error ? err.message : '不明なエラー'}`)
+        alert(`用語辞書の読み込みに失敗しました: ${describeError(err)}`)
       }
     } else {
       alert(`非対応のファイル形式です: ${file.name}\n対応形式: .srt, .txt, .json, .csv, .xlsx`)
@@ -1002,7 +1011,7 @@ export default function App() {
         alert(`非対応のファイル形式です: ${path}
 対応形式: .srt, .txt, .json, .csv, .xlsx, .mp4`)
       } catch (err) {
-        alert(`読み込みに失敗しました: ${err instanceof Error ? err.message : '不明なエラー'}`)
+        alert(`読み込みに失敗しました: ${describeError(err)}`)
       }
     }).then(fn => {
       if (cancelled) fn()  // すでにアンマウント済みなら即解除

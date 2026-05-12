@@ -1,6 +1,6 @@
 {
   "productName": "subtitle-editor",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "identifier": "jp.matsuolab.subtitle-editor",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -36,6 +36,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/ffmpeg"
+    ],
+    "resources": [
+      "../../THIRD_PARTY_NOTICES.md"
     ],
     "linux": {
       "appimage": {
