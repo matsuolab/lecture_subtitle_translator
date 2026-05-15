@@ -1,32 +1,112 @@
-import { useRef, useState, useCallback } from 'react'
-import { Upload, Download, Trash2 } from 'lucide-react'
+import { useRef, useState, useCallback, type Dispatch, type SetStateAction } from 'react'
+import { FileText, Upload, Download, Trash2, Sparkles } from 'lucide-react'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
-import { useGlossary } from '@/context/GlossaryContext'
+import { useGlossary, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
 import { parseGlossaryCsv, exportGlossaryCsv } from '@/lib/glossary/csvParser'
+import { generateSelfMadeGlossaryFromPdf, type GlossaryGenerationProgressEvent } from '@/lib/glossary/documentGlossaryGenerator'
+import { extractPdfDocument } from '@/lib/glossary/pdfExtractor'
 import { convertMatsuoLabXlsx } from '@/lib/glossary/xlsxConverter'
 import { describeError } from '@/lib/describeError'
+import type { AdminSettings } from '@/types/adminSettings'
 
 interface GlossaryTabProps {
   onApplyAll: () => { blocksUpdated: number; replacements: number }
+  adminSettings: AdminSettings
+  onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
+  generationLog: string[]
+  setGenerationLog: Dispatch<SetStateAction<string[]>>
+  isGenerating: boolean
+  setIsGenerating: Dispatch<SetStateAction<boolean>>
 }
 
-export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
+type PendingDeleteTarget = 'formal' | 'self-made'
+
+export function GlossaryTab({
+  onApplyAll,
+  adminSettings,
+  onAdminSettingsChange,
+  generationLog,
+  setGenerationLog,
+  isGenerating,
+  setIsGenerating,
+}: GlossaryTabProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
-  const { glossary, setGlossary, extracted, setExtracted, importEntries, clearGlossary } = useGlossary()
+  const {
+    glossary,
+    setGlossary,
+    extracted,
+    setExtracted,
+    selfMadeGlossary,
+    importEntries,
+    importSelfMadeEntries,
+    importGlossaryIntoSelfMade,
+    updateSelfMadeEntry,
+    promoteSelfMadeEntry,
+    clearGlossary,
+    clearSelfMadeGlossary,
+  } = useGlossary()
 
   const importRef = useRef<HTMLInputElement>(null)
+  const createRef = useRef<HTMLInputElement>(null)
   const [isDragOver, setIsDragOver] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [importMsg, setImportMsg] = useState<string | null>(null)
+  const [selfMadeFilter, setSelfMadeFilter] = useState<'active' | 'formal' | 'assistive' | 'formula' | 'shape' | 'reference' | 'generic' | 'disabled' | 'all'>('active')
+  const [pendingDelete, setPendingDelete] = useState<PendingDeleteTarget | null>(null)
+  const isBusy = isImporting || isGenerating
+
+  const selfMadeFilterOptions: Array<{ value: typeof selfMadeFilter; label: string }> = [
+    { value: 'active', label: '有効' },
+    { value: 'formal', label: '正式候補' },
+    { value: 'assistive', label: '補正用' },
+    { value: 'formula', label: '数式' },
+    { value: 'shape', label: 'サイズ表記' },
+    { value: 'reference', label: '引用/URL' },
+    { value: 'generic', label: '一般語' },
+    { value: 'disabled', label: '無効' },
+    { value: 'all', label: 'すべて' },
+  ]
+
+  const filteredSelfMadeGlossary = selfMadeGlossary.filter(entry => {
+    if (selfMadeFilter === 'all') return true
+    if (selfMadeFilter === 'active') return !entry.disabled && entry.entryClass !== 'reference' && entry.entryClass !== 'noise'
+    if (selfMadeFilter === 'formal') return !entry.disabled && entry.formalEligible
+    if (selfMadeFilter === 'assistive') return !entry.disabled && entry.assistiveEligible && !entry.formalEligible
+    if (selfMadeFilter === 'formula') return !entry.disabled && (entry.kind === 'formula' || entry.entryClass === 'formula_reading')
+    if (selfMadeFilter === 'shape') return !entry.disabled && entry.entryClass === 'shape_notation'
+    if (selfMadeFilter === 'reference') return entry.entryClass === 'reference'
+    if (selfMadeFilter === 'generic') return entry.entryClass === 'generic_word'
+    if (selfMadeFilter === 'disabled') return entry.disabled
+    return true
+  })
 
   const showMsg = (msg: string) => {
     setImportMsg(msg)
     setTimeout(() => setImportMsg(null), 3000)
   }
 
+  const executePendingDelete = useCallback(() => {
+    if (isBusy || !pendingDelete) return
+    if (pendingDelete === 'formal') {
+      clearGlossary()
+      showMsg('用語辞書を削除しました')
+    } else {
+      clearSelfMadeGlossary()
+      showMsg('自作辞書を削除しました')
+    }
+    setPendingDelete(null)
+  }, [clearGlossary, clearSelfMadeGlossary, isBusy, pendingDelete])
+
+  const appendGenerationLog = useCallback((event: GlossaryGenerationProgressEvent | string) => {
+    const text = typeof event === 'string' ? event : event.message
+    const stamp = new Date().toLocaleTimeString()
+    setGenerationLog(prev => [`${stamp} ${text}`, ...prev].slice(0, 80))
+  }, [setGenerationLog])
+
   const processFile = useCallback(async (file: File) => {
+    if (isBusy) return
     const name = file.name.toLowerCase()
     setIsImporting(true)
     // 「固まっている」印象を減らすため、先に UI を1フレーム描画
@@ -42,21 +122,75 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
         const entries = await convertMatsuoLabXlsx(file)
         const { added, updated } = importEntries(entries)
         showMsg(`XLSX インポート完了: ${added} 件追加、${updated} 件更新`)
+      } else if (name.endsWith('.pdf')) {
+        setGenerationLog([])
+        const document = await extractPdfDocument(file, { renderPageImages: adminSettings.pdfExtractionUseVision })
+        appendGenerationLog(`PDF extracted: ${document.pages.length} pages, vision=${adminSettings.pdfExtractionUseVision ? 'on' : 'off'}`)
+        let addedTotal = 0
+        let updatedTotal = 0
+        await generateSelfMadeGlossaryFromPdf(adminSettings, document, {
+          onProgress: appendGenerationLog,
+          onEntries: entries => {
+            const { added, updated } = importSelfMadeEntries(entries)
+            addedTotal += added
+            updatedTotal += updated
+            appendGenerationLog(`saved batch: ${added} added, ${updated} updated`)
+          },
+        })
+        const added = addedTotal
+        const updated = updatedTotal
+        showMsg(`自作辞書を作成しました: ${added} 件追加、${updated} 件更新`)
       } else {
-        showMsg('非対応形式です（CSV または XLSX を使用してください）')
+        showMsg('非対応形式です（CSV / XLSX / PDF を使用してください）')
       }
     } catch (err) {
       showMsg(`読み込みエラー: ${describeError(err)}`)
     } finally {
       setIsImporting(false)
     }
-  }, [importEntries])
+  }, [adminSettings, appendGenerationLog, importEntries, importSelfMadeEntries, isBusy, setGenerationLog])
+
+  const createFromPdf = useCallback(async (file: File) => {
+    if (isBusy) return
+    setIsGenerating(true)
+    await new Promise<void>(resolve => {
+      requestAnimationFrame(() => resolve())
+    })
+    try {
+      setGenerationLog([])
+      const document = await extractPdfDocument(file, { renderPageImages: adminSettings.pdfExtractionUseVision })
+      appendGenerationLog(`PDF extracted: ${document.pages.length} pages, vision=${adminSettings.pdfExtractionUseVision ? 'on' : 'off'}`)
+      let addedTotal = 0
+      let updatedTotal = 0
+      await generateSelfMadeGlossaryFromPdf(adminSettings, document, {
+        onProgress: appendGenerationLog,
+        onEntries: entries => {
+          const { added, updated } = importSelfMadeEntries(entries)
+          addedTotal += added
+          updatedTotal += updated
+          appendGenerationLog(`saved batch: ${added} added, ${updated} updated`)
+        },
+      })
+      showMsg(`PDFから自作辞書を作成しました: ${addedTotal} 件追加、${updatedTotal} 件更新`)
+    } catch (err) {
+      appendGenerationLog(`ERROR: ${describeError(err)}`)
+      showMsg(`辞書作成エラー: ${describeError(err)}`)
+    } finally {
+      setIsGenerating(false)
+    }
+  }, [adminSettings, appendGenerationLog, importSelfMadeEntries, isBusy, setGenerationLog, setIsGenerating])
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) await processFile(file)
     e.target.value = ''
   }, [processFile])
+
+  const handleCreateFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) await createFromPdf(file)
+    e.target.value = ''
+  }, [createFromPdf])
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -85,6 +219,89 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
     a.click()
     URL.revokeObjectURL(url)
   }, [glossary])
+
+  const handleExportSelfMadeConfirmed = useCallback(() => {
+    if (isBusy) return
+    const entries = selfMadeGlossary
+      .filter(entry => entry.formalEligible && entry.jaConfirmed && entry.enConfirmed && entry.ja.trim() && entry.en.trim() && !entry.disabled)
+      .map(entry => ({
+        id: entry.id,
+        ja: entry.ja,
+        en: entry.en,
+        abbr: entry.abbr,
+        domain: entry.domain,
+        note: entry.note,
+        desc: entry.desc,
+        source: entry.source.name,
+        sourceUrl: entry.children.find(child => child.url)?.url ?? null,
+        confirmed: true,
+      }))
+    const csv = exportGlossaryCsv(entries)
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'self-made-glossary-confirmed.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [isBusy, selfMadeGlossary])
+
+  const handleExportSelfMadeAll = useCallback(() => {
+    if (isBusy) return
+    const blob = new Blob([JSON.stringify(selfMadeGlossary, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'self-made-glossary.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [isBusy, selfMadeGlossary])
+
+  const handleToggleConfirmed = useCallback((entry: SelfMadeGlossaryEntry, field: 'jaConfirmed' | 'enConfirmed') => {
+    if (isBusy) return
+    const nextValue = !entry[field]
+    const nextJaConfirmed = field === 'jaConfirmed' ? nextValue : entry.jaConfirmed
+    const nextEnConfirmed = field === 'enConfirmed' ? nextValue : entry.enConfirmed
+    updateSelfMadeEntry(entry.id, {
+      [field]: nextValue,
+      provisional: !(nextJaConfirmed && nextEnConfirmed),
+    })
+    if (nextJaConfirmed && nextEnConfirmed && entry.ja.trim() && entry.en.trim()) {
+      setTimeout(() => {
+        const result = promoteSelfMadeEntry(entry.id)
+        if (result.promoted) showMsg('日英確認済みのため正式辞書へ昇格しました')
+      }, 0)
+    }
+  }, [isBusy, promoteSelfMadeEntry, updateSelfMadeEntry])
+
+  const primarySourceLabel = (entry: SelfMadeGlossaryEntry) => {
+    const page = entry.children.find(child => child.page)?.page
+    return page ? `${entry.source.name} p.${page}` : entry.source.name
+  }
+
+  const entryClassLabel = (entry: SelfMadeGlossaryEntry) => {
+    switch (entry.entryClass) {
+      case 'formal_term': return '正式候補'
+      case 'assistive_notation': return '補正用'
+      case 'formula_reading': return '数式読み'
+      case 'shape_notation': return 'サイズ表記'
+      case 'reference': return '引用/URL'
+      case 'generic_word': return '一般語'
+      case 'noise': return 'ノイズ'
+      default: return '候補'
+    }
+  }
+
+  const sourceLabel = (source: SelfMadeGlossaryEntry['jaSource'] | SelfMadeGlossaryEntry['enSource']) => {
+    switch (source) {
+      case 'document': return 'PDF'
+      case 'vision': return 'Vision'
+      case 'llm_inferred': return 'LLM推定'
+      case 'manual': return '手動'
+      case 'missing': return '未取得'
+      default: return '不明'
+    }
+  }
 
   const addToGlossary = (i: number) => {
     const term = extracted[i]
@@ -126,7 +343,7 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
         }}>
           <Upload size={32} color="rgba(99,102,241,0.85)" strokeWidth={1.5} />
           <span style={{ color: 'rgba(99,102,241,0.9)', fontSize: 13, fontWeight: 600 }}>
-            CSV / XLSX をドロップしてインポート
+            CSV / XLSX / PDF をドロップして読み込み
           </span>
         </div>
       )}
@@ -146,7 +363,7 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
       )}
 
       {/* ツールバー */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
         <input
           ref={importRef}
           type="file"
@@ -154,58 +371,142 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
           onChange={handleFileChange}
           style={{ display: 'none' }}
         />
-        <button
-          onClick={() => importRef.current?.click()}
-          disabled={isImporting}
-          title="CSV / XLSX をインポート"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            border: `1px solid ${theme.btnBorder}`,
-            background: theme.btnBg, color: theme.btnText,
-            borderRadius: 6, padding: '5px 10px',
-            fontSize: 11, cursor: isImporting ? 'not-allowed' : 'pointer',
-            opacity: isImporting ? 0.65 : 1,
-          }}
-        >
-          <Upload size={11} />
-          {isImporting ? '読み込み中...' : 'インポート'}
-        </button>
-        <button
-          onClick={handleExport}
-          disabled={glossary.length === 0}
-          title="CSV としてエクスポート"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            border: `1px solid ${theme.btnBorder}`,
-            background: theme.btnBg,
-            color: glossary.length > 0 ? theme.btnText : theme.textDisabled,
-            borderRadius: 6, padding: '5px 10px',
-            fontSize: 11, cursor: glossary.length > 0 ? 'pointer' : 'not-allowed',
-          }}
-        >
-          <Download size={11} />
-          エクスポート
-        </button>
-        <span style={{ fontSize: 11, color: theme.textMuted, marginLeft: 'auto' }}>
-          {isImporting ? '用語集を取り込み中です...' : 'CSV・XLSXをD&Dでも読み込めます'}
-        </span>
-        <button
-          onClick={() => {
-            if (confirm(`用語辞書を全件削除しますか？（${glossary.length} 件）`)) clearGlossary()
-          }}
-          disabled={glossary.length === 0}
-          title="全件削除"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 4,
-            border: `1px solid ${theme.btnBorder}`,
-            background: 'none',
-            color: glossary.length > 0 ? theme.textSecondary : theme.textDisabled,
-            borderRadius: 6, padding: '5px 8px',
-            fontSize: 11, cursor: glossary.length > 0 ? 'pointer' : 'not-allowed',
-          }}
-        >
-          <Trash2 size={11} />
-        </button>
+        <input
+          ref={createRef}
+          type="file"
+          accept=".pdf,application/pdf"
+          onChange={handleCreateFileChange}
+          style={{ display: 'none' }}
+        />
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => importRef.current?.click()}
+            disabled={isBusy}
+            title="CSV / XLSX をインポート"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              border: `1px solid ${theme.btnBorder}`,
+              background: theme.btnBg, color: theme.btnText,
+              borderRadius: 6, padding: '5px 10px',
+              fontSize: 11, cursor: isBusy ? 'not-allowed' : 'pointer',
+              opacity: isBusy ? 0.65 : 1,
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+              lineHeight: 1,
+            }}
+          >
+            <Upload size={11} style={{ flexShrink: 0 }} />
+            {isImporting ? '読み込み中...' : 'インポート'}
+          </button>
+          <button
+            onClick={handleExport}
+            disabled={glossary.length === 0}
+            title="CSV としてエクスポート"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              border: `1px solid ${theme.btnBorder}`,
+              background: theme.btnBg,
+              color: glossary.length > 0 ? theme.btnText : theme.textDisabled,
+              borderRadius: 6, padding: '5px 10px',
+              fontSize: 11, cursor: glossary.length > 0 ? 'pointer' : 'not-allowed',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+              lineHeight: 1,
+            }}
+          >
+            <Download size={11} style={{ flexShrink: 0 }} />
+            エクスポート
+          </button>
+          <span style={{ fontSize: 11, color: theme.textMuted, marginLeft: 'auto', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            {isBusy ? '用語集を処理中です...' : 'CSV・XLSX・PDFをD&Dでも読み込めます'}
+          </span>
+          <button
+            onClick={() => {
+              if (isBusy) return
+              setPendingDelete('formal')
+            }}
+            disabled={glossary.length === 0 || isBusy}
+            title="全件削除"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              border: `1px solid ${theme.btnBorder}`,
+              background: 'none',
+              color: glossary.length > 0 && !isBusy ? theme.textSecondary : theme.textDisabled,
+              borderRadius: 6, padding: '5px 8px',
+              fontSize: 11, cursor: glossary.length > 0 && !isBusy ? 'pointer' : 'not-allowed',
+              flexShrink: 0,
+              lineHeight: 1,
+            }}
+          >
+            <Trash2 size={11} style={{ flexShrink: 0 }} />
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', paddingTop: 2 }}>
+          <button
+            onClick={() => createRef.current?.click()}
+            disabled={isBusy}
+            title="PDFから自作辞書を作成"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              border: `1px solid ${theme.accent}`,
+              background: theme.accent,
+              color: '#fff',
+              borderRadius: 6, padding: '5px 10px',
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: isBusy ? 'not-allowed' : 'pointer',
+              opacity: isBusy ? 0.65 : 1,
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+              lineHeight: 1,
+            }}
+          >
+            <Sparkles size={11} style={{ flexShrink: 0 }} />
+            {isGenerating ? '作成中...' : '辞書作成'}
+          </button>
+          <label
+            title="ページ画像もVision対応LLMへ送って、数式・図表・画像化文字の抽出精度を上げる"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 11,
+              color: theme.textSecondary,
+              whiteSpace: 'nowrap',
+              cursor: isBusy ? 'not-allowed' : 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={adminSettings.pdfExtractionUseVision}
+              disabled={isBusy}
+              onChange={(e) => onAdminSettingsChange({ pdfExtractionUseVision: e.target.checked })}
+            />
+            Vision LLM
+          </label>
+          <label
+            title="PDF辞書作成のLLM処理をページ単位で並列実行します。ローカルLLMで不安定な場合はOFFにしてください"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 11,
+              color: theme.textSecondary,
+              whiteSpace: 'nowrap',
+              cursor: isBusy ? 'not-allowed' : 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={adminSettings.pdfExtractionParallel}
+              disabled={isBusy}
+              onChange={(e) => onAdminSettingsChange({ pdfExtractionParallel: e.target.checked })}
+            />
+            並列化
+          </label>
+        </div>
       </div>
 
       {/* 全ブロック適用ボタン */}
@@ -252,6 +553,280 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
           </button>
         </div>
       )}
+
+      {(generationLog.length > 0 || isBusy) && (
+        <div style={{
+          marginBottom: 12,
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.cardBg,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: theme.textSecondary }}>辞書作成ログ</span>
+            {isBusy && <span style={{ fontSize: 11, color: theme.textMuted }}>処理中...</span>}
+            <button
+              type="button"
+              onClick={() => setGenerationLog([])}
+              disabled={isBusy}
+              style={{
+                marginLeft: 'auto',
+                border: `1px solid ${theme.btnBorder}`,
+                background: 'none',
+                color: isBusy ? theme.textDisabled : theme.textSecondary,
+                borderRadius: 6,
+                padding: '2px 8px',
+                fontSize: 11,
+                cursor: isBusy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              クリア
+            </button>
+          </div>
+          <div style={{
+            maxHeight: 160,
+            overflowY: 'auto',
+            fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+            fontSize: 10,
+            lineHeight: 1.5,
+            color: theme.textSecondary,
+            whiteSpace: 'pre-wrap',
+          }}>
+            {generationLog.length > 0 ? generationLog.join('\n') : 'ログ待機中'}
+          </div>
+        </div>
+      )}
+
+      {sectionHeader(`自作辞書 (${filteredSelfMadeGlossary.length}/${selfMadeGlossary.length})`, theme.textSecondary)}
+
+      <div style={{
+        marginBottom: 12,
+        padding: '10px 12px',
+        borderRadius: 8,
+        border: `1px solid ${theme.panelBorder}`,
+        background: theme.cardBg,
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        flexWrap: 'wrap',
+      }}>
+        <button
+          onClick={() => {
+            if (isBusy) return
+            const { added, updated } = importGlossaryIntoSelfMade()
+            showMsg(`正式辞書を自作辞書へ取り込みました: ${added} 件追加、${updated} 件更新`)
+          }}
+          disabled={glossary.length === 0 || isBusy}
+          title="正式辞書の内容を自作辞書へ作業用データとして取り込む"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            border: `1px solid ${theme.btnBorder}`,
+            background: theme.btnBg,
+            color: glossary.length > 0 && !isBusy ? theme.btnText : theme.textDisabled,
+            borderRadius: 6,
+            padding: '5px 10px',
+            fontSize: 11,
+            cursor: glossary.length > 0 && !isBusy ? 'pointer' : 'not-allowed',
+          }}
+        >
+          <FileText size={11} />
+          正式辞書を取り込む
+        </button>
+        <button
+          onClick={handleExportSelfMadeConfirmed}
+          disabled={selfMadeGlossary.length === 0 || isBusy}
+          title="日英両方が確認済みの自作辞書だけCSV出力"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            border: `1px solid ${theme.btnBorder}`,
+            background: theme.btnBg,
+            color: selfMadeGlossary.length > 0 && !isBusy ? theme.btnText : theme.textDisabled,
+            borderRadius: 6,
+            padding: '5px 10px',
+            fontSize: 11,
+            cursor: selfMadeGlossary.length > 0 && !isBusy ? 'pointer' : 'not-allowed',
+          }}
+        >
+          <Download size={11} />
+          確認済みCSV
+        </button>
+        <button
+          onClick={handleExportSelfMadeAll}
+          disabled={selfMadeGlossary.length === 0 || isBusy}
+          title="自作辞書全体をJSON出力"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            border: `1px solid ${theme.btnBorder}`,
+            background: theme.btnBg,
+            color: selfMadeGlossary.length > 0 && !isBusy ? theme.btnText : theme.textDisabled,
+            borderRadius: 6,
+            padding: '5px 10px',
+            fontSize: 11,
+            cursor: selfMadeGlossary.length > 0 && !isBusy ? 'pointer' : 'not-allowed',
+          }}
+        >
+          <Download size={11} />
+          全体JSON
+        </button>
+        <button
+          onClick={() => {
+            if (isBusy) return
+            setPendingDelete('self-made')
+          }}
+          disabled={selfMadeGlossary.length === 0 || isBusy}
+          title="自作辞書を全件削除"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            border: `1px solid ${theme.btnBorder}`,
+            background: 'none',
+            color: selfMadeGlossary.length > 0 && !isBusy ? theme.textSecondary : theme.textDisabled,
+            borderRadius: 6,
+            padding: '5px 8px',
+            fontSize: 11,
+            cursor: selfMadeGlossary.length > 0 && !isBusy ? 'pointer' : 'not-allowed',
+            marginLeft: 'auto',
+          }}
+        >
+          <Trash2 size={11} />
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+        {selfMadeFilterOptions.map(option => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => setSelfMadeFilter(option.value)}
+            style={{
+              border: `1px solid ${selfMadeFilter === option.value ? theme.accent : theme.btnBorder}`,
+              background: selfMadeFilter === option.value ? theme.cardBgActive : theme.btnBg,
+              color: selfMadeFilter === option.value ? theme.accent : theme.btnText,
+              borderRadius: 6,
+              padding: '4px 8px',
+              fontSize: 11,
+              cursor: 'pointer',
+            }}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+
+      {selfMadeGlossary.length === 0 && (
+        <div style={{
+          textAlign: 'center', padding: '18px 16px', marginBottom: 12,
+          fontSize: 12, color: theme.textMuted, lineHeight: 1.8,
+          border: `1px dashed ${theme.panelBorder}`,
+          borderRadius: 8,
+        }}>
+          自作辞書は空です。PDFから辞書作成すると候補が追加されます。
+        </div>
+      )}
+
+      {filteredSelfMadeGlossary.map((entry) => (
+        <div key={entry.id} style={{
+          border: `1px solid ${entry.disabled ? theme.panelBorder : theme.glossaryUnregisteredBorder}`,
+          borderRadius: 8,
+          padding: '10px 12px',
+          marginBottom: 8,
+          background: entry.disabled ? theme.cardBg : theme.glossaryUnregisteredBg,
+          opacity: entry.disabled ? 0.65 : 1,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: theme.textMuted, border: `1px solid ${theme.panelBorder}`, borderRadius: 4, padding: '1px 5px' }}>
+              {entry.kind === 'formula' ? '数式' : entry.kind === 'abbreviation' ? '略語' : '用語'}
+            </span>
+            <span style={{ fontSize: 11, color: entry.formalEligible ? theme.savedColor : theme.textMuted, border: `1px solid ${theme.panelBorder}`, borderRadius: 4, padding: '1px 5px' }}>
+              {entryClassLabel(entry)}
+            </span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: theme.textPrimary }}>
+              {entry.ja || entry.displayText || entry.formula || '(日本語未設定)'}
+            </span>
+            <span style={{ fontSize: 10, color: theme.textMuted }}>[{sourceLabel(entry.jaSource)}]</span>
+            <span style={{ color: theme.textSecondary, fontSize: 13 }}>→</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: theme.glossaryEnTermColor }}>
+              {entry.en || entry.spokenEn || '(英語未設定)'}
+            </span>
+            <span style={{ fontSize: 10, color: theme.textMuted }}>[{sourceLabel(entry.enSource)}]</span>
+            {entry.abbr && (
+              <span style={{ fontSize: 11, color: theme.textMuted }}>({entry.abbr})</span>
+            )}
+          </div>
+          {(entry.desc || entry.note || entry.latex) && (
+            <div style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, marginTop: 6 }}>
+              {entry.desc || entry.note || entry.latex}
+            </div>
+          )}
+          {entry.reviewReason && (
+            <div style={{ fontSize: 11, color: theme.textMuted, lineHeight: 1.5, marginTop: 4 }}>
+              {entry.reviewReason}
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+            <span style={{ fontSize: 11, color: theme.textSecondary }}>{t.source} {primarySourceLabel(entry)}</span>
+            {!entry.formalEligible && (
+              <span style={{ fontSize: 11, color: theme.textMuted }}>正式辞書対象外</span>
+            )}
+            {entry.assistiveEligible && (
+              <span style={{ fontSize: 11, color: theme.textMuted }}>補正利用候補</span>
+            )}
+            {entry.origin === 'formal_import' && (
+              <span style={{ fontSize: 11, color: theme.textMuted }}>正式辞書由来</span>
+            )}
+            {entry.promoted && (
+              <span style={{ fontSize: 11, color: theme.savedColor }}>正式辞書へ昇格済み</span>
+            )}
+            <button
+              onClick={() => handleToggleConfirmed(entry, 'jaConfirmed')}
+              disabled={isBusy}
+              style={{
+                marginLeft: 'auto',
+                border: `1px solid ${entry.jaConfirmed ? theme.accent : theme.btnBorder}`,
+                background: entry.jaConfirmed ? theme.cardBgActive : theme.btnBg,
+                color: entry.jaConfirmed ? theme.accent : theme.btnText,
+                borderRadius: 6,
+                padding: '3px 8px',
+                fontSize: 11,
+                cursor: isBusy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              日{entry.jaConfirmed ? '確認済み' : '未確認'}
+            </button>
+            <button
+              onClick={() => handleToggleConfirmed(entry, 'enConfirmed')}
+              disabled={isBusy}
+              style={{
+                border: `1px solid ${entry.enConfirmed ? theme.accent : theme.btnBorder}`,
+                background: entry.enConfirmed ? theme.cardBgActive : theme.btnBg,
+                color: entry.enConfirmed ? theme.accent : theme.btnText,
+                borderRadius: 6,
+                padding: '3px 8px',
+                fontSize: 11,
+                cursor: isBusy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              英{entry.enConfirmed ? '確認済み' : '未確認'}
+            </button>
+            <button
+              onClick={() => {
+                if (!isBusy) updateSelfMadeEntry(entry.id, { disabled: !entry.disabled })
+              }}
+              disabled={isBusy}
+              style={{
+                border: `1px solid ${theme.btnBorder}`,
+                background: 'none',
+                color: theme.textSecondary,
+                borderRadius: 6,
+                padding: '3px 8px',
+                fontSize: 11,
+                cursor: isBusy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {entry.disabled ? '有効化' : '無効化'}
+            </button>
+          </div>
+        </div>
+      ))}
 
       {sectionHeader(t.registeredTerms(glossary.length), theme.textSecondary)}
 
@@ -336,6 +911,80 @@ export function GlossaryTab({ onApplyAll }: GlossaryTabProps) {
             </div>
           ))}
         </>
+      )}
+
+      {pendingDelete && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="glossary-delete-confirm-title"
+          onClick={() => setPendingDelete(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 2000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+            background: 'rgba(0,0,0,0.45)',
+          }}
+        >
+          <div
+            onClick={event => event.stopPropagation()}
+            style={{
+              width: 'min(420px, 100%)',
+              borderRadius: 8,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.panelBg,
+              color: theme.textPrimary,
+              boxShadow: '0 18px 50px rgba(0,0,0,0.35)',
+              padding: 18,
+            }}
+          >
+            <div id="glossary-delete-confirm-title" style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>
+              {pendingDelete === 'formal' ? '用語辞書を削除' : '自作辞書を削除'}
+            </div>
+            <div style={{ fontSize: 13, color: theme.textSecondary, lineHeight: 1.6, marginBottom: 16 }}>
+              {pendingDelete === 'formal'
+                ? `用語辞書を全件削除します。対象: ${glossary.length} 件`
+                : `自作辞書を全件削除します。対象: ${selfMadeGlossary.length} 件`}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setPendingDelete(null)}
+                style={{
+                  border: `1px solid ${theme.btnBorder}`,
+                  background: theme.btnBg,
+                  color: theme.btnText,
+                  borderRadius: 6,
+                  padding: '6px 12px',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={executePendingDelete}
+                style={{
+                  border: '1px solid #dc2626',
+                  background: '#dc2626',
+                  color: '#fff',
+                  borderRadius: 6,
+                  padding: '6px 12px',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                削除
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

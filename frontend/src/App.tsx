@@ -30,9 +30,10 @@ import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
+import type { LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
-import { useGlossary } from '@/context/GlossaryContext'
+import { useGlossary, type GlossaryEntry, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
 import { applyGlossaryToText } from '@/utils/glossaryApply'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
@@ -49,6 +50,58 @@ function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
     correctionAttempts: block.correctionAttempts ? block.correctionAttempts.map((attempt) => ({ ...attempt })) : undefined,
     editHistory: block.editHistory ? block.editHistory.map((entry) => ({ ...entry })) : undefined,
   }))
+}
+
+function uniqueNonEmpty(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const text = value?.trim()
+    if (!text) continue
+    const key = text.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(text)
+  }
+  return result
+}
+
+function buildPipelineGlossary(glossary: GlossaryEntry[], selfMadeGlossary: SelfMadeGlossaryEntry[]): LocalPipelineGlossary {
+  const confirmedFormal = glossary.filter(entry => entry.confirmed)
+  const usableSelfMade = selfMadeGlossary.filter(entry =>
+    !entry.disabled
+    && (entry.formalEligible || entry.assistiveEligible),
+  )
+
+  const correctionTerms = uniqueNonEmpty([
+    ...confirmedFormal.flatMap(entry => [entry.ja, entry.abbr]),
+    ...usableSelfMade.flatMap(entry => [
+      entry.ja,
+      entry.abbr,
+      entry.formula,
+      entry.displayText,
+      entry.spokenJa,
+    ]),
+  ]).slice(0, 160)
+
+  const translationTerms = uniqueNonEmpty([
+    ...confirmedFormal.flatMap(entry => [
+      entry.ja && entry.en ? `${entry.ja} => ${entry.en}` : undefined,
+      entry.abbr,
+    ]),
+    ...usableSelfMade.flatMap(entry => [
+      entry.ja && entry.en ? `${entry.ja} => ${entry.en}` : undefined,
+      entry.formula && (entry.spokenEn || entry.spokenJa)
+        ? `${entry.formula} => ${entry.spokenEn ?? entry.spokenJa}`
+        : undefined,
+      entry.displayText && (entry.spokenEn || entry.spokenJa)
+        ? `${entry.displayText} => ${entry.spokenEn ?? entry.spokenJa}`
+        : undefined,
+      entry.abbr,
+    ]),
+  ]).slice(0, 160)
+
+  return { correctionTerms, translationTerms }
 }
 
 type SubtitleEditType = NonNullable<SubtitleBlock['editHistory']>[number]['type']
@@ -143,6 +196,9 @@ function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> 
     translationProvider: settings.translationProvider,
     translationModel: settings.translationModel,
     correctionModel: settings.correctionModel,
+    pdfExtractionUseVision: settings.pdfExtractionUseVision,
+    pdfExtractionVisionModel: settings.pdfExtractionVisionModel,
+    pdfExtractionParallel: settings.pdfExtractionParallel,
     compressModel: settings.compressModel,
     expandModel: settings.expandModel,
     contextMergeModel: settings.contextMergeModel,
@@ -175,10 +231,28 @@ function toUiSafePipelineRun(result: PipelineRunResult): PipelineRunResult {
   }
 }
 
+function getPipelineClientDebug(error: unknown): {
+  transcriptSegments?: TranscriptSegment[]
+  transcriptMetadata?: Record<string, unknown>
+  stageSnapshots?: PipelineRunDebug['stageSnapshots']
+} {
+  if (!error || typeof error !== 'object') return {}
+  const debug = (error as Record<string, unknown>).pipelineClientDebug
+  if (!debug || typeof debug !== 'object') return {}
+  const row = debug as Record<string, unknown>
+  return {
+    transcriptSegments: Array.isArray(row.transcriptSegments) ? row.transcriptSegments as TranscriptSegment[] : undefined,
+    transcriptMetadata: row.transcriptMetadata && typeof row.transcriptMetadata === 'object'
+      ? row.transcriptMetadata as Record<string, unknown>
+      : undefined,
+    stageSnapshots: Array.isArray(row.stageSnapshots) ? row.stageSnapshots as PipelineRunDebug['stageSnapshots'] : undefined,
+  }
+}
+
 export default function App() {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
-  const { glossary, importEntries } = useGlossary()
+  const { glossary, selfMadeGlossary, importEntries } = useGlossary()
   const restoredSession = loadSessionSnapshotFromLocalStorage()
   const restored = restoredSession?.blocks ?? loadFromLocalStorage()
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
@@ -214,6 +288,8 @@ export default function App() {
     restoredSession?.session?.pipelineHistory ?? [],
   )
   const [pipelineStatusPinned, setPipelineStatusPinned] = useState(false)
+  const [glossaryGenerationLog, setGlossaryGenerationLog] = useState<string[]>([])
+  const [glossaryGenerationBusy, setGlossaryGenerationBusy] = useState(false)
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
   const latestPipelineDebugRef = useRef<PipelineRunDebug | undefined>(
     restoredSession?.session?.pipelineRun?.debug,
@@ -582,6 +658,7 @@ export default function App() {
     let managedRunId: string | undefined
     let transcriptSegments: TranscriptSegment[] | undefined = undefined
     let transcriptMetadata: Record<string, unknown> | undefined = undefined
+    let stageSnapshots: PipelineRunDebug['stageSnapshots'] | undefined = undefined
 
     const mapProgressStatus = (status: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'): PipelineRunResult['status'] => {
       if (status === 'queued') return 'queued'
@@ -667,6 +744,7 @@ export default function App() {
           pipelineRun: startingState,
           videoSource: source,
         })
+        const pipelineGlossary = buildPipelineGlossary(glossary, selfMadeGlossary)
         const apiResult = await runPipelineViaApi(sourceName, adminSettings, source, (progress) => {
           managedRunId = progress.runId
           const nodeLabel: Record<string, string> = {
@@ -718,11 +796,12 @@ export default function App() {
             pipelineRun: progressState,
             videoSource: source,
           })
-        })
+        }, pipelineGlossary)
         generated = apiResult.blocks
         audit = apiResult.audit
         transcriptSegments = apiResult.debug?.transcriptSegments
         transcriptMetadata = apiResult.debug?.transcriptMetadata
+        stageSnapshots = apiResult.debug?.stageSnapshots
       } else {
         await runStep('transcribe', 'transcribe', '文字起こしを実行中...', 350, 'WhisperXでセグメント生成')
         await runStep('correct', 'correct', '日本語テキストを補正中...', 300, 'LLMで補正と正規化')
@@ -787,6 +866,7 @@ export default function App() {
           initialBlocks: initialBlocksSnapshot,
           finalBlocks: cloneBlocks(generated),
           progressEvents,
+          stageSnapshots,
           transcriptSegments,
           transcriptMetadata,
         },
@@ -811,6 +891,10 @@ export default function App() {
       })
     } catch (err) {
       const finishedAt = Date.now()
+      const pipelineDebug = getPipelineClientDebug(err)
+      transcriptSegments = transcriptSegments ?? pipelineDebug.transcriptSegments
+      transcriptMetadata = transcriptMetadata ?? pipelineDebug.transcriptMetadata
+      stageSnapshots = stageSnapshots ?? pipelineDebug.stageSnapshots
       progressEvents.push({
         at: finishedAt,
         status: 'error',
@@ -851,6 +935,7 @@ export default function App() {
           initialBlocks: initialBlocksSnapshot,
           finalBlocks: cloneBlocks(blocks),
           progressEvents,
+          stageSnapshots,
           transcriptSegments,
           transcriptMetadata,
         },
@@ -866,7 +951,7 @@ export default function App() {
         videoSource: source,
       })
     }
-  }, [adminSettings, blocks, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, persistSessionSnapshot, pipelineHistory, reset, sleep])
+  }, [adminSettings, blocks, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, glossary, persistSessionSnapshot, pipelineHistory, reset, selfMadeGlossary, sleep])
 
   const buildSessionExport = useCallback((): SessionExportData => ({
     version: 2,
@@ -1905,7 +1990,7 @@ export default function App() {
           )}
 
           {/* タブコンテンツ */}
-          <div className="flex-1 overflow-hidden min-h-0">
+          <div className="flex-1 overflow-hidden min-h-0" style={{ position: 'relative' }}>
             {isResizing && (
               <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <span style={{ fontSize: 12, color: theme.textMuted }}>...</span>
@@ -1936,7 +2021,17 @@ export default function App() {
                 maxCharsPerLine={adminSettings.enMaxCharsPerLine}
               />
             )}
-            {!isResizing && activeTab === 'dictionary' && <GlossaryTab onApplyAll={handleApplyGlossary} />}
+            {!isResizing && activeTab === 'dictionary' && (
+              <GlossaryTab
+                onApplyAll={handleApplyGlossary}
+                adminSettings={adminSettings}
+                onAdminSettingsChange={updateAdminSettings}
+                generationLog={glossaryGenerationLog}
+                setGenerationLog={setGlossaryGenerationLog}
+                isGenerating={glossaryGenerationBusy}
+                setIsGenerating={setGlossaryGenerationBusy}
+              />
+            )}
             {!isResizing && activeTab === 'help' && <HelpTab />}
             {!isResizing && activeTab === 'report' && (
               <ReportTab
@@ -1955,6 +2050,64 @@ export default function App() {
                 onAdminSettingsReset={resetAdminSettings}
                 onServiceCheck={handleServiceCheck}
               />
+            )}
+            {!isResizing && activeTab !== 'dictionary' && (glossaryGenerationLog.length > 0 || glossaryGenerationBusy) && (
+              <div style={{
+                position: 'absolute',
+                right: 16,
+                bottom: 16,
+                width: 'min(520px, calc(100% - 32px))',
+                maxHeight: 220,
+                display: 'flex',
+                flexDirection: 'column',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.cardBg,
+                boxShadow: '0 14px 40px rgba(0,0,0,0.28)',
+                overflow: 'hidden',
+                zIndex: 20,
+              }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 10px',
+                  borderBottom: `1px solid ${theme.panelBorder}`,
+                  color: theme.textSecondary,
+                  fontSize: 11,
+                  fontWeight: 700,
+                }}>
+                  <span>辞書作成ログ</span>
+                  {glossaryGenerationBusy && <span style={{ color: theme.textMuted, fontWeight: 500 }}>処理中...</span>}
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('dictionary')}
+                    style={{
+                      marginLeft: 'auto',
+                      border: `1px solid ${theme.btnBorder}`,
+                      background: theme.btnBg,
+                      color: theme.btnText,
+                      borderRadius: 6,
+                      padding: '2px 8px',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    開く
+                  </button>
+                </div>
+                <div style={{
+                  padding: '8px 10px',
+                  overflowY: 'auto',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+                  fontSize: 10,
+                  lineHeight: 1.5,
+                  color: theme.textSecondary,
+                  whiteSpace: 'pre-wrap',
+                }}>
+                  {glossaryGenerationLog.length > 0 ? glossaryGenerationLog.slice(0, 30).join('\n') : 'ログ待機中'}
+                </div>
+              </div>
             )}
           </div>
         </section>
