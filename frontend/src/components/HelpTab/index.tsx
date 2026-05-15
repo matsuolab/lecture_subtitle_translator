@@ -227,6 +227,8 @@ export function HelpTab() {
               '接続先AIプロバイダ: OpenAI または Gemini を選び、対応する API Key を入力します。READMEやチャットに公開しないでください。',
               'OpenAI Compatible Base URL: OpenAI互換APIを使う場合だけ入力します。通常は空欄です。',
               '用語辞書: CSV/XLSXを読み込み、確定済み用語をハイライト・用語漏れ・タイポ候補に使います。',
+              'PDF辞書作成で数式・図表・画像化文字の抽出精度を上げたい場合は、辞書タブで Vision LLM を有効にし、設定タブの PDF抽出Visionモデル にVision対応モデルIDを指定します。',
+              'PDF辞書作成の並列化は辞書タブまたは設定タブで切り替えます。OFFでは1ページずつ、ONではローカルLLMは2並列、Vision APIは3並列で処理します。',
             ]} />
           </SectionCard>
 
@@ -238,6 +240,7 @@ export function HelpTab() {
                     ['translationProvider', 'openai'],
                     ['translationModel', 'gpt-5.4-mini'],
                     ['correctionModel', 'gpt-5.4-mini'],
+                    ['pdfExtractionVisionModel', 'gpt-5.4-mini'],
                     ['compressModel', 'gpt-5.4-mini'],
                     ['expandModel', 'gpt-5.4-mini'],
                     ['contextMergeModel', 'gpt-5.5'],
