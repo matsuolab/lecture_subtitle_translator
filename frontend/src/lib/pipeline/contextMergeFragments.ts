@@ -4,8 +4,9 @@ import type { EnBlock, PipelineThresholds } from './blockTypes'
 import { classifyViolation, computeMetrics } from './metrics'
 import { formatLines } from './formatLines'
 import { normalizeSpaces } from './textUtils'
-import { requireAiConnection, resolveAiConnection, resolveChatModelForProvider } from './aiProvider'
+import { requireAiConnection, resolveAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import {
   hasContinuationEnd,
   hasFragmentStart,
@@ -88,20 +89,7 @@ function appendAttempt(block: EnBlock, attempt: PipelineCorrectionAttemptSummary
 }
 
 function parseDecisionWithSettings(content: string, settings: AdminSettings): MergeDecision {
-  const parsed = JSON.parse(content) as {
-    decision?: unknown
-    subtitle_text?: unknown
-    transcript_text?: unknown
-    subtitleText?: unknown
-    transcriptText?: unknown
-    english_text?: unknown
-    japanese_text?: unknown
-    englishText?: unknown
-    japaneseText?: unknown
-    source?: unknown
-    target?: unknown
-    rationale?: unknown
-  }
+  const parsed = parseJsonObjectFromLlmContent(content, 'context merge')
   const decision = parsed.decision
   if (decision !== 'merge_prev' && decision !== 'merge_next' && decision !== 'keep') {
     throw new Error(`invalid merge decision: ${String(decision)}`)
@@ -205,18 +193,18 @@ async function decideContextMerge(
   settings: AdminSettings,
 ): Promise<MergeDecision> {
   const connection = requireAiConnection(settings, 'context merge')
-  const model = resolveChatModelForProvider(settings, settings.contextMergeModel.trim() || settings.correctionModel)
+  const model = requireChatModelForProvider(settings, settings.contextMergeModel.trim() || settings.correctionModel, 'context merge')
   const config = loadLanguageProfileConfig(settings)
 
   const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${connection.apiKey}`,
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
     },
     body: JSON.stringify({
       model,
-      response_format: { type: 'json_object' },
+      response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         {
           role: 'system',
@@ -412,7 +400,8 @@ export async function mergeContextFragments(
   thresholds: PipelineThresholds,
   onWarning?: OnWarning,
 ): Promise<EnBlock[]> {
-  if (!resolveAiConnection(settings).apiKey) {
+  const connection = resolveAiConnection(settings)
+  if (connection.provider !== 'local_openai' && !connection.apiKey) {
     return blocks
   }
 

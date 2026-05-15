@@ -8,6 +8,8 @@ import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/ad
 import {
   DEFAULT_GEMINI_CHAT_MODEL,
   DEFAULT_OPENAI_CHAT_MODEL,
+  LOCAL_OLLAMA_OPENAI_COMPAT_BASE_URL,
+  LOCAL_OPENAI_COMPAT_BASE_URL,
   resolveAiConnection,
 } from '@/lib/pipeline/aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
@@ -48,6 +50,7 @@ export function SettingsTab({
     } catch { return [] }
   })
   const [modelRefreshState, setModelRefreshState] = React.useState<'idle' | 'loading' | 'error'>('idle')
+  const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
 
   async function handleRefreshModels() {
     setModelRefreshState('loading')
@@ -63,6 +66,18 @@ export function SettingsTab({
         .sort()
       setAvailableModels(ids)
       localStorage.setItem('subtitle-editor.available-models', JSON.stringify(ids))
+      if (isLocalOpenAiProvider && ids.length === 1) {
+        const modelId = ids[0]
+        onAdminSettingsChange({
+          translationModel: adminSettings.translationModel.trim() || modelId,
+          correctionModel: adminSettings.correctionModel.trim() || modelId,
+          pdfExtractionVisionModel: adminSettings.pdfExtractionVisionModel.trim() || modelId,
+          compressModel: adminSettings.compressModel.trim() || modelId,
+          microModel: adminSettings.microModel.trim() || modelId,
+          expandModel: adminSettings.expandModel.trim() || modelId,
+          contextMergeModel: adminSettings.contextMergeModel.trim() || modelId,
+        })
+      }
       setModelRefreshState('idle')
     } catch {
       setModelRefreshState('error')
@@ -89,23 +104,50 @@ export function SettingsTab({
       ? t.settingsRefreshModelsError
       : t.settingsRefreshModels
 
+  const localModelPlaceholder = availableModels.length === 1
+    ? availableModels[0]
+    : 'モデル一覧を更新して選択'
+
+  function getChatModelPlaceholder(defaultModel: string): string {
+    return isLocalOpenAiProvider ? localModelPlaceholder : defaultModel
+  }
+
   function handleTranslationProviderChange(value: TranslationProvider) {
     if (value === 'gemini') {
       onAdminSettingsChange({
         translationProvider: value,
         translationModel: DEFAULT_GEMINI_CHAT_MODEL,
         correctionModel: DEFAULT_GEMINI_CHAT_MODEL,
+        pdfExtractionVisionModel: DEFAULT_GEMINI_CHAT_MODEL,
         compressModel: DEFAULT_GEMINI_CHAT_MODEL,
+        microModel: DEFAULT_GEMINI_CHAT_MODEL,
         expandModel: DEFAULT_GEMINI_CHAT_MODEL,
         contextMergeModel: DEFAULT_GEMINI_CHAT_MODEL,
       })
       return
     }
+    if (value === 'local_openai') {
+      onAdminSettingsChange({
+        translationProvider: value,
+        openaiCompatibleBaseUrl: adminSettings.openaiCompatibleBaseUrl.trim() || LOCAL_OPENAI_COMPAT_BASE_URL,
+        translationModel: '',
+        correctionModel: '',
+        pdfExtractionVisionModel: '',
+        compressModel: '',
+        microModel: '',
+        expandModel: '',
+        contextMergeModel: '',
+      })
+      return
+    }
     onAdminSettingsChange({
       translationProvider: value,
+      openaiCompatibleBaseUrl: '',
       translationModel: DEFAULT_OPENAI_CHAT_MODEL,
       correctionModel: DEFAULT_OPENAI_CHAT_MODEL,
+      pdfExtractionVisionModel: DEFAULT_OPENAI_CHAT_MODEL,
       compressModel: DEFAULT_OPENAI_CHAT_MODEL,
+      microModel: DEFAULT_OPENAI_CHAT_MODEL,
       expandModel: DEFAULT_OPENAI_CHAT_MODEL,
       contextMergeModel: 'gpt-5.5',
     })
@@ -244,13 +286,18 @@ export function SettingsTab({
             options={[
               { value: 'openai', label: t.settingsTranslatorProviderOpenAi },
               { value: 'gemini', label: t.settingsTranslatorProviderGemini },
+              { value: 'local_openai', label: t.settingsTranslatorProviderLocalOpenAi },
             ]}
           />
           <Field
             theme={theme}
-            label={adminSettings.translationProvider === 'gemini' ? t.settingsGeminiApiKey : t.settingsOpenAiApiKey}
+            label={adminSettings.translationProvider === 'gemini'
+              ? t.settingsGeminiApiKey
+              : isLocalOpenAiProvider
+                ? t.settingsLocalOpenAiApiKey
+                : t.settingsOpenAiApiKey}
             value={adminSettings.translationProvider === 'gemini' ? adminSettings.geminiApiKey : adminSettings.openaiApiKey}
-            placeholder={adminSettings.translationProvider === 'gemini' ? 'AIza...' : 'sk-...'}
+            placeholder={adminSettings.translationProvider === 'gemini' ? 'AIza...' : isLocalOpenAiProvider ? '任意' : 'sk-...'}
             type="password"
             onChange={(value) => onAdminSettingsChange(
               adminSettings.translationProvider === 'gemini'
@@ -258,17 +305,57 @@ export function SettingsTab({
                 : { openaiApiKey: value },
             )}
           />
-          {adminSettings.translationProvider === 'openai' && (
-            <Field
-              theme={theme}
-              label={t.settingsOpenAiBaseUrl}
-              value={adminSettings.openaiCompatibleBaseUrl}
-              placeholder={t.settingsOpenAiBaseUrlPlaceholder}
-              onChange={(value) => onAdminSettingsChange({ openaiCompatibleBaseUrl: value })}
-            />
+          {isLocalOpenAiProvider && (
+            <>
+              <Field
+                theme={theme}
+                label={t.settingsOpenAiBaseUrl}
+                value={adminSettings.openaiCompatibleBaseUrl}
+                placeholder={isLocalOpenAiProvider ? LOCAL_OPENAI_COMPAT_BASE_URL : t.settingsOpenAiBaseUrlPlaceholder}
+                onChange={(value) => onAdminSettingsChange({ openaiCompatibleBaseUrl: value })}
+              />
+              {isLocalOpenAiProvider && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => onAdminSettingsChange({ openaiCompatibleBaseUrl: LOCAL_OPENAI_COMPAT_BASE_URL })}
+                    style={{
+                      padding: '7px 10px',
+                      borderRadius: 8,
+                      border: `1px solid ${theme.panelBorder}`,
+                      background: theme.panelBg,
+                      color: theme.textPrimary,
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      fontWeight: 600,
+                    }}
+                  >
+                    LM Studio
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onAdminSettingsChange({ openaiCompatibleBaseUrl: LOCAL_OLLAMA_OPENAI_COMPAT_BASE_URL })}
+                    style={{
+                      padding: '7px 10px',
+                      borderRadius: 8,
+                      border: `1px solid ${theme.panelBorder}`,
+                      background: theme.panelBg,
+                      color: theme.textPrimary,
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      fontWeight: 600,
+                    }}
+                  >
+                    Ollama
+                  </button>
+                </div>
+              )}
+            </>
           )}
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-            翻訳、補正、短縮、分割、文脈統合などのLLM処理に使うプロバイダとAPIキーです。入力したキーはこのPCの設定として保存されます。
+            {isLocalOpenAiProvider
+              ? 'LM Studio・Ollama などのローカルサーバーや、Azure OpenAI・Groq などの OpenAI 互換サービスを使います。APIキーはサービス側で要求される場合のみ入力してください。'
+              : '翻訳、補正、短縮、分割、文脈統合などのLLM処理に使うプロバイダとAPIキーです。入力したキーはこのPCの設定として保存されます。'}
           </div>
         </FieldCard>
 
@@ -297,7 +384,7 @@ export function SettingsTab({
             theme={theme}
             label="補正モデル (Correction)"
             value={adminSettings.correctionModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : DEFAULT_OPENAI_CHAT_MODEL}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
             hint="接続先AIプロバイダに対応するモデルIDを指定します"
             onChange={(value) => onAdminSettingsChange({ correctionModel: value })}
@@ -306,10 +393,26 @@ export function SettingsTab({
             theme={theme}
             label="翻訳モデル (Translation)"
             value={adminSettings.translationModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : DEFAULT_OPENAI_CHAT_MODEL}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
             hint="圧縮・展開モデルが空欄の場合もこのモデルを流用します"
             onChange={(value) => onAdminSettingsChange({ translationModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label="PDF抽出Visionモデル"
+            value={adminSettings.pdfExtractionVisionModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
+            listId="available-models-list"
+            hint="辞書作成でVision LLMを有効にした場合だけ使います。テキスト専用モデルでは失敗します"
+            onChange={(value) => onAdminSettingsChange({ pdfExtractionVisionModel: value })}
+          />
+          <ToggleField
+            theme={theme}
+            label="PDF辞書作成を並列化"
+            checked={adminSettings.pdfExtractionParallel}
+            hint="OFFでは1ページずつ処理します。ONではローカルLLMは2並列、Vision APIは3並列で処理します。ローカルLLMが不安定な場合はOFFにしてください"
+            onChange={(value) => onAdminSettingsChange({ pdfExtractionParallel: value })}
           />
           <ComboField
             theme={theme}
@@ -331,6 +434,15 @@ export function SettingsTab({
           />
           <ComboField
             theme={theme}
+            label={t.settingsMicroModel}
+            value={adminSettings.microModel}
+            placeholder="（圧縮モデルと同じ）"
+            listId="available-models-list"
+            hint="1単語ずつ削るマイクロ圧縮用。空欄 = 圧縮モデルと同じ。コストを抑えたい場合は小型モデルを指定"
+            onChange={(value) => onAdminSettingsChange({ microModel: value })}
+          />
+          <ComboField
+            theme={theme}
             label={t.settingsExpandModel}
             value={adminSettings.expandModel}
             placeholder="（翻訳モデルと同じ）"
@@ -342,7 +454,7 @@ export function SettingsTab({
             theme={theme}
             label="文脈統合モデル (Context Merge)"
             value={adminSettings.contextMergeModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : 'gpt-5.5'}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.5')}
             listId="available-models-list"
             hint="文脈依存の短い断片を前後どちらに統合するか判断する高精度モデル"
             onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
@@ -482,6 +594,33 @@ export function SettingsTab({
             step={0.01}
             onChange={(value) => onAdminSettingsChange({ qualityTranslationThreshold: value })}
           />
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{t.settingsSemanticCheckTitle}</div>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{t.settingsSemanticCheckMode}</span>
+            <select
+              value={adminSettings.semanticCheckMode}
+              onChange={(e) => onAdminSettingsChange({ semanticCheckMode: e.target.value as 'off' | 'log_only' | 'enforce' })}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textPrimary,
+                fontSize: 12,
+              }}
+            >
+              <option value="off">{t.settingsSemanticCheckOff}</option>
+              <option value="log_only">{t.settingsSemanticCheckLogOnly}</option>
+              <option value="enforce">{t.settingsSemanticCheckEnforce}</option>
+            </select>
+          </label>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            {t.settingsSemanticCheckDesc}
+          </div>
         </FieldCard>
       </Section>
 
@@ -724,6 +863,36 @@ function ComboField({
         <span style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>{hint}</span>
       )}
     </div>
+  )
+}
+
+function ToggleField({
+  theme,
+  label,
+  checked,
+  hint,
+  onChange,
+}: {
+  theme: Theme
+  label: string
+  checked: boolean
+  hint?: string
+  onChange: (value: boolean) => void
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        {label}
+      </span>
+      {hint && (
+        <span style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>{hint}</span>
+      )}
+    </label>
   )
 }
 

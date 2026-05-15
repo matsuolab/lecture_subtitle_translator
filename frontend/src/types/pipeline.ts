@@ -53,6 +53,8 @@ export interface PipelineReviewProposal {
   rationale: string
 }
 
+export type PipelineSemanticCheckOutcome = 'passed' | 'borderline' | 'failed' | 'unavailable'
+
 export interface PipelineCorrectionAttemptSummary {
   strategy: string
   changed: boolean
@@ -65,6 +67,11 @@ export interface PipelineCorrectionAttemptSummary {
   afterTranscriptText?: string
   afterSubtitleText?: string
   rationale?: string
+  // セマンティックチェック（log_only / enforce で記録）
+  // before_en vs after_en の cosine similarity
+  semanticSimilarity?: number
+  // 判定（threshold との比較）
+  semanticOutcome?: PipelineSemanticCheckOutcome
 }
 
 export interface PipelineReviewItem {
@@ -113,6 +120,13 @@ export interface PipelineProgressEvent {
   nodeElapsedSec?: number | null
 }
 
+export interface PipelineStageSnapshot {
+  stage: string
+  at: number
+  itemCount: number
+  items: Record<string, unknown>[]
+}
+
 export interface PipelineRunDebug {
   sourceMedia?: {
     name: string
@@ -122,6 +136,7 @@ export interface PipelineRunDebug {
   settingsSnapshot?: Record<string, unknown>
   initialBlocks?: SubtitleBlock[]
   finalBlocks?: SubtitleBlock[]
+  stageSnapshots?: PipelineStageSnapshot[]
   progressEvents: PipelineProgressEvent[]
   transcriptSegments?: TranscriptSegment[]
   transcriptMetadata?: Record<string, unknown>

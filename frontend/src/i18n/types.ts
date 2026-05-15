@@ -101,7 +101,9 @@ export interface LocaleStrings {
   settingsTranslatorProvider: string
   settingsTranslatorProviderOpenAi: string
   settingsTranslatorProviderGemini: string
+  settingsTranslatorProviderLocalOpenAi: string
   settingsOpenAiApiKey: string
+  settingsLocalOpenAiApiKey: string
   settingsGeminiApiKey: string
   settingsOpenAiBaseUrl: string
   settingsOpenAiBaseUrlPlaceholder: string
@@ -131,10 +133,17 @@ export interface LocaleStrings {
   settingsPipelineMaxCompressPerBlock: string
   settingsPipelineMaxPhase2Retries: string
   settingsCompressModel: string
+  settingsMicroModel: string
   settingsExpandModel: string
   settingsCompressPromptOverride: string
   settingsExpandPromptOverride: string
   settingsRefreshModels: string
   settingsRefreshModelsLoading: string
   settingsRefreshModelsError: string
+  settingsSemanticCheckTitle: string
+  settingsSemanticCheckMode: string
+  settingsSemanticCheckOff: string
+  settingsSemanticCheckLogOnly: string
+  settingsSemanticCheckEnforce: string
+  settingsSemanticCheckDesc: string
 }

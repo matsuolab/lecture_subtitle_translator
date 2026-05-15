@@ -1,11 +1,16 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../blockTypes'
 import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
-import type { AgentThresholds, CorrectionAttempt, DecisionNode } from './types'
+import type { AgentThresholds, CorrectionAttempt, DecisionNode, SemanticCheckOutcome } from './types'
 import { buildContext } from './contextBuilder'
 import { getFeasibleStrategies } from './feasibility'
 import { applyPatch, meetsConstraints, normalizeAndValidate } from './patchUtils'
 import { toolRegistry } from './tools/index'
+import {
+  classifySemanticResult,
+  computeSimilarity,
+  isSemanticCheckAvailable,
+} from '../semanticCheck'
 
 export interface CorrectionEngineOptions {
   // ツール実行で警告・エラーが発生した場合に呼ばれるコールバック
@@ -46,7 +51,45 @@ export async function correctionEngine(
     afterTranscriptText: attempt.afterTranscriptText,
     afterSubtitleText: attempt.afterSubtitleText,
     rationale: attempt.rationale,
+    semanticSimilarity: attempt.semanticSimilarity,
+    semanticOutcome: attempt.semanticOutcome,
   })
+
+  // セマンティックチェックが利用可能か（API キーや local_openai 等で判定）
+  const semanticEnabled = isSemanticCheckAvailable(settings)
+  const threshold = Math.max(0, Math.min(1, settings.qualityCorrectionThreshold ?? 0.7))
+
+  // attempt 直後に類似度を計算して attempt オブジェクトを更新する
+  const annotateSemantic = async (
+    attempt: CorrectionAttempt,
+    beforeEn: string,
+    afterEn: string,
+  ): Promise<void> => {
+    if (!semanticEnabled) {
+      attempt.semanticOutcome = 'unavailable'
+      return
+    }
+    // 圧縮系・split_block・offload_neighbor のみチェック対象（borrow_gap はテキスト不変）
+    const checkable: CorrectionAttempt['strategy'][] = [
+      'compress_micro',
+      'compress_rephrase',
+      'compress_trim',
+      'compress_core',
+      'split_block',
+      'offload_neighbor',
+    ]
+    if (!checkable.includes(attempt.strategy)) return
+    // changed=false なら計算不要
+    if (!attempt.changed) return
+    const sim = await computeSimilarity(beforeEn, afterEn, settings)
+    if (sim === null) {
+      attempt.semanticOutcome = 'unavailable'
+      return
+    }
+    attempt.semanticSimilarity = sim
+    const outcome: SemanticCheckOutcome = classifySemanticResult(sim, threshold)
+    attempt.semanticOutcome = outcome
+  }
 
   const attachAttemptHistories = (timelineWithResults: EnBlock[]): EnBlock[] =>
     timelineWithResults.map((block) => {
@@ -142,9 +185,27 @@ export async function correctionEngine(
       afterSubtitleText,
       rationale: patch.warning,
     }
+
+    // セマンティックチェック（log_only / enforce 共通でスコアを取得）
+    await annotateSemantic(attempt, beforeSubtitleText, afterSubtitleText)
+
+    // enforce モードかつ failed なら差し戻し（changed=false に書き換え、tries 履歴は残す）
+    let acceptPatch = patch.changed
+    if (
+      settings.semanticCheckMode === 'enforce' &&
+      attempt.semanticOutcome === 'failed' &&
+      patch.changed
+    ) {
+      acceptPatch = false
+      const baseRationale = attempt.rationale ? `${attempt.rationale}; ` : ''
+      attempt.rationale = `${baseRationale}rejected by semantic check (similarity=${attempt.semanticSimilarity?.toFixed(3)})`
+      attempt.changed = false
+      onToolWarning?.(blockIdStr, strategy, attempt.rationale)
+    }
+
     history.push(attempt)
 
-    if (!patch.changed) continue
+    if (!acceptPatch) continue
 
     currentTimeline = applyPatch(currentTimeline, patch)
 

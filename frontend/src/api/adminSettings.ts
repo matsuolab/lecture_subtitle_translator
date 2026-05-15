@@ -1,4 +1,4 @@
-import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 
 const STORAGE_KEY = 'subtitle-editor.admin-settings.v4'
@@ -21,7 +21,11 @@ export function getDefaultAdminSettings(): AdminSettings {
     translationProvider: DEFAULT_TRANSLATION_PROVIDER,
     translationModel: 'gpt-5.4-mini',
     correctionModel: 'gpt-5.4-mini',
+    pdfExtractionUseVision: false,
+    pdfExtractionVisionModel: 'gpt-5.4-mini',
+    pdfExtractionParallel: false,
     embeddingModel: 'text-embedding-3-small',
+    semanticCheckMode: 'log_only',
     logRetentionCount: null,
     enMaxCharsPerLine: 80,
     enMaxLines: 2,
@@ -43,6 +47,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     pipelineMaxCompressPerBlock: 5,
     pipelineMaxPhase2Retries: 3,
     compressModel: 'gpt-5.4-mini',
+    microModel: 'gpt-5.4-mini',
     expandModel: 'gpt-5.4-mini',
     contextMergeModel: 'gpt-5.5',
     subtitleLanguageLabel: 'English',
@@ -65,10 +70,15 @@ function normalizeServiceMode(value: unknown): ServiceMode {
 }
 
 function normalizeTranslationProvider(value: unknown): TranslationProvider {
-  if (value === 'openai' || value === 'gemini') {
+  if (value === 'openai' || value === 'gemini' || value === 'local_openai') {
     return value
   }
   return DEFAULT_TRANSLATION_PROVIDER
+}
+
+function normalizeSemanticCheckMode(value: unknown): SemanticCheckMode {
+  if (value === 'off' || value === 'log_only' || value === 'enforce') return value
+  return 'log_only'
 }
 
 export function normalizeAdminSettings(value: unknown): AdminSettings {
@@ -91,7 +101,11 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     translationProvider: normalizeTranslationProvider(raw.translationProvider),
     translationModel: typeof raw.translationModel === 'string' && raw.translationModel ? raw.translationModel : defaults.translationModel,
     correctionModel: typeof raw.correctionModel === 'string' && raw.correctionModel ? raw.correctionModel : defaults.correctionModel,
+    pdfExtractionUseVision: typeof raw.pdfExtractionUseVision === 'boolean' ? raw.pdfExtractionUseVision : defaults.pdfExtractionUseVision,
+    pdfExtractionVisionModel: typeof raw.pdfExtractionVisionModel === 'string' && raw.pdfExtractionVisionModel ? raw.pdfExtractionVisionModel : defaults.pdfExtractionVisionModel,
+    pdfExtractionParallel: typeof raw.pdfExtractionParallel === 'boolean' ? raw.pdfExtractionParallel : defaults.pdfExtractionParallel,
     embeddingModel: typeof raw.embeddingModel === 'string' && raw.embeddingModel ? raw.embeddingModel : defaults.embeddingModel,
+    semanticCheckMode: normalizeSemanticCheckMode(raw.semanticCheckMode),
     logRetentionCount: typeof raw.logRetentionCount === 'number' ? raw.logRetentionCount : null,
     enMaxCharsPerLine: normalizePositiveNumber(raw.enMaxCharsPerLine, defaults.enMaxCharsPerLine),
     enMaxLines: normalizePositiveNumber(raw.enMaxLines, defaults.enMaxLines),
@@ -113,6 +127,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pipelineMaxCompressPerBlock: normalizePositiveNumber(raw.pipelineMaxCompressPerBlock, defaults.pipelineMaxCompressPerBlock),
     pipelineMaxPhase2Retries: normalizePositiveNumber(raw.pipelineMaxPhase2Retries, defaults.pipelineMaxPhase2Retries),
     compressModel: typeof raw.compressModel === 'string' && raw.compressModel ? raw.compressModel : defaults.compressModel,
+    microModel: typeof raw.microModel === 'string' && raw.microModel ? raw.microModel : defaults.microModel,
     expandModel: typeof raw.expandModel === 'string' && raw.expandModel ? raw.expandModel : defaults.expandModel,
     contextMergeModel: typeof raw.contextMergeModel === 'string' && raw.contextMergeModel ? raw.contextMergeModel : defaults.contextMergeModel,
     subtitleLanguageLabel: typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel ? raw.subtitleLanguageLabel : defaults.subtitleLanguageLabel,
