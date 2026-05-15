@@ -1,12 +1,21 @@
 import type { CorrectedSegment, TranslatedSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
-import { requireAiConnection } from './aiProvider'
+import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
 const JA_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/g
 const MAX_SEGMENTS_PER_REQUEST = 40
+const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
 const COUNT_MISMATCH_RE = /translation API returned (\d+) segments for (\d+) inputs/
+
+class TranslationRetryableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TranslationRetryableError'
+  }
+}
 
 function looksUntranslated(source: string, translated: string): boolean {
   const src = normalizeSpaces(source)
@@ -23,6 +32,7 @@ async function callOpenAICompatible(
   texts: string[],
   apiKey: string,
   baseUrl: string,
+  model: string,
 ): Promise<string[]> {
   const response = await tauriFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -31,7 +41,7 @@ async function callOpenAICompatible(
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
     body: JSON.stringify({
-      model: 'gpt-4.1-mini',
+      model,
       temperature: 0.0,
       messages: [
         {
@@ -87,52 +97,83 @@ async function callOpenAICompatible(
 
   const payload = await response.json()
   const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  if (!content.trim()) throw new Error('translation API response did not include message content')
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(content.trim())
-  } catch {
-    const match = content.match(/\{[\s\S]*\}/)
-    if (!match) throw new Error('translation response was not valid JSON with a translations array')
-    parsed = JSON.parse(match[0])
+  const finishReason = payload?.choices?.[0]?.finish_reason
+  if (finishReason === 'length') {
+    throw new TranslationRetryableError(`translation API stopped because output length was reached. content=${content.slice(0, 500)}`)
+  }
+  if (!content.trim()) {
+    throw new TranslationRetryableError(`translation API response did not include message content. payload=${summarizeTranslationPayload(payload)}`)
   }
 
-  const translations = (parsed as Record<string, unknown>)?.translations
+  let parsed: Record<string, unknown>
+  try {
+    parsed = parseJsonObjectFromLlmContent(content, 'translation')
+  } catch (error) {
+    throw new TranslationRetryableError(
+      `${error instanceof Error ? error.message : String(error)}. content=${content.slice(0, 500)}`,
+    )
+  }
+
+  const translations = parsed.translations
   if (!Array.isArray(translations) || !translations.every((t) => typeof t === 'string')) {
-    throw new Error('translation response was not valid JSON with a translations array')
+    throw new TranslationRetryableError(
+      `translation response was not valid JSON with a translations array. content=${content.slice(0, 500)}`,
+    )
   }
   if (translations.length !== texts.length) {
-    throw new Error(
+    throw new TranslationRetryableError(
       `translation API returned ${translations.length} segments for ${texts.length} inputs`,
     )
   }
   return translations.map((t) => normalizeSpaces(t as string))
 }
 
-function isCountMismatchError(error: unknown): boolean {
+function summarizeTranslationPayload(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return String(payload)
+  const row = payload as Record<string, unknown>
+  const choices = Array.isArray(row.choices) ? row.choices : []
+  const firstChoice = choices[0] as Record<string, unknown> | undefined
+  const message = firstChoice?.message as Record<string, unknown> | undefined
+  return JSON.stringify({
+    object: row.object,
+    model: row.model,
+    choices: choices.length,
+    finishReason: firstChoice?.finish_reason,
+    messageKeys: message ? Object.keys(message) : [],
+    hasReasoningContent: typeof message?.reasoning_content === 'string',
+    usage: row.usage,
+  })
+}
+
+function isRetryableTranslationError(error: unknown): boolean {
+  if (error instanceof TranslationRetryableError) return true
   const message = error instanceof Error ? error.message : String(error ?? '')
   return COUNT_MISMATCH_RE.test(message)
+}
+
+function formatTranslationFailure(text: string, error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return new Error(`translation failed for source=${text.slice(0, 500)}: ${message}`)
 }
 
 async function translateBatchWithFallback(
   texts: string[],
   apiKey: string,
   baseUrl: string,
+  model: string,
 ): Promise<string[]> {
   if (texts.length === 0) return []
 
   try {
-    return await callOpenAICompatible(texts, apiKey, baseUrl)
+    return await callOpenAICompatible(texts, apiKey, baseUrl, model)
   } catch (error) {
-    if (!isCountMismatchError(error) || texts.length === 1) {
-      throw error
-    }
+    if (!isRetryableTranslationError(error)) throw error
+    if (texts.length === 1) throw formatTranslationFailure(texts[0], error)
   }
 
   const splitAt = Math.ceil(texts.length / 2)
-  const left = await translateBatchWithFallback(texts.slice(0, splitAt), apiKey, baseUrl)
-  const right = await translateBatchWithFallback(texts.slice(splitAt), apiKey, baseUrl)
+  const left = await translateBatchWithFallback(texts.slice(0, splitAt), apiKey, baseUrl, model)
+  const right = await translateBatchWithFallback(texts.slice(splitAt), apiKey, baseUrl, model)
   return [...left, ...right]
 }
 
@@ -140,22 +181,30 @@ async function translateInBatches(
   texts: string[],
   apiKey: string,
   baseUrl: string,
+  model: string,
+  maxSegmentsPerRequest: number,
 ): Promise<string[]> {
   const translated: string[] = []
-  for (let start = 0; start < texts.length; start += MAX_SEGMENTS_PER_REQUEST) {
-    const batch = texts.slice(start, start + MAX_SEGMENTS_PER_REQUEST)
-    const batchTranslations = await translateBatchWithFallback(batch, apiKey, baseUrl)
+  for (let start = 0; start < texts.length; start += maxSegmentsPerRequest) {
+    const batch = texts.slice(start, start + maxSegmentsPerRequest)
+    const batchTranslations = await translateBatchWithFallback(batch, apiKey, baseUrl, model)
     translated.push(...batchTranslations)
   }
   return translated
 }
 
-function resolveApiConfig(settings: AdminSettings): { apiKey: string; baseUrl: string; providerLabel: string } {
+function resolveApiConfig(settings: AdminSettings): { apiKey: string; baseUrl: string; providerLabel: string; model: string; maxSegmentsPerRequest: number } {
   const connection = requireAiConnection(settings)
+  const model = requireChatModelForProvider(settings, settings.translationModel, 'translation')
+  const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
+    ? LOCAL_MAX_SEGMENTS_PER_REQUEST
+    : MAX_SEGMENTS_PER_REQUEST
   return {
     apiKey: connection.apiKey,
     baseUrl: connection.baseUrl,
     providerLabel: connection.providerLabel,
+    model,
+    maxSegmentsPerRequest,
   }
 }
 
@@ -167,9 +216,9 @@ export async function translateSegments(
     throw new Error('no corrected segments to translate')
   }
 
-  const { apiKey, baseUrl, providerLabel } = resolveApiConfig(settings)
+  const { apiKey, baseUrl, providerLabel, model, maxSegmentsPerRequest } = resolveApiConfig(settings)
   const sourceTexts = segments.map((seg) => seg.ja_corrected || seg.text || '')
-  const translatedTexts = await translateInBatches(sourceTexts, apiKey, baseUrl)
+  const translatedTexts = await translateInBatches(sourceTexts, apiKey, baseUrl, model, maxSegmentsPerRequest)
 
   const untranslatedIds: number[] = []
   const result: TranslatedSegment[] = segments.map((seg, idx) => {

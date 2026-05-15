@@ -6,6 +6,7 @@ import type { EnBlock, PipelineThresholds, ViolationCode } from '../blockTypes'
 // ---------------------------------------------------------------------------
 
 export type CorrectionStrategy =
+  | 'compress_micro'
   | 'compress_rephrase'
   | 'compress_trim'
   | 'compress_core'
@@ -51,6 +52,8 @@ export interface DecisionMetrics {
 // CorrectionAttempt
 // ---------------------------------------------------------------------------
 
+export type SemanticCheckOutcome = 'passed' | 'borderline' | 'failed' | 'unavailable'
+
 export interface CorrectionAttempt {
   strategy: CorrectionStrategy
   changed: boolean
@@ -63,6 +66,8 @@ export interface CorrectionAttempt {
   afterTranscriptText?: string
   afterSubtitleText?: string
   rationale?: string
+  semanticSimilarity?: number
+  semanticOutcome?: SemanticCheckOutcome
 }
 
 // ---------------------------------------------------------------------------

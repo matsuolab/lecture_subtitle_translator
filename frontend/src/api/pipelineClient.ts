@@ -2,10 +2,10 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { tauriFetch, type TauriFetchResponse } from '@/lib/tauriFetch'
 import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection } from '@/lib/pipeline/aiProvider'
-import type { PipelineAuditReport, PipelineNodeTrace } from '@/types/pipeline'
+import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
-import { runLocalPostPipeline } from '@/lib/pipeline/localPipeline'
+import { getLocalPipelineDebugFailure, runLocalPostPipeline, type LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
 
 interface BackendTranslatedSegment {
   id?: number
@@ -117,6 +117,15 @@ interface LocalWhisperxTranscriptResponse {
 
 const ENV_API_BASE = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
+function attachPipelineClientDebug(
+  error: unknown,
+  debug: NonNullable<PipelineApiRunResult['debug']>,
+): Error {
+  const err = error instanceof Error ? error : new Error(String(error))
+  Object.assign(err, { pipelineClientDebug: debug })
+  return err
+}
+
 export interface PipelineApiRunResult {
   blocks: SubtitleBlock[]
   traces: PipelineNodeTrace[]
@@ -124,6 +133,7 @@ export interface PipelineApiRunResult {
   debug?: {
     transcriptSegments?: TranscriptSegment[]
     transcriptMetadata?: Record<string, unknown>
+    stageSnapshots?: PipelineStageSnapshot[]
     mode: 'managed_service' | 'legacy_pipeline'
   }
 }
@@ -602,6 +612,7 @@ async function runLocalTranscriptPipeline(
   settings: AdminSettings,
   sourceInput?: PipelineSourceInput,
   onProgress?: (p: PipelineRunProgress) => void,
+  glossary?: LocalPipelineGlossary,
 ): Promise<PipelineApiRunResult> {
   if (!isTauri()) {
     throw new Error('ローカルWhisperX転写はTauriデスクトップアプリでのみ利用可能です')
@@ -656,19 +667,31 @@ async function runLocalTranscriptPipeline(
     nodeElapsedSec: null,
   })
 
-  const localResult = await runLocalPostPipeline(
-    transcriptSegments,
-    settings,
-    (step) =>
-      onProgress?.({
-        runId: 'local-transcript',
-        status: 'running',
-        currentNode: step,
-        completedNodes: managedTraces.map((trace) => trace.nodeId),
-        totalNodes: managedTraces.length + 8,
-        nodeElapsedSec: null,
-      }),
-  )
+  let localResult
+  try {
+    localResult = await runLocalPostPipeline(
+      transcriptSegments,
+      settings,
+      (step) =>
+        onProgress?.({
+          runId: 'local-transcript',
+          status: 'running',
+          currentNode: step,
+          completedNodes: managedTraces.map((trace) => trace.nodeId),
+          totalNodes: managedTraces.length + 8,
+          nodeElapsedSec: null,
+        }),
+      glossary,
+    )
+  } catch (error) {
+    const failure = getLocalPipelineDebugFailure(error)
+    throw attachPipelineClientDebug(error, {
+      transcriptSegments,
+      transcriptMetadata: result.metadata,
+      stageSnapshots: failure.stageSnapshots,
+      mode: 'legacy_pipeline',
+    })
+  }
 
   const traces = [...managedTraces, ...localResult.traces]
   return {
@@ -681,6 +704,7 @@ async function runLocalTranscriptPipeline(
     debug: {
       transcriptSegments,
       transcriptMetadata: result.metadata,
+      stageSnapshots: localResult.stageSnapshots,
       mode: 'legacy_pipeline',
     },
   }
@@ -692,6 +716,7 @@ async function runManagedPipeline(
   settings: AdminSettings,
   sourceInput?: PipelineSourceInput,
   onProgress?: (p: PipelineRunProgress) => void,
+  glossary?: LocalPipelineGlossary,
 ): Promise<PipelineApiRunResult> {
   if (!sourceInput?.path && !sourceInput?.file) {
     throw new Error('managed service mode requires a local source file or file path')
@@ -779,19 +804,31 @@ async function runManagedPipeline(
       totalNodes: managedTraces.length + localStepCountEstimate,
       nodeElapsedSec: null,
     })
-    const localResult = await runLocalPostPipeline(
-      transcriptSegments,
-      settings,
-      (step) =>
-        onProgress?.({
-          runId: jobId,
-          status: 'running',
-          currentNode: step,
-          completedNodes: managedTraces.map((trace) => trace.nodeId),
-          totalNodes: managedTraces.length + localStepCountEstimate,
-          nodeElapsedSec: null,
-        }),
-    )
+    let localResult
+    try {
+      localResult = await runLocalPostPipeline(
+        transcriptSegments,
+        settings,
+        (step) =>
+          onProgress?.({
+            runId: jobId,
+            status: 'running',
+            currentNode: step,
+            completedNodes: managedTraces.map((trace) => trace.nodeId),
+            totalNodes: managedTraces.length + localStepCountEstimate,
+            nodeElapsedSec: null,
+          }),
+        glossary,
+      )
+    } catch (error) {
+      const failure = getLocalPipelineDebugFailure(error)
+      throw attachPipelineClientDebug(error, {
+        transcriptSegments,
+        transcriptMetadata: result.metadata,
+        stageSnapshots: failure.stageSnapshots,
+        mode: 'managed_service',
+      })
+    }
     const traces = [...managedTraces, ...localResult.traces]
     return {
       blocks: localResult.blocks,
@@ -803,6 +840,7 @@ async function runManagedPipeline(
       debug: {
         transcriptSegments,
         transcriptMetadata: result.metadata,
+        stageSnapshots: localResult.stageSnapshots,
         mode: 'managed_service',
       },
     }
@@ -816,6 +854,7 @@ export async function runPipelineViaService(
   settings: AdminSettings,
   sourceInput?: PipelineSourceInput,
   onProgress?: (p: PipelineRunProgress) => void,
+  glossary?: LocalPipelineGlossary,
 ): Promise<PipelineApiRunResult> {
   const apiBase = resolveServiceBase(settings)
   if (!apiBase) {
@@ -823,9 +862,9 @@ export async function runPipelineViaService(
   }
 
   if (settings.serviceMode === 'managed_service') {
-    return runManagedPipeline(apiBase, sourceName, settings, sourceInput, onProgress)
+    return runManagedPipeline(apiBase, sourceName, settings, sourceInput, onProgress, glossary)
   }
-  return runLocalTranscriptPipeline(apiBase, sourceName, settings, sourceInput, onProgress)
+  return runLocalTranscriptPipeline(apiBase, sourceName, settings, sourceInput, onProgress, glossary)
 }
 
 export const runPipelineViaApi = runPipelineViaService

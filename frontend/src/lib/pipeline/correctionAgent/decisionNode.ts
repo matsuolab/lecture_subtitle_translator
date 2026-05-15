@@ -8,8 +8,9 @@ import type {
   DecisionNode,
 } from './types'
 import { buildMetrics } from './metrics'
-import { requireAiConnection, resolveChatModelForProvider } from '../aiProvider'
+import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from '../jsonResponse'
 
 // ---------------------------------------------------------------------------
 // RuleBasedDecisionNode
@@ -23,6 +24,17 @@ export class RuleBasedDecisionNode implements DecisionNode {
     const thresholds = ctx.thresholds as PipelineThresholds & AgentThresholds
     const m = buildMetrics(ctx, thresholds)
     const f = new Set(feasible)
+    const isDurationViolation =
+      ctx.block.violation === 'long_segment' || ctx.block.violation === 'merged_long'
+
+    // 0. 時間違反（long_segment / merged_long）は圧縮では解決しないため、
+    //    split_block / borrow_gap のみを使う
+    if (isDurationViolation) {
+      if (f.has('split_block')) return 'split_block'
+      if (f.has('borrow_gap')) return 'borrow_gap'
+      // どちらも feasible になければ諦め（feasibility側で compress* は除外済み）
+      return feasible[0] ?? 'split_block'
+    }
 
     // 1. borrow_gap で完全解決できる場合は最優先
     if (f.has('borrow_gap') && this.canBorrowSolveCompletely(m)) {
@@ -34,13 +46,14 @@ export class RuleBasedDecisionNode implements DecisionNode {
       return 'borrow_gap'
     }
 
-    // 3. 長尺で明確な日本語境界がある場合は split_block を優先
-    if (f.has('split_block') && this.shouldAutoSplitLongSegment(ctx, m)) {
-      return 'split_block'
+    // 3. tier=tiny の軽微な超過は compress_micro（1単語ずつ削る精密手術）が最優先
+    if (m.tier === 'tiny' && f.has('compress_micro')) {
+      return 'compress_micro'
     }
 
     // 4. 行長だけの軽度違反はまず短縮・言い換えで自動解決を試す
     if (ctx.block.violation === 'line_length_only') {
+      if (f.has('compress_micro') && m.tier === 'tiny') return 'compress_micro'
       if (f.has('compress_rephrase')) return 'compress_rephrase'
       if (f.has('compress_trim')) return 'compress_trim'
     }
@@ -64,7 +77,7 @@ export class RuleBasedDecisionNode implements DecisionNode {
       return 'compress_core'
     }
 
-    // 7. offload_neighbor（デフォルト無効）
+    // 9. offload_neighbor（デフォルト無効）
     if (f.has('offload_neighbor')) {
       return 'offload_neighbor'
     }
@@ -98,12 +111,6 @@ export class RuleBasedDecisionNode implements DecisionNode {
 
   private shouldSplitFirst(m: DecisionMetrics): boolean {
     return (m.tier === 'large' || m.tier === 'extreme') && m.splitViable
-  }
-
-  private shouldAutoSplitLongSegment(ctx: DecisionContext, m: DecisionMetrics): boolean {
-    if (!m.splitViable) return false
-    if (ctx.block.violation !== 'long_segment' && ctx.block.violation !== 'merged_long') return false
-    return /[。！？、]|について|として|ために|踏まえて|また|そして|ただし|一方で/.test(ctx.block.jaText)
   }
 
   private chooseCompressionStrategy(
@@ -160,7 +167,7 @@ export class LLMDecisionNode implements DecisionNode {
   ): Promise<CorrectionStrategy> {
     const { settings } = ctx
     const connection = requireAiConnection(settings, 'LLM decision')
-    const model = resolveChatModelForProvider(settings, settings.correctionModel)
+    const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'LLM decision')
 
     const prompt = buildDecisionPrompt(ctx, feasible)
 
@@ -168,12 +175,12 @@ export class LLMDecisionNode implements DecisionNode {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${connection.apiKey}`,
+        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
       },
       body: JSON.stringify({
         model,
         temperature: 0.0,
-        response_format: { type: 'json_object' },
+        response_format: resolveJsonResponseFormatForProvider(settings),
         messages: [
           {
             role: 'system',
@@ -196,7 +203,7 @@ export class LLMDecisionNode implements DecisionNode {
 
     const payload = await response.json()
     const content: string = payload?.choices?.[0]?.message?.content ?? ''
-    const parsed = JSON.parse(content) as { strategy?: unknown }
+    const parsed = parseJsonObjectFromLlmContent(content, 'LLM decision')
     const strategy = typeof parsed.strategy === 'string' ? parsed.strategy : ''
 
     if (!isCorrectionStrategy(strategy)) {
@@ -243,9 +250,10 @@ function buildDecisionPrompt(
     feasibleStrategies: feasible,
     alreadyAttempted: ctx.attemptHistory.map(a => a.strategy),
     strategyDescriptions: {
+      compress_micro: 'Remove exactly one word at a time (for tiny overshoot ≤10%)',
       compress_rephrase: 'Shorten while preserving meaning',
       compress_trim: 'Drop qualifications/examples, keep main claim',
-      compress_core: 'Keep single most important concept (manual review required)',
+      compress_core: 'Aggressive rewrite to ~50-70% length, keep as complete sentence',
       split_block: 'Split Japanese into 2 semantic sentences, re-translate each',
       borrow_gap: 'Extend time window into adjacent silence',
       offload_neighbor: 'Move content to neighboring subtitle block',
@@ -255,6 +263,7 @@ function buildDecisionPrompt(
 
 function isCorrectionStrategy(value: string): value is CorrectionStrategy {
   return [
+    'compress_micro',
     'compress_rephrase',
     'compress_trim',
     'compress_core',

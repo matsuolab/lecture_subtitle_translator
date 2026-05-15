@@ -1,11 +1,20 @@
 import type { TranscriptSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
-import { requireAiConnection } from './aiProvider'
+import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
 const MAX_SEGMENTS_PER_REQUEST = 20
 const COUNT_MISMATCH_RE = /correction API returned (\d+) items for (\d+) inputs/
+const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
+
+class CorrectionRetryableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CorrectionRetryableError'
+  }
+}
 
 const SYSTEM_PROMPT =
   'あなたは日本語書き起こしテキストの校正専門家です。\n' +
@@ -64,6 +73,7 @@ async function callCorrectionApi(
   glossaryTerms: string[],
   apiKey: string,
   baseUrl: string,
+  model: string,
 ): Promise<string[]> {
   const glossaryNote =
     glossaryTerms.length > 0
@@ -74,10 +84,10 @@ async function callCorrectionApi(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
     body: JSON.stringify({
-      model: 'gpt-4.1-mini',
+      model,
       temperature: 0.1,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -125,23 +135,29 @@ async function callCorrectionApi(
 
   const payload = await response.json()
   const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  if (!content.trim()) throw new Error('correction API response did not include message content')
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(content.trim())
-  } catch {
-    const match = content.match(/\{[\s\S]*\}/)
-    if (!match) throw new Error('correction response was not valid JSON')
-    parsed = JSON.parse(match[0])
+  if (!content.trim()) {
+    throw new CorrectionRetryableError(
+      `correction API response did not include message content. payload=${summarizeCorrectionPayload(payload)}`,
+    )
   }
 
-  const corrections = (parsed as Record<string, unknown>)?.corrections
+  let parsed: Record<string, unknown>
+  try {
+    parsed = parseJsonObjectFromLlmContent(content, 'correction')
+  } catch (error) {
+    throw new CorrectionRetryableError(
+      `${error instanceof Error ? error.message : String(error)}. content=${content.slice(0, 500)}`,
+    )
+  }
+
+  const corrections = parsed.corrections
   if (!Array.isArray(corrections)) {
-    throw new Error('correction response did not contain corrections array')
+    throw new CorrectionRetryableError(
+      `correction response did not contain corrections array. content=${content.slice(0, 500)}`,
+    )
   }
   if (corrections.length !== segments.length) {
-    throw new Error(
+    throw new CorrectionRetryableError(
       `correction API returned ${corrections.length} items for ${segments.length} inputs`,
     )
   }
@@ -155,9 +171,41 @@ async function callCorrectionApi(
   return segments.map((seg) => byId.get(seg.id) ?? normalizeSpaces(seg.text))
 }
 
-function isCountMismatchError(error: unknown): boolean {
+function summarizeCorrectionPayload(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return String(payload)
+  const row = payload as Record<string, unknown>
+  const choices = Array.isArray(row.choices) ? row.choices : []
+  const firstChoice = choices[0] as Record<string, unknown> | undefined
+  const message = firstChoice?.message as Record<string, unknown> | undefined
+  const summary = {
+    object: row.object,
+    model: row.model,
+    choices: choices.length,
+    finishReason: firstChoice?.finish_reason,
+    messageKeys: message ? Object.keys(message) : [],
+    hasReasoningContent: typeof message?.reasoning_content === 'string',
+    reasoningPreview: typeof message?.reasoning_content === 'string'
+      ? String(message.reasoning_content).slice(0, 300)
+      : undefined,
+    usage: row.usage,
+  }
+  return JSON.stringify(summary)
+}
+
+function isRetryableCorrectionError(error: unknown): boolean {
+  if (error instanceof CorrectionRetryableError) return true
   const message = error instanceof Error ? error.message : String(error ?? '')
   return COUNT_MISMATCH_RE.test(message)
+}
+
+function formatSegmentFailure(
+  segment: { id: number; text: string },
+  error: unknown,
+): Error {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return new Error(
+    `correction failed for segment id=${segment.id}: ${message}. source=${segment.text.slice(0, 500)}`,
+  )
 }
 
 async function correctBatchWithFallback(
@@ -165,16 +213,18 @@ async function correctBatchWithFallback(
   glossaryTerms: string[],
   apiKey: string,
   baseUrl: string,
+  model: string,
 ): Promise<string[]> {
   if (segments.length === 0) return []
   try {
-    return await callCorrectionApi(segments, glossaryTerms, apiKey, baseUrl)
+    return await callCorrectionApi(segments, glossaryTerms, apiKey, baseUrl, model)
   } catch (error) {
-    if (!isCountMismatchError(error) || segments.length === 1) throw error
+    if (!isRetryableCorrectionError(error)) throw error
+    if (segments.length === 1) throw formatSegmentFailure(segments[0], error)
   }
   const splitAt = Math.ceil(segments.length / 2)
-  const left = await correctBatchWithFallback(segments.slice(0, splitAt), glossaryTerms, apiKey, baseUrl)
-  const right = await correctBatchWithFallback(segments.slice(splitAt), glossaryTerms, apiKey, baseUrl)
+  const left = await correctBatchWithFallback(segments.slice(0, splitAt), glossaryTerms, apiKey, baseUrl, model)
+  const right = await correctBatchWithFallback(segments.slice(splitAt), glossaryTerms, apiKey, baseUrl, model)
   return [...left, ...right]
 }
 
@@ -182,15 +232,17 @@ async function correctWithLlm(
   segments: TranscriptSegment[],
   apiKey: string,
   baseUrl: string,
+  model: string,
   glossaryTerms: string[],
   threshold: number,
+  maxSegmentsPerRequest: number,
 ): Promise<CorrectedSegmentLite[]> {
   const inputs = segments.map((seg) => ({ id: seg.id ?? 0, text: seg.text ?? '' }))
   const correctedTexts: string[] = []
 
-  for (let start = 0; start < inputs.length; start += MAX_SEGMENTS_PER_REQUEST) {
-    const batch = inputs.slice(start, start + MAX_SEGMENTS_PER_REQUEST)
-    const batchResults = await correctBatchWithFallback(batch, glossaryTerms, apiKey, baseUrl)
+  for (let start = 0; start < inputs.length; start += maxSegmentsPerRequest) {
+    const batch = inputs.slice(start, start + maxSegmentsPerRequest)
+    const batchResults = await correctBatchWithFallback(batch, glossaryTerms, apiKey, baseUrl, model)
     correctedTexts.push(...batchResults)
   }
 
@@ -215,7 +267,11 @@ export async function correctSegments(
 ): Promise<CorrectedSegmentLite[]> {
   if (!settings) throw new Error('AI provider settings are required before running the pipeline')
   const connection = requireAiConnection(settings)
+  const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'correction')
+  const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
+    ? LOCAL_MAX_SEGMENTS_PER_REQUEST
+    : MAX_SEGMENTS_PER_REQUEST
 
   const threshold = options.threshold ?? 0.2
-  return correctWithLlm(segments, connection.apiKey, connection.baseUrl, glossaryTerms, threshold)
+  return correctWithLlm(segments, connection.apiKey, connection.baseUrl, model, glossaryTerms, threshold, maxSegmentsPerRequest)
 }

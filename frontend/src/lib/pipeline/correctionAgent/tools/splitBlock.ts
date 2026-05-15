@@ -4,10 +4,11 @@ import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
 import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
-import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
+import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
 
 interface SplitResult {
   units: SplitUnit[]
@@ -102,9 +103,9 @@ function sanitizeUnits(units: SplitUnit[]): SplitUnit[] {
 }
 
 function parseSplitUnits(content: string): { units: SplitUnit[]; warning?: string } {
-  let parsed: { units?: unknown; ja1?: unknown; ja2?: unknown; cannot_split?: unknown; warnings?: unknown } = {}
+  let parsed: Record<string, unknown> = {}
   try {
-    parsed = JSON.parse(content) as typeof parsed
+    parsed = parseJsonObjectFromLlmContent(content, 'split_block')
   } catch {
     return { units: [], warning: content ? `LLM returned invalid JSON: ${content.slice(0, 400)}` : 'LLM returned empty content' }
   }
@@ -149,18 +150,18 @@ async function splitJaText(
   settings: AdminSettings,
 ): Promise<SplitResult> {  // warning フィールドが設定される場合がある
   const connection = requireAiConnection(settings)
-  const model = resolveChatModelForProvider(settings, settings.correctionModel)
+  const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'split block')
 
   const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${connection.apiKey}`,
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
     },
     body: JSON.stringify({
       model,
       temperature: 0.0,
-      response_format: { type: 'json_object' },
+      response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         {
           role: 'system',
@@ -216,18 +217,18 @@ async function translateSingle(
   settings: AdminSettings,
 ): Promise<string> {
   const connection = requireAiConnection(settings)
-  const model = resolveChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel))
+  const model = requireChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel), 'split block translation')
 
   const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${connection.apiKey}`,
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
     },
     body: JSON.stringify({
       model,
       temperature: 0.0,
-      response_format: { type: 'json_object' },
+      response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         { role: 'system', content: SINGLE_TRANSLATE_SYSTEM },
         { role: 'user', content: jaText },
@@ -242,7 +243,7 @@ async function translateSingle(
 
   const payload = await response.json()
   const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = JSON.parse(content) as { text?: unknown }
+  const parsed = parseJsonObjectFromLlmContent(content, 'split_block translation')
   const text = typeof parsed.text === 'string' ? parsed.text : ''
   return normalizeSpaces(text.trim())
 }

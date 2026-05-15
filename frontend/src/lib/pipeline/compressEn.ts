@@ -4,8 +4,9 @@ import { computeMetrics, classifyViolation } from './metrics'
 import { formatLines } from './formatLines'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from './prompts'
 import { normalizeSpaces } from './textUtils'
-import { requireAiConnection, resolveChatModelForProvider } from './aiProvider'
+import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
 async function callCompress(
   enText: string,
@@ -13,19 +14,19 @@ async function callCompress(
   settings: AdminSettings,
 ): Promise<string> {
   const connection = requireAiConnection(settings)
-  const model = resolveChatModelForProvider(settings, resolveCompressModelId(settings))
+  const model = requireChatModelForProvider(settings, resolveCompressModelId(settings), 'compression')
   const systemPrompt = resolveCompressSystemPrompt(settings, settings.compressPromptOverride)
 
   const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${connection.apiKey}`,
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
     },
     body: JSON.stringify({
       model,
       temperature: 0.0,
-      response_format: { type: 'json_object' },
+      response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}` },
@@ -40,7 +41,7 @@ async function callCompress(
 
   const payload = await response.json()
   const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = JSON.parse(content) as { text?: unknown }
+  const parsed = parseJsonObjectFromLlmContent(content, 'compress')
   const text = typeof parsed.text === 'string' ? parsed.text : ''
   return normalizeSpaces(text.trim())
 }

@@ -34,7 +34,7 @@ export function pickTranslateSystemPrompt(model: string | undefined): string {
 
 export function resolveTranslateModelId(model: string | undefined): string {
   const resolved = model?.trim()
-  return resolved || 'gpt-4.1-mini'
+  return resolved || ''
 }
 
 function buildCompressSystemPrompt(maxCharsPerLine: number, maxLines: number): string {
@@ -72,9 +72,22 @@ export function resolveExpandSystemPrompt(
 }
 
 export function resolveCompressModelId(settings: { compressModel?: string; translationModel?: string }): string {
-  return settings.compressModel?.trim() || settings.translationModel?.trim() || 'gpt-4.1-mini'
+  return settings.compressModel?.trim() || settings.translationModel?.trim() || ''
 }
 
 export function resolveExpandModelId(settings: { expandModel?: string; translationModel?: string }): string {
-  return settings.expandModel?.trim() || settings.translationModel?.trim() || 'gpt-4.1-mini'
+  return settings.expandModel?.trim() || settings.translationModel?.trim() || ''
+}
+
+// compress_micro 用モデル解決。
+// microModel が空なら compressModel、それも空なら translationModel をフォールバック。
+export function resolveMicroModelId(
+  settings: { microModel?: string; compressModel?: string; translationModel?: string },
+): string {
+  return (
+    settings.microModel?.trim() ||
+    settings.compressModel?.trim() ||
+    settings.translationModel?.trim() ||
+    ''
+  )
 }

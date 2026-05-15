@@ -2,18 +2,34 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId } from '../../prompts'
-import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
+import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
 
 function buildCoreSystemPrompt(): string {
   return (
-    'You are a subtitle editor making a last-resort compression for academic lecture subtitles. ' +
-    'Reduce this subtitle to the single most important concept only. ' +
-    'This output will be flagged for manual review — accuracy takes priority over length. ' +
-    'Preserve: technical terms, numbers, the core definition or claim. ' +
+    'You are a subtitle editor performing aggressive rewriting. ' +
+    'The current subtitle is significantly too long for its display time, ' +
+    'and gentler rephrasing has already been tried. ' +
+    'Rewrite it to fit the display time while producing a COMPLETE, READABLE English subtitle.\n' +
+    '\n' +
+    'Hard requirements:\n' +
+    '- The result MUST be a grammatical English sentence with explicit subject and verb\n' +
+    '- The result MUST start with a capital letter and end with appropriate punctuation\n' +
+    '- The result MUST keep all technical terms, proper nouns, numbers, equations exactly as in the source\n' +
+    '- The result MUST NOT use pronouns like "this", "that", "it" without clear referents\n' +
+    '- The result MUST NOT be a fragment, keyword list, or telegraphic phrase\n' +
+    '\n' +
+    'You MAY:\n' +
+    '- Drop redundant explanations, examples, hedges, soft modifiers\n' +
+    '- Combine multiple clauses into one\n' +
+    '- Replace verbose phrases with concise equivalents\n' +
+    '- Drop topic markers and rhetorical asides\n' +
+    '\n' +
+    'Aim for roughly 50-70% of the original character count. ' +
     'Do not include line breaks in your response. ' +
-    'Respond with JSON: {"text": "<core subtitle>"}'
+    'Respond with JSON: {"text": "<rewritten subtitle>"}'
   )
 }
 
@@ -23,19 +39,19 @@ async function callCore(
   settings: AdminSettings,
 ): Promise<string> {
   const connection = requireAiConnection(settings)
-  const model = resolveChatModelForProvider(settings, resolveCompressModelId(settings))
+  const model = requireChatModelForProvider(settings, resolveCompressModelId(settings), 'compress core')
   const systemPrompt = buildCoreSystemPrompt()
 
   const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${connection.apiKey}`,
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
     },
     body: JSON.stringify({
       model,
       temperature: 0.0,
-      response_format: { type: 'json_object' },
+      response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         { role: 'system', content: systemPrompt },
         {
@@ -53,7 +69,7 @@ async function callCore(
 
   const payload = await response.json()
   const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = JSON.parse(content) as { text?: unknown }
+  const parsed = parseJsonObjectFromLlmContent(content, 'compress_core')
   const text = typeof parsed.text === 'string' ? parsed.text : ''
   return normalizeSpaces(text.trim())
 }

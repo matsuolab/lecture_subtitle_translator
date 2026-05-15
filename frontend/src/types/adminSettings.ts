@@ -1,5 +1,6 @@
-export type TranslationProvider = 'openai' | 'gemini'
+export type TranslationProvider = 'openai' | 'gemini' | 'local_openai'
 export type ServiceMode = 'managed_service' | 'legacy_pipeline'
+export type SemanticCheckMode = 'off' | 'log_only' | 'enforce'
 
 export interface AdminSettings {
   serviceMode: ServiceMode
@@ -12,7 +13,12 @@ export interface AdminSettings {
   translationProvider: TranslationProvider
   translationModel: string
   correctionModel: string
+  pdfExtractionUseVision: boolean
+  pdfExtractionVisionModel: string
+  pdfExtractionParallel: boolean
   embeddingModel: string
+  // セマンティックチェック（圧縮前後の意味類似度を Embedding で計測）
+  semanticCheckMode: SemanticCheckMode
   logRetentionCount: number | null
   enMaxCharsPerLine: number
   enMaxLines: number
@@ -38,6 +44,7 @@ export interface AdminSettings {
 
   // ノード別モデル
   compressModel: string
+  microModel: string
   expandModel: string
   contextMergeModel: string
   subtitleLanguageLabel: string

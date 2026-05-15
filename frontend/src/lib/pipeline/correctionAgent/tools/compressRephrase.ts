@@ -2,9 +2,10 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from '../../prompts'
-import { requireAiConnection, resolveChatModelForProvider } from '../../aiProvider'
+import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
 
 async function callCompress(
   enText: string,
@@ -14,18 +15,18 @@ async function callCompress(
   model: string,
 ): Promise<string> {
   const connection = requireAiConnection(settings)
-  const resolvedModel = resolveChatModelForProvider(settings, model)
+  const resolvedModel = requireChatModelForProvider(settings, model, 'compress rephrase')
 
   const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${connection.apiKey}`,
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
     },
     body: JSON.stringify({
       model: resolvedModel,
       temperature: 0.0,
-      response_format: { type: 'json_object' },
+      response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         { role: 'system', content: systemPrompt },
         {
@@ -43,7 +44,7 @@ async function callCompress(
 
   const payload = await response.json()
   const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = JSON.parse(content) as { text?: unknown }
+  const parsed = parseJsonObjectFromLlmContent(content, 'compress_rephrase')
   const text = typeof parsed.text === 'string' ? parsed.text : ''
   return normalizeSpaces(text.trim())
 }

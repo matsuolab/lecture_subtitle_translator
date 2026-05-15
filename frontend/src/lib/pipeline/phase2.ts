@@ -7,6 +7,7 @@ import { correctionEngine } from './correctionAgent/loop'
 import { createDecisionNode } from './correctionAgent/decisionNode'
 import { buildAgentThresholds } from './correctionAgent/types'
 import { mergeContextFragments } from './contextMergeFragments'
+import { semanticValidation } from './semanticValidation'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -19,8 +20,9 @@ export async function runPhase2(
   thresholds: PipelineThresholds,
   runNode: RunNode,
   onWarning?: OnWarning,
+  glossaryTerms: string[] = [],
 ): Promise<EnBlock[]> {
-  let blocks = await runNode('translateEn', () => translateEn(jaBlocks, settings))
+  let blocks = await runNode('translateEn', () => translateEn(jaBlocks, settings, glossaryTerms))
   blocks = await runNode('formatLines', () => formatLines(blocks, thresholds))
   blocks = await runNode('checkCpsViolations', () => checkCpsViolations(blocks, thresholds))
 
@@ -40,6 +42,15 @@ export async function runPhase2(
         onToolWarning: (blockId, strategy, message) => {
           onWarning?.(`correctionEngine[block=${blockId},${strategy}]`, message)
         },
+      }),
+    )
+  }
+
+  // 最終 semantic check ノード（log_only / enforce 時のみ動作）
+  if (settings.semanticCheckMode !== 'off') {
+    blocks = await runNode('semanticValidation', () =>
+      semanticValidation(blocks, settings, (blockId, message) => {
+        onWarning?.(`semanticValidation[block=${blockId}]`, message)
       }),
     )
   }
