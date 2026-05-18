@@ -411,9 +411,33 @@ export function SettingsTab({
             theme={theme}
             label="PDF辞書作成を並列化"
             checked={adminSettings.pdfExtractionParallel}
-            hint="OFFでは1ページずつ処理します。ONではローカルLLMは2並列、Vision APIは3並列で処理します。ローカルLLMが不安定な場合はOFFにしてください"
+            hint="OFFでは1ページずつ処理します。ONではローカルLLMは2並列、API側は下の「並列リクエスト数」で処理します"
             onChange={(value) => onAdminSettingsChange({ pdfExtractionParallel: value })}
           />
+          <NumberField
+            theme={theme}
+            label="辞書生成: 出力トークン上限 (max_tokens)"
+            value={adminSettings.glossaryMaxOutputTokens}
+            min={256}
+            step={256}
+            onChange={(value) => onAdminSettingsChange({ glossaryMaxOutputTokens: Math.trunc(value) })}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+            辞書候補抽出・詳細展開で 1 リクエストあたりに生成できる最大トークン数。256〜16384。
+            上限到達 (finish_reason=length) で停止する場合は増やします。gpt-5.4-mini は 128K まで対応。
+          </div>
+          <NumberField
+            theme={theme}
+            label="辞書生成: API 並列リクエスト数"
+            value={adminSettings.glossaryRequestConcurrency}
+            min={1}
+            step={1}
+            onChange={(value) => onAdminSettingsChange({ glossaryRequestConcurrency: Math.trunc(value) })}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+            Vision/非Visionモードで同時に投げる API リクエスト数。1〜20。
+            OpenAI Tier1: 4 推奨 / Tier2: 7 / Tier3 以上: 10+。429 が出たら下げます。ローカル LLM もこの値を使います。
+          </div>
           <ComboField
             theme={theme}
             label="Embedding モデル"

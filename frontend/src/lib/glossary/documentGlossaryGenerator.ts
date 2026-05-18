@@ -100,8 +100,24 @@ interface NormalizedGlossaryCandidate {
 const MAX_CHARS_PER_REQUEST = 12_000
 const MAX_LOCAL_CHARS_PER_REQUEST = 7_000
 const LOCAL_DETAIL_BATCH_SIZE = 5
-const LOCAL_TWO_STAGE_CONCURRENCY = 2
-const VISION_TWO_STAGE_CONCURRENCY = 3
+
+const MIN_GLOSSARY_OUTPUT_TOKENS = 256
+const MAX_GLOSSARY_OUTPUT_TOKENS = 16384
+const MIN_GLOSSARY_CONCURRENCY = 1
+const MAX_GLOSSARY_CONCURRENCY = 20
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+function resolveGlossaryMaxOutputTokens(settings: AdminSettings): number {
+  return clamp(Math.trunc(settings.glossaryMaxOutputTokens), MIN_GLOSSARY_OUTPUT_TOKENS, MAX_GLOSSARY_OUTPUT_TOKENS)
+}
+
+function resolveGlossaryConcurrency(settings: AdminSettings): number {
+  if (!settings.pdfExtractionParallel) return 1
+  return clamp(Math.trunc(settings.glossaryRequestConcurrency), MIN_GLOSSARY_CONCURRENCY, MAX_GLOSSARY_CONCURRENCY)
+}
 
 export type GlossaryGenerationProgressEvent = {
   step: 'chunk_start' | 'api_response' | 'chunk_done'
@@ -738,7 +754,7 @@ async function requestGlossaryChunk(
     body: JSON.stringify({
       model,
       temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, 2048),
+      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
       response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         {
@@ -826,7 +842,7 @@ async function requestCandidateChunk(
     body: JSON.stringify({
       model,
       temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, 2048),
+      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
       response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         {
@@ -932,7 +948,7 @@ async function requestDetailBatch(
     body: JSON.stringify({
       model,
       temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, 2048),
+      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
       response_format: resolveJsonResponseFormatForProvider(settings),
       messages: [
         {
@@ -1264,14 +1280,13 @@ async function generateLocalSelfMadeGlossaryFromPdf(
   document: ExtractedPdfDocument,
   options: GlossaryGenerationOptions,
 ): Promise<SelfMadeGlossaryEntry[]> {
-  const concurrency = settings.pdfExtractionParallel ? LOCAL_TWO_STAGE_CONCURRENCY : 1
   return generateTwoStageSelfMadeGlossaryFromPdf(
     settings,
     document,
     options,
     ['formal_terms', 'assistive_notations'],
     true,
-    concurrency,
+    resolveGlossaryConcurrency(settings),
   )
 }
 
@@ -1287,14 +1302,13 @@ export async function generateSelfMadeGlossaryFromPdf(
   const entries: SelfMadeGlossaryEntry[] = []
   if (isLocal) return generateLocalSelfMadeGlossaryFromPdf(settings, document, options)
   if (useVision) {
-    const concurrency = settings.pdfExtractionParallel ? VISION_TWO_STAGE_CONCURRENCY : 1
     return generateTwoStageSelfMadeGlossaryFromPdf(
       settings,
       document,
       options,
       ['all'],
       false,
-      concurrency,
+      resolveGlossaryConcurrency(settings),
     )
   }
 
