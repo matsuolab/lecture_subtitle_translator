@@ -24,6 +24,8 @@ export function getDefaultAdminSettings(): AdminSettings {
     pdfExtractionUseVision: false,
     pdfExtractionVisionModel: 'gpt-5.4-mini',
     pdfExtractionParallel: false,
+    glossaryMaxOutputTokens: 4096,
+    glossaryRequestConcurrency: 7,
     embeddingModel: 'text-embedding-3-small',
     semanticCheckMode: 'log_only',
     logRetentionCount: null,
@@ -61,6 +63,14 @@ export function getDefaultAdminSettings(): AdminSettings {
 function normalizePositiveNumber(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : parseFloat(value as string)
   return isFinite(n) && n > 0 ? n : fallback
+}
+
+function normalizeBoundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' ? value : parseFloat(value as string)
+  if (!isFinite(n)) return fallback
+  const rounded = Math.trunc(n)
+  if (rounded < min || rounded > max) return fallback
+  return rounded
 }
 
 function normalizeServiceMode(value: unknown): ServiceMode {
@@ -104,6 +114,8 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pdfExtractionUseVision: typeof raw.pdfExtractionUseVision === 'boolean' ? raw.pdfExtractionUseVision : defaults.pdfExtractionUseVision,
     pdfExtractionVisionModel: typeof raw.pdfExtractionVisionModel === 'string' && raw.pdfExtractionVisionModel ? raw.pdfExtractionVisionModel : defaults.pdfExtractionVisionModel,
     pdfExtractionParallel: typeof raw.pdfExtractionParallel === 'boolean' ? raw.pdfExtractionParallel : defaults.pdfExtractionParallel,
+    glossaryMaxOutputTokens: normalizeBoundedInteger(raw.glossaryMaxOutputTokens, defaults.glossaryMaxOutputTokens, 256, 16384),
+    glossaryRequestConcurrency: normalizeBoundedInteger(raw.glossaryRequestConcurrency, defaults.glossaryRequestConcurrency, 1, 20),
     embeddingModel: typeof raw.embeddingModel === 'string' && raw.embeddingModel ? raw.embeddingModel : defaults.embeddingModel,
     semanticCheckMode: normalizeSemanticCheckMode(raw.semanticCheckMode),
     logRetentionCount: typeof raw.logRetentionCount === 'number' ? raw.logRetentionCount : null,

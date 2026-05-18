@@ -199,6 +199,8 @@ function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> 
     pdfExtractionUseVision: settings.pdfExtractionUseVision,
     pdfExtractionVisionModel: settings.pdfExtractionVisionModel,
     pdfExtractionParallel: settings.pdfExtractionParallel,
+    glossaryMaxOutputTokens: settings.glossaryMaxOutputTokens,
+    glossaryRequestConcurrency: settings.glossaryRequestConcurrency,
     compressModel: settings.compressModel,
     expandModel: settings.expandModel,
     contextMergeModel: settings.contextMergeModel,

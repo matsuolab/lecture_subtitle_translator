@@ -249,6 +249,8 @@ export function HelpTab() {
                     ['enMaxCharsPerLine', '80'],
                     ['enMaxCps', '16.9'],
                     ['pipelineVerboseEnRatio', '1.5'],
+                    ['glossaryMaxOutputTokens', '4096'],
+                    ['glossaryRequestConcurrency', '7'],
                   ].map(([key, value]) => (
                     <tr key={key} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
                       <td style={{ padding: '5px 8px', color: theme.textPrimary, fontWeight: 700, whiteSpace: 'nowrap' }}>{key}</td>
