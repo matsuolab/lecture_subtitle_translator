@@ -739,6 +739,162 @@ function rawEntryFromCandidate(candidate: NormalizedGlossaryCandidate): RawGloss
 }
 
 // ============================================================
+// 処理 D: ハルシネーション検証 (ルールベース)
+//
+// LLM (A+B / C) が「PDF に書かれている」と申告した値が
+// 本当に PDF テキストに存在するかを文字列照合で検証する。
+// 存在しない値は空にし、対応 source を "missing" に降格する。
+//
+// 検証ポリシー (jaSource/enSource ごと):
+//   - document       : 完全一致または部分一致を要求。落ちたら missing 降格
+//   - vision         : スキップ (画像でしか見えない可能性のため信用)
+//   - llm_inferred   : スキップ (元から推測扱い)
+//   - llm_translation: スキップ (Step E で別途生成される値)
+//   - manual         : スキップ (ユーザー入力)
+//   - missing        : 検証対象なし
+// ============================================================
+
+interface PdfHaystack {
+  /** ページ結合済み生テキスト (デバッグ・ログ用) */
+  raw: string
+  /** 小文字化＋空白圧縮した照合用テキスト */
+  normalized: string
+}
+
+function buildPdfHaystack(document: ExtractedPdfDocument): PdfHaystack {
+  const raw = document.pages.map(page => page.text).join('\n')
+  const normalized = raw.toLowerCase().replace(/\s+/g, ' ')
+  return { raw, normalized }
+}
+
+function normalizeNeedle(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function pdfContains(haystack: PdfHaystack, needle: string): boolean {
+  const normalized = normalizeNeedle(needle)
+  if (!normalized) return true
+  return haystack.normalized.includes(normalized)
+}
+
+function shouldVerifySource(source: SelfMadeGlossaryValueSource): boolean {
+  return source === 'document'
+}
+
+interface VerifiedValue {
+  value: string
+  source: SelfMadeGlossaryValueSource
+  changed: boolean
+}
+
+function verifyValue(value: string, source: SelfMadeGlossaryValueSource, haystack: PdfHaystack): VerifiedValue {
+  if (!value) return { value, source, changed: false }
+  if (!shouldVerifySource(source)) return { value, source, changed: false }
+  if (pdfContains(haystack, value)) return { value, source, changed: false }
+  return { value: '', source: 'missing', changed: true }
+}
+
+export interface GlossaryVerificationChange {
+  id: string
+  reasons: string[]
+}
+
+export interface GlossaryVerificationResult {
+  entries: SelfMadeGlossaryEntry[]
+  totalEntries: number
+  totalChecked: number
+  totalDocumentClaims: number
+  totalRejected: number
+  changes: GlossaryVerificationChange[]
+}
+
+export function verifyEntryAgainstPdf(entry: SelfMadeGlossaryEntry, haystack: PdfHaystack): {
+  entry: SelfMadeGlossaryEntry
+  changed: boolean
+  reasons: string[]
+  rejectedClaims: number
+} {
+  const reasons: string[] = []
+  let rejectedClaims = 0
+
+  const ja = verifyValue(entry.ja, entry.jaSource, haystack)
+  if (ja.changed) {
+    reasons.push(`ja "${entry.ja}" not found in PDF; source demoted document → missing`)
+    rejectedClaims += 1
+  }
+
+  const en = verifyValue(entry.en, entry.enSource, haystack)
+  if (en.changed) {
+    reasons.push(`en "${entry.en}" not found in PDF; source demoted document → missing`)
+    rejectedClaims += 1
+  }
+
+  if (reasons.length === 0) {
+    return { entry, changed: false, reasons: [], rejectedClaims: 0 }
+  }
+
+  const existingReason = entry.reviewReason?.trim()
+  const newReason = `ハルシネーション検証: ${reasons.join(' / ')}`
+  return {
+    entry: {
+      ...entry,
+      ja: ja.value,
+      en: en.value,
+      jaSource: ja.source,
+      enSource: en.source,
+      reviewReason: existingReason ? `${existingReason} | ${newReason}` : newReason,
+      updatedAt: new Date().toISOString(),
+    },
+    changed: true,
+    reasons,
+    rejectedClaims,
+  }
+}
+
+function verifyEntriesWithHaystack(entries: SelfMadeGlossaryEntry[], haystack: PdfHaystack): GlossaryVerificationResult {
+  const result: SelfMadeGlossaryEntry[] = []
+  const changes: GlossaryVerificationChange[] = []
+  let totalChecked = 0
+  let totalDocumentClaims = 0
+  let totalRejected = 0
+
+  for (const entry of entries) {
+    const hasDocumentClaim = shouldVerifySource(entry.jaSource) || shouldVerifySource(entry.enSource)
+    if (hasDocumentClaim) {
+      totalChecked += 1
+      if (shouldVerifySource(entry.jaSource) && entry.ja) totalDocumentClaims += 1
+      if (shouldVerifySource(entry.enSource) && entry.en) totalDocumentClaims += 1
+    }
+
+    const verification = verifyEntryAgainstPdf(entry, haystack)
+    if (verification.changed) {
+      changes.push({ id: entry.id, reasons: verification.reasons })
+      totalRejected += verification.rejectedClaims
+      result.push(verification.entry)
+    } else {
+      result.push(entry)
+    }
+  }
+
+  return {
+    entries: result,
+    totalEntries: entries.length,
+    totalChecked,
+    totalDocumentClaims,
+    totalRejected,
+    changes,
+  }
+}
+
+/**
+ * 既存生成済み辞書を後付けで検証する公開 API。
+ * (パイプライン内部はバッチごとに verifyEntriesWithHaystack を呼ぶ)
+ */
+export function verifyEntriesAgainstPdf(entries: SelfMadeGlossaryEntry[], document: ExtractedPdfDocument): GlossaryVerificationResult {
+  return verifyEntriesWithHaystack(entries, buildPdfHaystack(document))
+}
+
+// ============================================================
 // LLM 呼び出し
 // ============================================================
 
@@ -990,11 +1146,31 @@ async function requestDetailBatchWithFallback(
 // パイプライン本体
 // ============================================================
 
+function emitVerificationLog(
+  result: GlossaryVerificationResult,
+  pages: number[],
+  pass: GlossaryExtractionPass,
+  chunkIndex: number,
+  chunkCount: number,
+  onProgress?: GlossaryGenerationOptions['onProgress'],
+): void {
+  if (result.totalRejected === 0) return
+  onProgress?.({
+    step: 'api_response',
+    chunkIndex,
+    chunkCount,
+    pages,
+    pass,
+    message: `${pass} verification: ${result.totalRejected} claims rejected across ${result.changes.length} entries (PDF 照合で document 申告が落ちた値を missing に降格)`,
+  })
+}
+
 async function generateTwoStageSelfMadeGlossaryFromPdf(
   settings: AdminSettings,
   document: ExtractedPdfDocument,
   options: GlossaryGenerationOptions,
   themeContext: string,
+  haystack: PdfHaystack,
   lightweightAssistive: boolean,
   concurrency: number,
 ): Promise<SelfMadeGlossaryEntry[]> {
@@ -1015,6 +1191,7 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
 
   const passEntries = await mapWithConcurrency(chunks.length, concurrency, async (i) => {
     const pages = chunks[i]
+    const pageNumbers = pages.map(p => p.page)
     const candidates = await requestCandidateChunk(
       settings,
       document,
@@ -1034,9 +1211,12 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
         .map(candidate => normalizeEntry(rawEntryFromCandidate(candidate), document, pagesByNumber))
         .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
       if (normalizedBatch.length > 0) {
-        options.onEntries?.(normalizedBatch)
+        const verification = verifyEntriesWithHaystack(normalizedBatch, haystack)
+        emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
+        options.onEntries?.(verification.entries)
+        return verification.entries
       }
-      return normalizedBatch
+      return []
     }
 
     const pageEntries: SelfMadeGlossaryEntry[] = []
@@ -1058,8 +1238,10 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
         .map(entry => normalizeEntry(entry, document, pagesByNumber))
         .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
       if (normalizedBatch.length > 0) {
-        pageEntries.push(...normalizedBatch)
-        options.onEntries?.(normalizedBatch)
+        const verification = verifyEntriesWithHaystack(normalizedBatch, haystack)
+        emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
+        pageEntries.push(...verification.entries)
+        options.onEntries?.(verification.entries)
       }
     }
     return pageEntries
@@ -1083,12 +1265,14 @@ async function generateLocalSelfMadeGlossaryFromPdf(
   document: ExtractedPdfDocument,
   options: GlossaryGenerationOptions,
   themeContext: string,
+  haystack: PdfHaystack,
 ): Promise<SelfMadeGlossaryEntry[]> {
   return generateTwoStageSelfMadeGlossaryFromPdf(
     settings,
     document,
     options,
     themeContext,
+    haystack,
     true,
     resolveGlossaryConcurrency(settings),
   )
@@ -1099,6 +1283,7 @@ async function generateNonVisionSelfMadeGlossaryFromPdf(
   document: ExtractedPdfDocument,
   options: GlossaryGenerationOptions,
   themeContext: string,
+  haystack: PdfHaystack,
 ): Promise<SelfMadeGlossaryEntry[]> {
   const pagesByNumber = new Map(document.pages.map(page => [page.page, page]))
   const chunks = chunkPages(document.pages, false, MAX_CHARS_PER_REQUEST)
@@ -1116,6 +1301,7 @@ async function generateNonVisionSelfMadeGlossaryFromPdf(
 
   for (let i = 0; i < chunks.length; i += 1) {
     const pages = chunks[i]
+    const pageNumbers = pages.map(p => p.page)
     const candidates = await requestCandidateChunk(
       settings,
       document,
@@ -1148,8 +1334,10 @@ async function generateNonVisionSelfMadeGlossaryFromPdf(
         .map(entry => normalizeEntry(entry, document, pagesByNumber))
         .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
       if (normalizedBatch.length > 0) {
-        entries.push(...normalizedBatch)
-        options.onEntries?.(normalizedBatch)
+        const verification = verifyEntriesWithHaystack(normalizedBatch, haystack)
+        emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
+        entries.push(...verification.entries)
+        options.onEntries?.(verification.entries)
       }
     }
   }
@@ -1186,11 +1374,14 @@ export async function generateSelfMadeGlossaryFromPdf(
     })
   }
 
+  // 処理 D 用に PDF 全文ハイ・スタックを一度だけ作る
+  const haystack = buildPdfHaystack(document)
+
   const useVision = settings.pdfExtractionUseVision
   const isLocal = settings.translationProvider === 'local_openai'
 
   if (isLocal) {
-    return generateLocalSelfMadeGlossaryFromPdf(settings, document, options, themeContext)
+    return generateLocalSelfMadeGlossaryFromPdf(settings, document, options, themeContext, haystack)
   }
   if (useVision) {
     return generateTwoStageSelfMadeGlossaryFromPdf(
@@ -1198,9 +1389,10 @@ export async function generateSelfMadeGlossaryFromPdf(
       document,
       options,
       themeContext,
+      haystack,
       false,
       resolveGlossaryConcurrency(settings),
     )
   }
-  return generateNonVisionSelfMadeGlossaryFromPdf(settings, document, options, themeContext)
+  return generateNonVisionSelfMadeGlossaryFromPdf(settings, document, options, themeContext, haystack)
 }
