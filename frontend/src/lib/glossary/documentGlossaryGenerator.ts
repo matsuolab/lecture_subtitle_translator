@@ -1,7 +1,22 @@
+/**
+ * 自作辞書生成パイプライン (Step 1 実装)
+ *
+ * 詳細設計は docs/glossary_pipeline_design.md を参照。
+ *
+ * 本ファイルが担う範囲:
+ *   - 処理 0: extractDocumentTheme (講義主題の事前把握)
+ *   - 処理 A+B: requestCandidateChunk / requestDetailBatch (PDF テキスト + 画像から候補抽出)
+ *
+ * 未実装 (今後 Step 2〜4 で追加):
+ *   - 処理 C (LLM 整理・ペアリング)
+ *   - 処理 D (ルールベース検証)
+ *   - 処理 E (LLM 翻訳補完)
+ */
+
 import type {
+  SelfMadeGlossaryCategory,
   SelfMadeGlossaryChildSource,
   SelfMadeGlossaryEntry,
-  SelfMadeGlossaryEntryClass,
   SelfMadeGlossaryValueSource,
 } from '@/context/GlossaryContext'
 import { requireAiConnection, requireChatModelForProvider, resolveChatCompletionTokenLimitForProvider, resolveJsonResponseFormatForProvider } from '@/lib/pipeline/aiProvider'
@@ -30,13 +45,11 @@ type ChatMessageContent = string | Array<
   | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
 >
 
-type GlossaryExtractionPass =
-  | 'all'
-  | 'formal_terms'
-  | 'formal_bilingual_terms'
-  | 'formal_names_only'
-  | 'assistive_notations'
-  | 'references_and_noise'
+/**
+ * 抽出パス。
+ * Step 1 では 'all' のみ。複雑なフォールバック分岐は次の Step (C/D 実装時) で見直す。
+ */
+type GlossaryExtractionPass = 'all'
 
 interface RawGlossaryEvidence {
   page?: unknown
@@ -50,10 +63,7 @@ interface RawGlossaryReference {
 }
 
 interface RawGlossaryEntry {
-  kind?: unknown
-  entryClass?: unknown
-  formalEligible?: unknown
-  assistiveEligible?: unknown
+  category?: unknown
   ja?: unknown
   jaSource?: unknown
   en?: unknown
@@ -62,8 +72,6 @@ interface RawGlossaryEntry {
   formula?: unknown
   latex?: unknown
   displayText?: unknown
-  spokenJa?: unknown
-  spokenEn?: unknown
   domain?: unknown
   note?: unknown
   desc?: unknown
@@ -75,8 +83,7 @@ interface RawGlossaryEntry {
 
 interface RawGlossaryCandidate {
   text?: unknown
-  kind?: unknown
-  entryClass?: unknown
+  category?: unknown
   page?: unknown
   snippet?: unknown
   ja?: unknown
@@ -87,14 +94,24 @@ interface RawGlossaryCandidate {
 
 interface NormalizedGlossaryCandidate {
   text: string
-  kind: SelfMadeGlossaryEntry['kind']
-  entryClass: SelfMadeGlossaryEntryClass
+  category: SelfMadeGlossaryCategory
   page?: number
   snippet?: string
   ja?: string
   en?: string
   formula?: string
   displayText?: string
+}
+
+interface DocumentTheme {
+  /** 講義/資料の主題 (例: "ニューラルネットワークの最適化と正則化") */
+  subject: string
+  /** 関連分野 (例: "機械学習、深層学習") */
+  domain: string
+  /** 主要に扱われる概念のリスト (例: ["勾配降下法", "Adam", "過学習"]) */
+  keyConcepts: string[]
+  /** プロンプトに埋め込む整形済みテキスト */
+  promptContext: string
 }
 
 const MAX_CHARS_PER_REQUEST = 12_000
@@ -105,6 +122,11 @@ const MIN_GLOSSARY_OUTPUT_TOKENS = 256
 const MAX_GLOSSARY_OUTPUT_TOKENS = 16384
 const MIN_GLOSSARY_CONCURRENCY = 1
 const MAX_GLOSSARY_CONCURRENCY = 20
+
+/** 講義主題把握で読み込む最大ページ数 (タイトル・目次・はじめに想定) */
+const THEME_PROBE_MAX_PAGES = 5
+const THEME_PROBE_MAX_CHARS_PER_PAGE = 2_000
+const THEME_PROBE_MAX_OUTPUT_TOKENS = 512
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -120,11 +142,11 @@ function resolveGlossaryConcurrency(settings: AdminSettings): number {
 }
 
 export type GlossaryGenerationProgressEvent = {
-  step: 'chunk_start' | 'api_response' | 'chunk_done'
+  step: 'chunk_start' | 'api_response' | 'chunk_done' | 'theme_done'
   chunkIndex: number
   chunkCount: number
   pages: number[]
-  pass: GlossaryExtractionPass
+  pass: GlossaryExtractionPass | 'theme'
   message: string
 }
 
@@ -202,148 +224,191 @@ function formatPagesForPrompt(pages: ExtractedPdfPage[], maxChars: number): stri
   ].filter(Boolean).join('\n')).join('\n\n')
 }
 
-function passInstruction(pass: GlossaryExtractionPass): string {
-  if (pass === 'formal_terms') {
-    return `今回の抽出対象は正式辞書候補だけ。
-- formal_term になり得る専門用語・略語だけを漏れなく抽出する
-- 数式、サイズ表記、URL、引用元、一般語、図中の単なる例示ラベルは出さない
-- formalEligible=true, assistiveEligible=true にする`
-  }
-  if (pass === 'formal_bilingual_terms') {
-    return `今回の抽出対象は正式辞書候補のうち、PDF内で日本語と英語が併記・近接している用語だけ。
-- 括弧併記、同一行、同一図表内などで日英対応が強いものを抽出する
-- 英語だけの固有名詞、データセット名、モデル名は出さない
-- 数式、サイズ表記、URL、引用元、一般語は出さない
-- formalEligible=true, assistiveEligible=true にする`
-  }
-  if (pass === 'formal_names_only') {
-    return `今回の抽出対象は正式辞書候補のうち、英語だけで出ている固有名詞・略語・データセット名・モデル名だけ。
-- MNIST, ImageNet, LeNet のような固有名詞・略語を抽出する
-- 日本語訳がPDF内にない場合、jaは空文字、jaSource="missing" にする
-- 日英併記の一般専門用語、数式、サイズ表記、URL、引用元、一般語は出さない
-- formalEligible=true, assistiveEligible=true にする`
-  }
-  if (pass === 'assistive_notations') {
-    return `今回の抽出対象は補正・読み支援候補だけ。
-- 数式、数式読み、2×2や6@14×14のようなサイズ/特徴マップ表記、字幕で読み間違えやすい記号表現だけを抽出する
-- 正式専門用語、URL、引用元、一般語は出さない
-- formalEligible=false, assistiveEligible=true にする`
-  }
-  if (pass === 'references_and_noise') {
-    return `今回の抽出対象は参考情報・除外候補だけ。
-- URL、引用元、画像素材サイト、論文リンク、図表出典、一般語、ノイズ候補だけを分類する
-- 正式専門用語や数式読み候補は出さない
-- URL/引用元は entryClass="reference", formalEligible=false, assistiveEligible=false にする
-- 一般語は entryClass="generic_word"、不要なものは entryClass="noise" にする`
-  }
-  return `今回の抽出対象は全カテゴリ。
-- 正式専門用語、略語、数式読み、サイズ表記、参考情報を分類して抽出する`
-}
+// ============================================================
+// 処理 0: 講義主題の事前把握 (extractDocumentTheme)
+// ============================================================
 
-function buildPrompt(document: ExtractedPdfDocument, pages: ExtractedPdfPage[], useVision: boolean, maxChars: number, pass: GlossaryExtractionPass): string {
-  return `以下のPDF資料から、字幕の書き起こし修正・英訳修正に使う専門用語辞書候補を抽出してください。
+function buildThemePrompt(document: ExtractedPdfDocument, probePages: ExtractedPdfPage[]): string {
+  return `以下は講義/技術資料の冒頭 (タイトル・目次・はじめになど) です。
+この資料の主題と扱われる主要概念を短く把握してください。
+後段の用語抽出タスクで「主題に関連する用語のみ抽出する」ためのコンテキストとして使います。
 
 文書名: ${document.source.name}
 
-${passInstruction(pass)}
-
-抽出対象:
-- 固有の専門用語、プロジェクト固有表現、略語
-- 日本語・英語の対応が推定できる表現
-- 講義字幕で読み間違えや翻訳ぶれが起きやすい数式・記号表現
-- 一般語すぎるもの、本文だけでは根拠が薄いものは除外
-
 制約:
-- JSONのみを返す
-- ja または en が不明な場合は空文字にする
-- 数式の場合は kind を "formula" にし、formula/displayText/spokenJa/spokenEn を可能な範囲で埋める
-- evidence には根拠ページと短い本文抜粋を入れる
-- references には本文中URLが根拠の場合だけ入れる。URL先はまだ読まない
-${useVision ? '- 添付ページ画像も確認する。PDFテキスト抽出と画像が矛盾する場合、数式・添字・上付き・ギリシャ文字・図表中の略語は画像を優先する' : ''}
-- URLドメイン、画像素材サイト、論文URL、引用元URLは正式辞書候補にしない。必要なら entryClass="reference", formalEligible=false, assistiveEligible=false にする
-- 2×2, 5×5, 6@14×14 のようなサイズ・特徴マップ表記は正式用語ではない。entryClass="shape_notation", formalEligible=false, assistiveEligible=true にする
-- row, column, red, green, image のような一般語は、講義固有の訳語管理が必要な場合だけ出す。通常は entryClass="generic_word" または "noise" にする
-- PDF本文またはページ画像に日本語/英語が実在する場合は jaSource/enSource を "document" または "vision" にする。LLMが補った訳語は "llm_inferred" にする
-- 正式辞書へ昇格してよい専門用語だけ formalEligible=true にする。補正や読み上げ支援にだけ有用な候補は assistiveEligible=true, formalEligible=false にする
-- 指定された抽出対象カテゴリだけを出す。対象外カテゴリは出さない
-- 各 description/note/reviewReason/snippet は短くする
+- JSON のみを返す
+- subject は 1 文 (50 字以内目安)
+- domain は分野ラベルをカンマ区切りで 1〜3 個
+- keyConcepts はこの資料で扱われる中心的な概念名を 3〜10 個、本文に実在する表記で
+- 主観評価・所感は入れない
 
-JSON形式:
+JSON 形式:
 {
-  "entries": [
-    {
-      "kind": "term" | "abbreviation" | "formula",
-      "entryClass": "formal_term" | "assistive_notation" | "formula_reading" | "shape_notation" | "reference" | "generic_word" | "noise",
-      "formalEligible": true,
-      "assistiveEligible": true,
-      "ja": "",
-      "jaSource": "document" | "vision" | "llm_inferred" | "missing",
-      "en": "",
-      "enSource": "document" | "vision" | "llm_inferred" | "missing",
-      "abbr": "",
-      "formula": "",
-      "latex": "",
-      "displayText": "",
-      "spokenJa": "",
-      "spokenEn": "",
-      "domain": "",
-      "desc": "",
-      "note": "",
-      "reviewReason": "",
-      "evidence": [{ "page": 1, "snippet": "" }],
-      "references": [{ "page": 1, "url": "", "label": "" }]
-    }
-  ]
+  "subject": "",
+  "domain": "",
+  "keyConcepts": [""]
 }
 
 本文:
-${formatPagesForPrompt(pages, maxChars)}`
+${formatPagesForPrompt(probePages, THEME_PROBE_MAX_CHARS_PER_PAGE)}`
 }
 
-function buildUserContent(document: ExtractedPdfDocument, pages: ExtractedPdfPage[], useVision: boolean, maxChars: number, pass: GlossaryExtractionPass): ChatMessageContent {
-  const prompt = buildPrompt(document, pages, useVision, maxChars, pass)
-  if (!useVision) return prompt
+function formatThemeContext(theme: { subject: string; domain: string; keyConcepts: string[] }): string {
+  const concepts = theme.keyConcepts.filter(Boolean).join(', ')
+  return [
+    `この資料の主題: ${theme.subject || '不明'}`,
+    `関連分野: ${theme.domain || '不明'}`,
+    concepts ? `主要に扱われる概念: ${concepts}` : '',
+  ].filter(Boolean).join('\n')
+}
 
-  const content: Exclude<ChatMessageContent, string> = [{ type: 'text', text: prompt }]
-  for (const page of pages) {
-    if (!page.imageDataUrl) continue
-    content.push({ type: 'image_url', image_url: { url: page.imageDataUrl, detail: 'high' } })
+export async function extractDocumentTheme(
+  settings: AdminSettings,
+  document: ExtractedPdfDocument,
+  onProgress?: GlossaryGenerationOptions['onProgress'],
+): Promise<DocumentTheme> {
+  const probePages = document.pages.slice(0, THEME_PROBE_MAX_PAGES)
+  if (probePages.length === 0) {
+    return { subject: '', domain: '', keyConcepts: [], promptContext: '' }
   }
-  return content
+
+  const connection = requireAiConnection(settings, 'glossary document theme extraction')
+  const model = requireChatModelForProvider(settings, settings.translationModel, 'glossary document theme extraction')
+
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      ...resolveChatCompletionTokenLimitForProvider(settings, THEME_PROBE_MAX_OUTPUT_TOKENS),
+      response_format: resolveJsonResponseFormatForProvider(settings),
+      messages: [
+        {
+          role: 'system',
+          content: 'You summarize the subject of a lecture/technical PDF in strict JSON. No commentary.',
+        },
+        {
+          role: 'user',
+          content: buildThemePrompt(document, probePages),
+        },
+      ],
+    }),
+  })
+
+  const text = await response.text()
+  if (!response.ok) {
+    throw new Error(`Glossary document theme API failed: HTTP ${response.status} ${text.slice(0, 500)}`)
+  }
+
+  const json = JSON.parse(text) as ChatCompletionResponse
+  const content = json.choices?.[0]?.message?.content
+  if (!content) {
+    return { subject: '', domain: '', keyConcepts: [], promptContext: '' }
+  }
+
+  let parsed: Record<string, unknown>
+  try {
+    parsed = parseJsonObjectFromLlmContent(content, `Glossary document theme: ${document.source.name}`)
+  } catch {
+    return { subject: '', domain: '', keyConcepts: [], promptContext: '' }
+  }
+
+  const subject = asString(parsed.subject)
+  const domain = asString(parsed.domain)
+  const keyConcepts = Array.isArray(parsed.keyConcepts)
+    ? parsed.keyConcepts.map(asString).filter(Boolean)
+    : []
+
+  const theme: DocumentTheme = {
+    subject,
+    domain,
+    keyConcepts,
+    promptContext: formatThemeContext({ subject, domain, keyConcepts }),
+  }
+
+  onProgress?.({
+    step: 'theme_done',
+    chunkIndex: 0,
+    chunkCount: 1,
+    pages: probePages.map(p => p.page),
+    pass: 'theme',
+    message: `theme: ${subject || '(不明)'} | domain: ${domain || '(不明)'} | concepts: ${keyConcepts.length}`,
+  })
+
+  return theme
 }
 
-function buildCandidatePrompt(document: ExtractedPdfDocument, pages: ExtractedPdfPage[], useVision: boolean, maxChars: number, pass: GlossaryExtractionPass): string {
-  return `以下のPDF資料から、辞書化する前の「候補名だけ」を抽出してください。
+// ============================================================
+// 処理 A+B: 候補抽出プロンプト
+// ============================================================
+
+const CATEGORY_GUIDE = `分類タグ (category) は以下の 5 つのいずれか:
+- "term":         専門用語 (この資料の主題に直結する技術用語)。例: 「最適化アルゴリズム」「過学習」「正則化」
+- "proper_noun":  固有名詞 (人名・組織名・データセット名・モデル名・ライブラリ名)。例: MNIST, scikit-learn, LeNet
+- "formula":      数式・記号・形状表記。例: 2×2, 6@14×14, ∂L/∂θ, f(x)
+- "abbreviation": 略語 (展開先の正式名が存在するもの)。例: ML, CNN, DL
+- "reference":    参照・引用元・URL (辞書化対象外、自動的に disabled になる)。例: https://..., Bengio+ 2007`
+
+const EXTRACTION_RULES = `抽出する:
+- この資料の主題に直結する技術用語・固有名詞・略語
+- 字幕補正で読み間違えやすい数式・記号表記
+- 主題で扱われる概念名
+
+抽出しない:
+- 一般動詞・形容詞 (「学ぶ」「単純」「複雑」「計算する」)
+- 主題と無関係な一般名詞 (「人」「方法」「内容」「結果」)
+- 教育用語一般 (「講義」「演習」「目次」「参考文献」)
+- 講師名・大学名・組織名は reference として記録
+- 単独では意味が分からない指示語 (「これ」「以下」「先程」)
+
+判定に迷ったら:
+- 「この語を字幕辞書から削除したら字幕品質が下がるか?」で判断
+- 下がらないなら抽出しない`
+
+const ABSOLUTE_RULES = `絶対に守ること:
+- 翻訳はしない。PDF に存在しない訳語を補わない
+- 推測で値を作らない。PDF に書かれていない情報は空欄にする
+- ja は PDF に実在する日本語表記のみ、en は PDF に実在する英語表記のみ
+- どちらか一方が PDF に書かれていない場合、そのフィールドは空文字、対応 Source は "missing"
+- jaSource / enSource は申告したら検証されます。PDF に実在しない値を "document" 申告すると後段で削除されます
+- JSON のみを返す`
+
+function buildCandidatePrompt(
+  document: ExtractedPdfDocument,
+  pages: ExtractedPdfPage[],
+  useVision: boolean,
+  maxChars: number,
+  themeContext: string,
+): string {
+  return `以下の PDF 資料から、字幕の書き起こし修正・英訳修正に使う専門用語の「候補名だけ」を抽出してください。
 
 文書名: ${document.source.name}
 
-${passInstruction(pass)}
+${themeContext ? `${themeContext}\n` : ''}
+${CATEGORY_GUIDE}
 
-目的:
-- この段階では候補の列挙だけを行う
-- 詳細説明、読み、根拠配列、参考URL配列は後段で作る
-- 出力を短くし、ローカルLLMの出力上限に当たらないようにする
+${EXTRACTION_RULES}
 
-制約:
-- JSONのみを返す
-- entries は絶対に返さない
-- desc, note, reviewReason, spokenJa, spokenEn, domain, evidence, references は絶対に出さない
-- 1候補は text/kind/entryClass/page/snippet だけを基本にする
-- ja/en/formula/displayText はPDF上で明確に分かる場合だけ短く入れてよい
-- snippet は候補が出ている短い本文だけにする
-- Machine Learning (ML) のように正式用語と略語が同じ箇所で出ている場合、別候補に分けず、正式用語側を1候補だけ出す
-- 「人間」「機械」など単独では講義固有の訳語管理が不要な一般語は候補に出さない
-${useVision ? '- 添付ページ画像もPDF本文と同じ抽出対象として確認する。PDFテキストに存在しないが画像上に見える数式・添字・上付き・ギリシャ文字・図表中の略語も新規候補として出す' : ''}
-${useVision ? '- 画像上の数式がPDFテキストで壊れている、欠落している、順序が崩れている場合は、画像で読める表記を formula/displayText に入れる' : ''}
-${useVision ? '- Visionは候補追加のために使う。既存テキスト候補の補正だけで終わらせない' : ''}
+${ABSOLUTE_RULES}
 
-JSON形式:
+候補抽出段の追加制約:
+- 1 候補は text/category/page/snippet を基本とする
+- ja/en/formula/displayText は PDF 上で明確に分かる場合のみ短く入れる
+- desc, note, reviewReason, spokenJa, spokenEn, domain, evidence, references はこの段では出さない
+- snippet は候補が出ている短い本文断片 (50 字以内)
+- 同概念の正式用語と略語が同じ箇所に並ぶ場合は、正式用語側を 1 候補だけ出す
+${useVision ? '- 添付ページ画像も同じ抽出対象として確認する。PDF テキストで崩れている数式・添字・上付き・ギリシャ文字・図表中の略語は画像で読める表記を入れる' : ''}
+
+JSON 形式:
 {
   "candidates": [
     {
       "text": "",
-      "kind": "term" | "abbreviation" | "formula",
-      "entryClass": "formal_term" | "assistive_notation" | "formula_reading" | "shape_notation" | "reference" | "generic_word" | "noise",
+      "category": "term" | "proper_noun" | "formula" | "abbreviation" | "reference",
       "page": 1,
       "snippet": "",
       "ja": "",
@@ -358,8 +423,14 @@ JSON形式:
 ${formatPagesForPrompt(pages, maxChars)}`
 }
 
-function buildCandidateUserContent(document: ExtractedPdfDocument, pages: ExtractedPdfPage[], useVision: boolean, maxChars: number, pass: GlossaryExtractionPass): ChatMessageContent {
-  const prompt = buildCandidatePrompt(document, pages, useVision, maxChars, pass)
+function buildCandidateUserContent(
+  document: ExtractedPdfDocument,
+  pages: ExtractedPdfPage[],
+  useVision: boolean,
+  maxChars: number,
+  themeContext: string,
+): ChatMessageContent {
+  const prompt = buildCandidatePrompt(document, pages, useVision, maxChars, themeContext)
   if (!useVision) return prompt
 
   const content: Exclude<ChatMessageContent, string> = [{ type: 'text', text: prompt }]
@@ -370,35 +441,33 @@ function buildCandidateUserContent(document: ExtractedPdfDocument, pages: Extrac
   return content
 }
 
-function buildDetailPrompt(document: ExtractedPdfDocument, candidates: NormalizedGlossaryCandidate[], pass: GlossaryExtractionPass): string {
-  return `以下の候補だけを、自作辞書へ保存する詳細JSONに展開してください。
+function buildDetailPrompt(
+  document: ExtractedPdfDocument,
+  candidates: NormalizedGlossaryCandidate[],
+  themeContext: string,
+): string {
+  return `以下の候補だけを、自作辞書へ保存する詳細 JSON に展開してください。
 
 文書名: ${document.source.name}
 
-${passInstruction(pass)}
+${themeContext ? `${themeContext}\n` : ''}
+${CATEGORY_GUIDE}
 
-制約:
-- JSONのみを返す
+${ABSOLUTE_RULES}
+
+詳細展開段の追加制約:
 - 新しい候補を追加しない
 - 入力候補にない用語を補完しない
-- desc/note/reviewReason/snippet は短くする
-- ja または en が不明な場合は空文字にし、対応する Source は "missing" にする
-- PDF本文またはページ画像に実在した日英表記は Source を "document" または "vision" にする
-- LLMが補った訳語は Source を "llm_inferred" にする
-- URLドメインや引用元は正式辞書候補にしない
-- 2×2, 5×5, 6@14×14 のようなサイズ・特徴マップ表記は entryClass="shape_notation", formalEligible=false, assistiveEligible=true にする
-- Machine Learning (ML) のように正式用語と略語が同じ概念を指す場合、別entryにせず正式用語entryの abbr に入れる
-- Deep Learning (DL) のように日英どちらかが候補側で欠けていても、候補リスト内またはsnippet上で同じ概念だと明確な場合は1entryに統合する
-- 「人間」「機械」などの一般語は entryClass="generic_word", formalEligible=false, assistiveEligible=false, disabled相当にする前提で出力し、迷う場合は出さない
+- desc/note/reviewReason/snippet は短くする (50〜100 字)
+- ja または en が不明な場合は空文字にし、対応 Source は "missing"
+- 略語と正式名が同じ概念を指す場合、別 entry にせず正式名 entry の abbr に略語を入れる
+- 既存 candidate の category を勝手に変えない (明らかな誤分類のときだけ訂正可)
 
-JSON形式:
+JSON 形式:
 {
   "entries": [
     {
-      "kind": "term" | "abbreviation" | "formula",
-      "entryClass": "formal_term" | "assistive_notation" | "formula_reading" | "shape_notation" | "reference" | "generic_word" | "noise",
-      "formalEligible": true,
-      "assistiveEligible": true,
+      "category": "term" | "proper_noun" | "formula" | "abbreviation" | "reference",
       "ja": "",
       "jaSource": "document" | "vision" | "llm_inferred" | "missing",
       "en": "",
@@ -407,8 +476,6 @@ JSON形式:
       "formula": "",
       "latex": "",
       "displayText": "",
-      "spokenJa": "",
-      "spokenEn": "",
       "domain": "",
       "desc": "",
       "note": "",
@@ -453,23 +520,17 @@ function formatUsage(json: ChatCompletionResponse): string {
   return `, tokens=${prompt ?? '?'} in/${completion ?? '?'} out/${total ?? '?'} total`
 }
 
-function normalizeKind(value: unknown): SelfMadeGlossaryEntry['kind'] {
-  return value === 'abbreviation' || value === 'formula' ? value : 'term'
-}
-
-function normalizeEntryClass(value: unknown): SelfMadeGlossaryEntryClass {
+function normalizeCategory(value: unknown): SelfMadeGlossaryCategory {
   if (
-    value === 'formal_term'
-    || value === 'assistive_notation'
-    || value === 'formula_reading'
-    || value === 'shape_notation'
+    value === 'term'
+    || value === 'proper_noun'
+    || value === 'formula'
+    || value === 'abbreviation'
     || value === 'reference'
-    || value === 'generic_word'
-    || value === 'noise'
   ) {
     return value
   }
-  return 'formal_term'
+  return 'term'
 }
 
 function normalizeCandidate(raw: RawGlossaryCandidate): NormalizedGlossaryCandidate | null {
@@ -483,8 +544,7 @@ function normalizeCandidate(raw: RawGlossaryCandidate): NormalizedGlossaryCandid
 
   return {
     text: fallbackText,
-    kind: normalizeKind(raw.kind),
-    entryClass: normalizeEntryClass(raw.entryClass),
+    category: normalizeCategory(raw.category),
     page: asPage(raw.page),
     snippet: asOptionalString(raw.snippet),
     ja,
@@ -499,8 +559,7 @@ function dedupeCandidates(candidates: NormalizedGlossaryCandidate[]): Normalized
   const deduped: NormalizedGlossaryCandidate[] = []
   for (const candidate of candidates) {
     const key = [
-      candidate.kind,
-      candidate.entryClass,
+      candidate.category,
       candidate.text.toLowerCase(),
       candidate.ja?.toLowerCase() ?? '',
       candidate.en?.toLowerCase() ?? '',
@@ -515,12 +574,16 @@ function dedupeCandidates(candidates: NormalizedGlossaryCandidate[]): Normalized
 }
 
 function normalizeValueSource(value: unknown, text: string): SelfMadeGlossaryValueSource {
-  if (value === 'document' || value === 'vision' || value === 'llm_inferred' || value === 'manual') return value
+  if (
+    value === 'document'
+    || value === 'vision'
+    || value === 'llm_inferred'
+    || value === 'llm_translation'
+    || value === 'manual'
+  ) {
+    return value
+  }
   return text.trim() ? 'llm_inferred' : 'missing'
-}
-
-function isBoolean(value: unknown): value is boolean {
-  return typeof value === 'boolean'
 }
 
 function looksLikeUrlOrDomain(value: string): boolean {
@@ -528,97 +591,58 @@ function looksLikeUrlOrDomain(value: string): boolean {
   return /^https?:\/\//.test(text) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/?$/.test(text)
 }
 
-function looksLikeShapeNotation(value: string): boolean {
-  const text = value.trim()
-  return /^\d+\s*[×x]\s*\d+(\s*[,、]\s*\d+\s*[×x]\s*\d+)*$/.test(text)
-    || /^\d+\s*@\s*\d+\s*[×x]\s*\d+$/.test(text)
-    || /^\d+\s*[×x]\s*\d+\s*[×x]\s*\d+$/.test(text)
-}
-
 function applyDeterministicClassification(
-  entryClass: SelfMadeGlossaryEntryClass,
-  kind: SelfMadeGlossaryEntry['kind'],
+  category: SelfMadeGlossaryCategory,
   ja: string,
   en: string,
   formula: string,
   displayText: string,
 ): {
-  entryClass: SelfMadeGlossaryEntryClass
+  category: SelfMadeGlossaryCategory
   formalEligible: boolean
   assistiveEligible: boolean
   disabled: boolean
   reviewReason?: string
 } {
   const values = [ja, en, formula, displayText].filter(Boolean)
+
+  // URL/ドメインらしき値は reference に強制
   if (values.some(looksLikeUrlOrDomain)) {
     return {
-      entryClass: 'reference',
+      category: 'reference',
       formalEligible: false,
       assistiveEligible: false,
       disabled: true,
-      reviewReason: 'URLまたは引用元ドメインのため正式辞書・補正利用から除外',
+      reviewReason: 'URL または引用元ドメインのため正式辞書・補正利用から除外',
     }
   }
-  if (values.some(looksLikeShapeNotation)) {
-    return {
-      entryClass: 'shape_notation',
-      formalEligible: false,
-      assistiveEligible: true,
-      disabled: false,
-      reviewReason: 'サイズ・特徴マップ表記のため正式辞書ではなく補正支援候補',
-    }
-  }
-  if (kind === 'formula' && entryClass === 'formal_term') {
-    return {
-      entryClass: 'formula_reading',
-      formalEligible: false,
-      assistiveEligible: true,
-      disabled: false,
-      reviewReason: '数式読み支援候補',
-    }
-  }
-  if (entryClass === 'reference' || entryClass === 'noise') {
-    return {
-      entryClass,
-      formalEligible: false,
-      assistiveEligible: false,
-      disabled: true,
-      reviewReason: entryClass === 'reference'
-        ? '参考情報のため正式辞書・補正利用から除外'
-        : 'ノイズ候補のため除外',
-    }
-  }
-  if (kind === 'formula' && entryClass === 'shape_notation' && values.some(value => /^[A-Za-zΑ-Ωα-ω]$/.test(value.trim()))) {
-    return {
-      entryClass: 'formula_reading',
-      formalEligible: false,
-      assistiveEligible: true,
-      disabled: false,
-      reviewReason: '単独記号の読み支援候補',
-    }
-  }
-  if (entryClass === 'generic_word') {
-    return {
-      entryClass,
-      formalEligible: false,
-      assistiveEligible: false,
-      disabled: true,
-      reviewReason: '一般語のため既定では正式辞書・補正利用から除外',
-    }
-  }
-  if (entryClass === 'assistive_notation' || entryClass === 'formula_reading' || entryClass === 'shape_notation') {
-    return {
-      entryClass,
-      formalEligible: false,
-      assistiveEligible: true,
-      disabled: false,
-    }
-  }
-  return {
-    entryClass,
-    formalEligible: true,
-    assistiveEligible: true,
-    disabled: false,
+
+  switch (category) {
+    case 'reference':
+      return {
+        category,
+        formalEligible: false,
+        assistiveEligible: false,
+        disabled: true,
+        reviewReason: '参照情報のため正式辞書・補正利用から除外',
+      }
+    case 'formula':
+      return {
+        category,
+        formalEligible: false,
+        assistiveEligible: true,
+        disabled: false,
+      }
+    case 'abbreviation':
+    case 'proper_noun':
+    case 'term':
+    default:
+      return {
+        category,
+        formalEligible: true,
+        assistiveEligible: true,
+        disabled: false,
+      }
   }
 }
 
@@ -654,8 +678,7 @@ function normalizeChildren(raw: RawGlossaryEntry, pagesByNumber: Map<number, Ext
 
 function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, pagesByNumber: Map<number, ExtractedPdfPage>): SelfMadeGlossaryEntry | null {
   const now = new Date().toISOString()
-  const kind = normalizeKind(raw.kind)
-  const initialEntryClass = normalizeEntryClass(raw.entryClass)
+  const initialCategory = normalizeCategory(raw.category)
   const ja = asString(raw.ja)
   const en = asString(raw.en)
   const formula = asString(raw.formula)
@@ -664,12 +687,11 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
 
   if (!ja && !en && !abbr && !formula && !displayText) return null
 
-  const classification = applyDeterministicClassification(initialEntryClass, kind, ja, en, formula, displayText)
+  const classification = applyDeterministicClassification(initialCategory, ja, en, formula, displayText)
 
   return {
     id: crypto.randomUUID(),
-    kind,
-    entryClass: classification.entryClass,
+    category: classification.category,
     origin: 'document_generated',
     ja,
     en,
@@ -679,14 +701,12 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
     formula: formula || undefined,
     latex: asOptionalString(raw.latex),
     displayText: displayText || undefined,
-    spokenJa: asOptionalString(raw.spokenJa),
-    spokenEn: asOptionalString(raw.spokenEn),
     domain: asOptionalString(raw.domain),
     note: asOptionalString(raw.note),
     desc: asOptionalString(raw.desc),
     confidence: asConfidence(raw.confidence),
-    formalEligible: isBoolean(raw.formalEligible) ? raw.formalEligible && classification.formalEligible : classification.formalEligible,
-    assistiveEligible: isBoolean(raw.assistiveEligible) ? raw.assistiveEligible || classification.assistiveEligible : classification.assistiveEligible,
+    formalEligible: classification.formalEligible,
+    assistiveEligible: classification.assistiveEligible,
     provisional: true,
     disabled: classification.disabled,
     reviewReason: classification.reviewReason ?? asOptionalString(raw.reviewReason),
@@ -701,113 +721,26 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
 }
 
 function rawEntryFromCandidate(candidate: NormalizedGlossaryCandidate): RawGlossaryEntry {
-  const isAssistive = candidate.entryClass !== 'formal_term'
   const text = candidate.text
   return {
-    kind: candidate.kind,
-    entryClass: candidate.entryClass,
-    formalEligible: !isAssistive,
-    assistiveEligible: true,
+    category: candidate.category,
     ja: candidate.ja ?? '',
     jaSource: candidate.ja ? 'document' : 'missing',
     en: candidate.en ?? '',
     enSource: candidate.en ? 'document' : 'missing',
-    formula: candidate.formula ?? (candidate.kind === 'formula' ? text : ''),
+    formula: candidate.formula ?? (candidate.category === 'formula' ? text : ''),
     displayText: candidate.displayText ?? text,
     desc: '',
     note: '',
-    reviewReason: isAssistive ? 'ローカルLLMの軽量候補抽出から作成した補正支援候補' : '',
+    reviewReason: '',
     evidence: [{ page: candidate.page, snippet: candidate.snippet ?? text }],
     references: [],
   }
 }
 
-async function requestGlossaryChunk(
-  settings: AdminSettings,
-  document: ExtractedPdfDocument,
-  pages: ExtractedPdfPage[],
-  useVision: boolean,
-  maxChars: number,
-  chunkIndex: number,
-  chunkCount: number,
-  pass: GlossaryExtractionPass,
-  onProgress?: GlossaryGenerationOptions['onProgress'],
-): Promise<RawGlossaryEntry[]> {
-  const connection = requireAiConnection(settings, 'self-made glossary generation')
-  const requestedModel = useVision ? settings.pdfExtractionVisionModel : settings.translationModel
-  const model = requireChatModelForProvider(settings, requestedModel, 'self-made glossary generation')
-  const pageNumbers = pages.map(page => page.page)
-  onProgress?.({
-    step: 'chunk_start',
-    chunkIndex,
-    chunkCount,
-    pages: pageNumbers,
-    pass,
-    message: `${pass} chunk ${chunkIndex + 1}/${chunkCount}: pages ${pageNumbers.join(', ')}`,
-  })
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        {
-          role: 'system',
-          content: 'You extract high-value bilingual glossary candidates for subtitle correction. Return strict JSON only.',
-        },
-        {
-          role: 'user',
-          content: buildUserContent(document, pages, useVision, maxChars, pass),
-        },
-      ],
-    }),
-  })
-
-  const text = await response.text()
-  if (!response.ok) {
-    throw new Error(`Glossary generation API failed: HTTP ${response.status} ${text.slice(0, 500)}`)
-  }
-
-  let json: ChatCompletionResponse
-  try {
-    json = JSON.parse(text) as ChatCompletionResponse
-  } catch (err) {
-    throw new Error(`Glossary generation response JSON parse failed at pages ${pageNumbers.join(', ')}: ${err instanceof Error ? err.message : String(err)} / body=${text.slice(0, 500)}`)
-  }
-  const choice = json.choices?.[0]
-  const finishReason = choice?.finish_reason ?? 'unknown'
-  const content = choice?.message?.content
-  onProgress?.({
-    step: 'api_response',
-    chunkIndex,
-    chunkCount,
-    pages: pageNumbers,
-    pass,
-    message: `${pass} chunk ${chunkIndex + 1}/${chunkCount}: finish_reason=${finishReason}, content_chars=${content?.length ?? 0}${formatUsage(json)}`,
-  })
-  if (finishReason === 'length') {
-    const err = new Error(`Glossary generation stopped by length limit at pass=${pass}, pages ${pageNumbers.join(', ')}. Use a model with a larger output limit or reduce the page content.`)
-    ;(err as Error & { glossaryFinishReason?: string }).glossaryFinishReason = finishReason
-    throw err
-  }
-  if (!content) throw new Error('Glossary generation response did not include message content')
-  const entries = rawEntries(parseJsonObjectFromLlmContent(content, `Glossary generation ${pass} pages ${pageNumbers.join(', ')}`))
-  onProgress?.({
-    step: 'chunk_done',
-    chunkIndex,
-    chunkCount,
-    pages: pageNumbers,
-    pass,
-    message: `${pass} chunk ${chunkIndex + 1}/${chunkCount}: ${entries.length} candidates`,
-  })
-  return entries
-}
+// ============================================================
+// LLM 呼び出し
+// ============================================================
 
 async function requestCandidateChunk(
   settings: AdminSettings,
@@ -815,6 +748,7 @@ async function requestCandidateChunk(
   pages: ExtractedPdfPage[],
   useVision: boolean,
   maxChars: number,
+  themeContext: string,
   chunkIndex: number,
   chunkCount: number,
   pass: GlossaryExtractionPass,
@@ -847,11 +781,11 @@ async function requestCandidateChunk(
       messages: [
         {
           role: 'system',
-          content: 'You extract only compact glossary candidate lists. Return strict JSON only.',
+          content: 'You extract glossary candidates strictly from given PDF text/images. Never translate or invent values. Return strict JSON only.',
         },
         {
           role: 'user',
-          content: buildCandidateUserContent(document, pages, useVision, maxChars, pass),
+          content: buildCandidateUserContent(document, pages, useVision, maxChars, themeContext),
         },
       ],
     }),
@@ -920,6 +854,7 @@ async function requestDetailBatch(
   settings: AdminSettings,
   document: ExtractedPdfDocument,
   candidates: NormalizedGlossaryCandidate[],
+  themeContext: string,
   chunkIndex: number,
   chunkCount: number,
   batchIndex: number,
@@ -953,11 +888,11 @@ async function requestDetailBatch(
       messages: [
         {
           role: 'system',
-          content: 'You expand a fixed small list of glossary candidates into strict JSON entries. Do not add candidates.',
+          content: 'You expand a fixed small list of glossary candidates into strict JSON entries. Do not translate or invent new values.',
         },
         {
           role: 'user',
-          content: buildDetailPrompt(document, candidates, pass),
+          content: buildDetailPrompt(document, candidates, themeContext),
         },
       ],
     }),
@@ -1002,10 +937,15 @@ async function requestDetailBatch(
   }
 }
 
+function isLengthLimitError(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { glossaryFinishReason?: unknown }).glossaryFinishReason === 'length')
+}
+
 async function requestDetailBatchWithFallback(
   settings: AdminSettings,
   document: ExtractedPdfDocument,
   candidates: NormalizedGlossaryCandidate[],
+  themeContext: string,
   chunkIndex: number,
   chunkCount: number,
   batchIndex: number,
@@ -1014,7 +954,7 @@ async function requestDetailBatchWithFallback(
   onProgress?: GlossaryGenerationOptions['onProgress'],
 ): Promise<RawGlossaryEntry[]> {
   try {
-    return await requestDetailBatch(settings, document, candidates, chunkIndex, chunkCount, batchIndex, batchCount, pass, onProgress)
+    return await requestDetailBatch(settings, document, candidates, themeContext, chunkIndex, chunkCount, batchIndex, batchCount, pass, onProgress)
   } catch (error) {
     const shouldSplit = isLengthLimitError(error) || Boolean(error && typeof error === 'object' && (error as { glossaryParseError?: unknown }).glossaryParseError)
     if (!shouldSplit) throw error
@@ -1040,151 +980,21 @@ async function requestDetailBatchWithFallback(
       message: `${pass} detail batch ${batchIndex + 1}/${batchCount}: retrying split for ${candidates.length} candidates (${error instanceof Error ? error.message : String(error)})`,
     })
 
-    const first = await requestDetailBatchWithFallback(settings, document, candidates.slice(0, midpoint), chunkIndex, chunkCount, batchIndex, batchCount, pass, onProgress)
-    const second = await requestDetailBatchWithFallback(settings, document, candidates.slice(midpoint), chunkIndex, chunkCount, batchIndex, batchCount, pass, onProgress)
+    const first = await requestDetailBatchWithFallback(settings, document, candidates.slice(0, midpoint), themeContext, chunkIndex, chunkCount, batchIndex, batchCount, pass, onProgress)
+    const second = await requestDetailBatchWithFallback(settings, document, candidates.slice(midpoint), themeContext, chunkIndex, chunkCount, batchIndex, batchCount, pass, onProgress)
     return [...first, ...second]
   }
 }
 
-function isLengthLimitError(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && (error as { glossaryFinishReason?: unknown }).glossaryFinishReason === 'length')
-}
-
-function fallbackPassesFor(pass: GlossaryExtractionPass): GlossaryExtractionPass[] | null {
-  if (pass === 'formal_terms') return ['formal_bilingual_terms', 'formal_names_only']
-  return null
-}
-
-async function requestGlossaryWithFallback(
-  settings: AdminSettings,
-  document: ExtractedPdfDocument,
-  pages: ExtractedPdfPage[],
-  useVision: boolean,
-  maxChars: number,
-  chunkIndex: number,
-  chunkCount: number,
-  pass: GlossaryExtractionPass,
-  onProgress?: GlossaryGenerationOptions['onProgress'],
-  splitDepth = 0,
-): Promise<RawGlossaryEntry[]> {
-  try {
-    return await requestGlossaryChunk(settings, document, pages, useVision, maxChars, chunkIndex, chunkCount, pass, onProgress)
-  } catch (error) {
-    if (isLengthLimitError(error) && splitDepth < 3 && pages.some(page => Boolean(page.imageDataUrl))) {
-      const pageNumbers = pages.map(page => page.page)
-      onProgress?.({
-        step: 'chunk_start',
-        chunkIndex,
-        chunkCount,
-        pages: pageNumbers,
-        pass,
-        message: `${pass} chunk ${chunkIndex + 1}/${chunkCount}: length limit; retrying without page image`,
-      })
-      return requestGlossaryWithFallback(
-        settings,
-        document,
-        pages.map(page => ({ ...page, imageDataUrl: undefined })),
-        false,
-        maxChars,
-        chunkIndex,
-        chunkCount,
-        pass,
-        onProgress,
-        splitDepth + 1,
-      )
-    }
-
-    if (isLengthLimitError(error) && splitDepth < 3) {
-      const splitPages = splitExtractedPages(pages)
-      if (splitPages.length > 1) {
-        const pageNumbers = pages.map(page => page.page)
-        onProgress?.({
-          step: 'chunk_start',
-          chunkIndex,
-          chunkCount,
-          pages: pageNumbers,
-          pass,
-          message: `${pass} chunk ${chunkIndex + 1}/${chunkCount}: length limit; splitting page text into ${splitPages.length} parts`,
-        })
-
-        const results: RawGlossaryEntry[] = []
-        for (const splitPage of splitPages) {
-          const raw = await requestGlossaryWithFallback(
-            settings,
-            document,
-            [splitPage],
-            useVision,
-            maxChars,
-            chunkIndex,
-            chunkCount,
-            pass,
-            onProgress,
-            splitDepth + 1,
-          )
-          results.push(...raw)
-        }
-        return results
-      }
-    }
-
-    const fallbackPasses = fallbackPassesFor(pass)
-    if (!isLengthLimitError(error) || !fallbackPasses) throw error
-
-    const pageNumbers = pages.map(page => page.page)
-    onProgress?.({
-      step: 'chunk_start',
-      chunkIndex,
-      chunkCount,
-      pages: pageNumbers,
-      pass,
-      message: `${pass} chunk ${chunkIndex + 1}/${chunkCount}: length limit; retrying as ${fallbackPasses.join(' + ')}`,
-    })
-
-    const results: RawGlossaryEntry[] = []
-    for (const fallbackPass of fallbackPasses) {
-      const raw = await requestGlossaryWithFallback(settings, document, pages, useVision, maxChars, chunkIndex, chunkCount, fallbackPass, onProgress, splitDepth)
-      results.push(...raw)
-    }
-    return results
-  }
-}
-
-function splitTextIntoParts(text: string): string[] {
-  const normalized = text.trim()
-  if (normalized.length < 1200) return []
-  const targetParts = normalized.length > 4200 ? 4 : 2
-  const partSize = Math.ceil(normalized.length / targetParts)
-  const parts: string[] = []
-
-  for (let start = 0; start < normalized.length; start += partSize) {
-    let end = Math.min(normalized.length, start + partSize)
-    if (end < normalized.length) {
-      const nextBreak = normalized.lastIndexOf(' ', end)
-      if (nextBreak > start + Math.floor(partSize * 0.55)) end = nextBreak
-    }
-    parts.push(normalized.slice(start, end).trim())
-  }
-
-  return parts.filter(Boolean)
-}
-
-function splitExtractedPages(pages: ExtractedPdfPage[]): ExtractedPdfPage[] {
-  if (pages.length > 1) return pages
-  const page = pages[0]
-  const textParts = splitTextIntoParts(page.text)
-  if (textParts.length <= 1) return []
-  return textParts.map((text, index) => ({
-    ...page,
-    text,
-    imageDataUrl: index === 0 ? page.imageDataUrl : undefined,
-  }))
-}
+// ============================================================
+// パイプライン本体
+// ============================================================
 
 async function generateTwoStageSelfMadeGlossaryFromPdf(
   settings: AdminSettings,
   document: ExtractedPdfDocument,
   options: GlossaryGenerationOptions,
-  passes: GlossaryExtractionPass[],
+  themeContext: string,
   lightweightAssistive: boolean,
   concurrency: number,
 ): Promise<SelfMadeGlossaryEntry[]> {
@@ -1192,86 +1002,79 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
   const pagesByNumber = new Map(document.pages.map(page => [page.page, page]))
   const entries: SelfMadeGlossaryEntry[] = []
   const chunks = document.pages.map(page => [page])
+  const pass: GlossaryExtractionPass = 'all'
 
-  for (const pass of passes) {
-    options.onProgress?.({
-      step: 'chunk_start',
-      chunkIndex: 0,
-      chunkCount: chunks.length,
-      pages: [],
+  options.onProgress?.({
+    step: 'chunk_start',
+    chunkIndex: 0,
+    chunkCount: chunks.length,
+    pages: [],
+    pass,
+    message: `${pass}: pass started (${chunks.length} pages, concurrency=${concurrency})`,
+  })
+
+  const passEntries = await mapWithConcurrency(chunks.length, concurrency, async (i) => {
+    const pages = chunks[i]
+    const candidates = await requestCandidateChunk(
+      settings,
+      document,
+      pages,
+      useVision,
+      MAX_LOCAL_CHARS_PER_REQUEST,
+      themeContext,
+      i,
+      chunks.length,
       pass,
-      message: `${pass}: pass started (${chunks.length} pages, concurrency=${concurrency})`,
-    })
+      options.onProgress,
+    )
+    if (candidates.length === 0) return []
 
-    const passEntries = await mapWithConcurrency(chunks.length, concurrency, async (i) => {
-      const pages = chunks[i]
-      const candidates = await requestCandidateChunk(
+    if (lightweightAssistive) {
+      const normalizedBatch = candidates
+        .map(candidate => normalizeEntry(rawEntryFromCandidate(candidate), document, pagesByNumber))
+        .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
+      if (normalizedBatch.length > 0) {
+        options.onEntries?.(normalizedBatch)
+      }
+      return normalizedBatch
+    }
+
+    const pageEntries: SelfMadeGlossaryEntry[] = []
+    const batches = batchCandidates(candidates, LOCAL_DETAIL_BATCH_SIZE)
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      const raw = await requestDetailBatchWithFallback(
         settings,
         document,
-        pages,
-        useVision,
-        MAX_LOCAL_CHARS_PER_REQUEST,
+        batches[batchIndex],
+        themeContext,
         i,
         chunks.length,
+        batchIndex,
+        batches.length,
         pass,
         options.onProgress,
       )
-      if (candidates.length === 0) return []
-
-      if (lightweightAssistive && pass === 'assistive_notations') {
-        const normalizedBatch = candidates
-          .map(candidate => normalizeEntry(rawEntryFromCandidate(candidate), document, pagesByNumber))
-          .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
-        if (normalizedBatch.length > 0) {
-          options.onEntries?.(normalizedBatch)
-        }
-        return normalizedBatch
+      const normalizedBatch = raw
+        .map(entry => normalizeEntry(entry, document, pagesByNumber))
+        .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
+      if (normalizedBatch.length > 0) {
+        pageEntries.push(...normalizedBatch)
+        options.onEntries?.(normalizedBatch)
       }
+    }
+    return pageEntries
+  })
 
-      const pageEntries: SelfMadeGlossaryEntry[] = []
-      const batches = batchCandidates(candidates, LOCAL_DETAIL_BATCH_SIZE)
-      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-        const raw = await requestDetailBatchWithFallback(
-          settings,
-          document,
-          batches[batchIndex],
-          i,
-          chunks.length,
-          batchIndex,
-          batches.length,
-          pass,
-          options.onProgress,
-        )
-        const normalizedBatch = raw
-          .map(entry => normalizeEntry(entry, document, pagesByNumber))
-          .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
-        if (normalizedBatch.length > 0) {
-          pageEntries.push(...normalizedBatch)
-          options.onEntries?.(normalizedBatch)
-        }
-      }
-      return pageEntries
-    })
-
-    entries.push(...passEntries.flat())
-    options.onProgress?.({
-      step: 'chunk_done',
-      chunkIndex: chunks.length - 1,
-      chunkCount: chunks.length,
-      pages: [],
-      pass,
-      message: `${pass}: pass completed`,
-    })
-  }
-
+  entries.push(...passEntries.flat())
   options.onProgress?.({
     step: 'chunk_done',
     chunkIndex: chunks.length - 1,
     chunkCount: chunks.length,
     pages: [],
-    pass: 'assistive_notations',
-    message: `local glossary generation completed: ${entries.length} entries`,
+    pass,
+    message: `${pass}: pass completed (${entries.length} entries)`,
   })
+
   return entries
 }
 
@@ -1279,58 +1082,68 @@ async function generateLocalSelfMadeGlossaryFromPdf(
   settings: AdminSettings,
   document: ExtractedPdfDocument,
   options: GlossaryGenerationOptions,
+  themeContext: string,
 ): Promise<SelfMadeGlossaryEntry[]> {
   return generateTwoStageSelfMadeGlossaryFromPdf(
     settings,
     document,
     options,
-    ['formal_terms', 'assistive_notations'],
+    themeContext,
     true,
     resolveGlossaryConcurrency(settings),
   )
 }
 
-export async function generateSelfMadeGlossaryFromPdf(
+async function generateNonVisionSelfMadeGlossaryFromPdf(
   settings: AdminSettings,
   document: ExtractedPdfDocument,
-  options: GlossaryGenerationOptions = {},
+  options: GlossaryGenerationOptions,
+  themeContext: string,
 ): Promise<SelfMadeGlossaryEntry[]> {
-  const useVision = settings.pdfExtractionUseVision
-  const isLocal = settings.translationProvider === 'local_openai'
-  const maxChars = settings.translationProvider === 'local_openai' ? MAX_LOCAL_CHARS_PER_REQUEST : MAX_CHARS_PER_REQUEST
   const pagesByNumber = new Map(document.pages.map(page => [page.page, page]))
+  const chunks = chunkPages(document.pages, false, MAX_CHARS_PER_REQUEST)
   const entries: SelfMadeGlossaryEntry[] = []
-  if (isLocal) return generateLocalSelfMadeGlossaryFromPdf(settings, document, options)
-  if (useVision) {
-    return generateTwoStageSelfMadeGlossaryFromPdf(
+  const pass: GlossaryExtractionPass = 'all'
+
+  options.onProgress?.({
+    step: 'chunk_start',
+    chunkIndex: 0,
+    chunkCount: chunks.length,
+    pages: [],
+    pass,
+    message: `${pass}: pass started (${chunks.length} chunks)`,
+  })
+
+  for (let i = 0; i < chunks.length; i += 1) {
+    const pages = chunks[i]
+    const candidates = await requestCandidateChunk(
       settings,
       document,
-      options,
-      ['all'],
+      pages,
       false,
-      resolveGlossaryConcurrency(settings),
-    )
-  }
-
-  const chunks = isLocal
-    ? document.pages.map(page => [page])
-    : chunkPages(document.pages, useVision, maxChars)
-  const passes: GlossaryExtractionPass[] = isLocal
-    ? ['formal_terms', 'assistive_notations', 'references_and_noise']
-    : ['all']
-
-  for (const pass of passes) {
-    options.onProgress?.({
-      step: 'chunk_start',
-      chunkIndex: 0,
-      chunkCount: chunks.length,
-      pages: [],
+      MAX_CHARS_PER_REQUEST,
+      themeContext,
+      i,
+      chunks.length,
       pass,
-      message: `${pass}: pass started (${chunks.length} chunks)`,
-    })
-    for (let i = 0; i < chunks.length; i += 1) {
-      const pages = chunks[i]
-      const raw = await requestGlossaryWithFallback(settings, document, pages, useVision, maxChars, i, chunks.length, pass, options.onProgress)
+      options.onProgress,
+    )
+    if (candidates.length === 0) continue
+
+    const batches = batchCandidates(candidates, LOCAL_DETAIL_BATCH_SIZE)
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      const raw = await requestDetailBatchWithFallback(
+        settings,
+        document,
+        batches[batchIndex],
+        themeContext,
+        i,
+        chunks.length,
+        batchIndex,
+        batches.length,
+        pass,
+        options.onProgress,
+      )
       const normalizedBatch = raw
         .map(entry => normalizeEntry(entry, document, pagesByNumber))
         .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
@@ -1339,14 +1152,6 @@ export async function generateSelfMadeGlossaryFromPdf(
         options.onEntries?.(normalizedBatch)
       }
     }
-    options.onProgress?.({
-      step: 'chunk_done',
-      chunkIndex: chunks.length - 1,
-      chunkCount: chunks.length,
-      pages: [],
-      pass,
-      message: `${pass}: pass completed`,
-    })
   }
 
   options.onProgress?.({
@@ -1354,8 +1159,48 @@ export async function generateSelfMadeGlossaryFromPdf(
     chunkIndex: chunks.length - 1,
     chunkCount: chunks.length,
     pages: [],
-    pass: 'all',
-    message: `glossary generation completed: ${entries.length} entries`,
+    pass,
+    message: `${pass}: pass completed (${entries.length} entries)`,
   })
   return entries
+}
+
+export async function generateSelfMadeGlossaryFromPdf(
+  settings: AdminSettings,
+  document: ExtractedPdfDocument,
+  options: GlossaryGenerationOptions = {},
+): Promise<SelfMadeGlossaryEntry[]> {
+  // 処理 0: 講義主題の事前把握
+  let themeContext = ''
+  try {
+    const theme = await extractDocumentTheme(settings, document, options.onProgress)
+    themeContext = theme.promptContext
+  } catch (error) {
+    options.onProgress?.({
+      step: 'theme_done',
+      chunkIndex: 0,
+      chunkCount: 1,
+      pages: [],
+      pass: 'theme',
+      message: `theme extraction failed; continuing without context: ${error instanceof Error ? error.message : String(error)}`,
+    })
+  }
+
+  const useVision = settings.pdfExtractionUseVision
+  const isLocal = settings.translationProvider === 'local_openai'
+
+  if (isLocal) {
+    return generateLocalSelfMadeGlossaryFromPdf(settings, document, options, themeContext)
+  }
+  if (useVision) {
+    return generateTwoStageSelfMadeGlossaryFromPdf(
+      settings,
+      document,
+      options,
+      themeContext,
+      false,
+      resolveGlossaryConcurrency(settings),
+    )
+  }
+  return generateNonVisionSelfMadeGlossaryFromPdf(settings, document, options, themeContext)
 }

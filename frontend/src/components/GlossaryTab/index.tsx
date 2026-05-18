@@ -53,7 +53,7 @@ export function GlossaryTab({
   const [isDragOver, setIsDragOver] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [importMsg, setImportMsg] = useState<string | null>(null)
-  const [selfMadeFilter, setSelfMadeFilter] = useState<'active' | 'formal' | 'assistive' | 'formula' | 'shape' | 'reference' | 'generic' | 'disabled' | 'all'>('active')
+  const [selfMadeFilter, setSelfMadeFilter] = useState<'active' | 'formal' | 'assistive' | 'term' | 'proper_noun' | 'formula' | 'abbreviation' | 'reference' | 'disabled' | 'all'>('active')
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteTarget | null>(null)
   const isBusy = isImporting || isGenerating
 
@@ -61,23 +61,25 @@ export function GlossaryTab({
     { value: 'active', label: '有効' },
     { value: 'formal', label: '正式候補' },
     { value: 'assistive', label: '補正用' },
+    { value: 'term', label: '専門用語' },
+    { value: 'proper_noun', label: '固有名詞' },
     { value: 'formula', label: '数式' },
-    { value: 'shape', label: 'サイズ表記' },
-    { value: 'reference', label: '引用/URL' },
-    { value: 'generic', label: '一般語' },
+    { value: 'abbreviation', label: '略語' },
+    { value: 'reference', label: '参照/URL' },
     { value: 'disabled', label: '無効' },
     { value: 'all', label: 'すべて' },
   ]
 
   const filteredSelfMadeGlossary = selfMadeGlossary.filter(entry => {
     if (selfMadeFilter === 'all') return true
-    if (selfMadeFilter === 'active') return !entry.disabled && entry.entryClass !== 'reference' && entry.entryClass !== 'noise'
+    if (selfMadeFilter === 'active') return !entry.disabled && entry.category !== 'reference'
     if (selfMadeFilter === 'formal') return !entry.disabled && entry.formalEligible
     if (selfMadeFilter === 'assistive') return !entry.disabled && entry.assistiveEligible && !entry.formalEligible
-    if (selfMadeFilter === 'formula') return !entry.disabled && (entry.kind === 'formula' || entry.entryClass === 'formula_reading')
-    if (selfMadeFilter === 'shape') return !entry.disabled && entry.entryClass === 'shape_notation'
-    if (selfMadeFilter === 'reference') return entry.entryClass === 'reference'
-    if (selfMadeFilter === 'generic') return entry.entryClass === 'generic_word'
+    if (selfMadeFilter === 'term') return !entry.disabled && entry.category === 'term'
+    if (selfMadeFilter === 'proper_noun') return !entry.disabled && entry.category === 'proper_noun'
+    if (selfMadeFilter === 'formula') return !entry.disabled && entry.category === 'formula'
+    if (selfMadeFilter === 'abbreviation') return !entry.disabled && entry.category === 'abbreviation'
+    if (selfMadeFilter === 'reference') return entry.category === 'reference'
     if (selfMadeFilter === 'disabled') return entry.disabled
     return true
   })
@@ -279,15 +281,13 @@ export function GlossaryTab({
     return page ? `${entry.source.name} p.${page}` : entry.source.name
   }
 
-  const entryClassLabel = (entry: SelfMadeGlossaryEntry) => {
-    switch (entry.entryClass) {
-      case 'formal_term': return '正式候補'
-      case 'assistive_notation': return '補正用'
-      case 'formula_reading': return '数式読み'
-      case 'shape_notation': return 'サイズ表記'
-      case 'reference': return '引用/URL'
-      case 'generic_word': return '一般語'
-      case 'noise': return 'ノイズ'
+  const categoryLabel = (entry: SelfMadeGlossaryEntry) => {
+    switch (entry.category) {
+      case 'term': return '専門用語'
+      case 'proper_noun': return '固有名詞'
+      case 'formula': return '数式'
+      case 'abbreviation': return '略語'
+      case 'reference': return '参照/URL'
       default: return '候補'
     }
   }
@@ -297,6 +297,7 @@ export function GlossaryTab({
       case 'document': return 'PDF'
       case 'vision': return 'Vision'
       case 'llm_inferred': return 'LLM推定'
+      case 'llm_translation': return 'LLM翻訳'
       case 'manual': return '手動'
       case 'missing': return '未取得'
       default: return '不明'
@@ -733,11 +734,8 @@ export function GlossaryTab({
           opacity: entry.disabled ? 0.65 : 1,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, color: theme.textMuted, border: `1px solid ${theme.panelBorder}`, borderRadius: 4, padding: '1px 5px' }}>
-              {entry.kind === 'formula' ? '数式' : entry.kind === 'abbreviation' ? '略語' : '用語'}
-            </span>
             <span style={{ fontSize: 11, color: entry.formalEligible ? theme.savedColor : theme.textMuted, border: `1px solid ${theme.panelBorder}`, borderRadius: 4, padding: '1px 5px' }}>
-              {entryClassLabel(entry)}
+              {categoryLabel(entry)}
             </span>
             <span style={{ fontSize: 15, fontWeight: 700, color: theme.textPrimary }}>
               {entry.ja || entry.displayText || entry.formula || '(日本語未設定)'}
