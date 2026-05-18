@@ -58,3 +58,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only dev helper scripts (個人開発環境ツール、共有不要)
+scripts/setup-worktree.ps1
