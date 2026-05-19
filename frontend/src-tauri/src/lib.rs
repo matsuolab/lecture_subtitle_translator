@@ -37,6 +37,7 @@ pub fn run() {
             transcribe_local,
             extract_audio,
             http_request,
+            inspect_video_file,
             register_video,
         ])
         .on_window_event(|window, event| {
@@ -685,6 +686,39 @@ fn generate_video_token() -> String {
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes).expect("getrandom failed");
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoFileDiagnostic {
+    exists: bool,
+    is_file: bool,
+    size_bytes: Option<u64>,
+    open_ok: bool,
+    open_error: Option<String>,
+}
+
+#[tauri::command]
+fn inspect_video_file(path: String) -> VideoFileDiagnostic {
+    let path_buf = PathBuf::from(&path);
+    let metadata = fs::metadata(&path_buf);
+    let (exists, is_file, size_bytes) = match metadata {
+        Ok(meta) => (true, meta.is_file(), Some(meta.len())),
+        Err(_) => (path_buf.exists(), false, None),
+    };
+    let open_result = OpenOptions::new().read(true).open(&path_buf);
+    let (open_ok, open_error) = match open_result {
+        Ok(_) => (true, None),
+        Err(err) => (false, Some(err.to_string())),
+    };
+
+    VideoFileDiagnostic {
+        exists,
+        is_file,
+        size_bytes,
+        open_ok,
+        open_error,
+    }
 }
 
 #[tauri::command]

@@ -41,6 +41,26 @@ type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
 type VideoSource = { name: string; path?: string; file?: File }
 type PendingVideoLoad = { name: string; load: () => void }
+type VideoFileDiagnostic = {
+  exists: boolean
+  isFile: boolean
+  sizeBytes: number | null
+  openOk: boolean
+  openError: string | null
+}
+type VideoLoadDiagnostic = {
+  sourceKind: 'file' | 'path'
+  name: string
+  originalPath?: string
+  generatedUrl: string
+  convertedUrl?: string
+  userAgent: string
+  hasEncodedSlash: boolean
+  hasNonAsciiPath: boolean
+  hasWhitespacePath: boolean
+  hasUrlSpecialPath: boolean
+  file?: VideoFileDiagnostic | null
+}
 
 function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
   return blocks.map((block) => ({
@@ -51,6 +71,23 @@ function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
     correctionAttempts: block.correctionAttempts ? block.correctionAttempts.map((attempt) => ({ ...attempt })) : undefined,
     editHistory: block.editHistory ? block.editHistory.map((entry) => ({ ...entry })) : undefined,
   }))
+}
+
+function encodeAssetPathBySegment(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  return normalized.split('/').map(segment => encodeURIComponent(segment)).join('/')
+}
+
+function buildMacAssetUrl(path: string): string {
+  return `asset://localhost${encodeAssetPathBySegment(path)}`
+}
+
+function buildPathFlags(path: string) {
+  return {
+    hasNonAsciiPath: /[^\x00-\x7F]/.test(path),
+    hasWhitespacePath: /\s/.test(path),
+    hasUrlSpecialPath: /[#?%]/.test(path),
+  }
 }
 
 function uniqueNonEmpty(values: Array<string | undefined>): string[] {
@@ -280,6 +317,7 @@ export default function App() {
         }
       : null,
   )
+  const [videoDiagnostic, setVideoDiagnostic] = useState<VideoLoadDiagnostic | null>(null)
   const [pendingVideoLoad, setPendingVideoLoad] = useState<PendingVideoLoad | null>(null)
   const [isDragOverRight, setIsDragOverRight] = useState(false)
   const lastHtmlDropRef = useRef(0)
@@ -386,9 +424,33 @@ export default function App() {
   const loadVideoFile = useCallback((file: File) => {
     lastHtmlDropRef.current = Date.now()
     setVideoSource({ name: file.name, file })
+    const url = URL.createObjectURL(file)
+    setVideoDiagnostic({
+      sourceKind: 'file',
+      name: file.name,
+      generatedUrl: url,
+      userAgent: navigator.userAgent,
+      hasEncodedSlash: /%2F/i.test(url),
+      hasNonAsciiPath: /[^\x00-\x7F]/.test(file.name),
+      hasWhitespacePath: /\s/.test(file.name),
+      hasUrlSpecialPath: /[#?%]/.test(file.name),
+      file: {
+        exists: true,
+        isFile: true,
+        sizeBytes: file.size,
+        openOk: true,
+        openError: null,
+      },
+    })
+    console.info('[video][diag] load file object', {
+      name: file.name,
+      sizeBytes: file.size,
+      url,
+      userAgent: navigator.userAgent,
+    })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
-      return URL.createObjectURL(file)
+      return url
     })
   }, [])
 
@@ -396,28 +458,22 @@ export default function App() {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
     // 各OSのWebView動作:
-    //   Windows (WebView2/Chromium): convertFileSrc → http://asset.localhost/<encodeURIComponent(path)> で動作
-    //   macOS (WKWebView): convertFileSrc は path 全体を encodeURIComponent するため "/" が "%2F" となり
-    //     WKWebView がパス区切りを認識できず MEDIA_ERR_SRC_NOT_SUPPORTED になる。
-    //     → 各セグメントを個別に encodeURIComponent して "/" を残したまま手動で URL を構築する。
-    //   Linux (WebKitGTK): asset://がGStreamer経由のメディアロードで機能しない
-    //     → ローカルHTTPサーバ(127.0.0.1) からRange対応で配信
-    // ※ Linux以外を一律HTTPサーバにすると macOS の ATS で別問題が出るため、Linuxのみ分岐
+    //   Windows (WebView2/Chromium): convertFileSrc → http://asset.localhost/... で動作
+    //   macOS (WKWebView): slash を "%2F" に潰すと asset protocol が実パスを解決できないため、
+    //     path segment 単位で encodeURIComponent し、"/Users/..." の区切りを残す。
+    //   Linux (WebKitGTK): asset:// / local HTTP とも動画プレビュー未解決のため既存経路を維持。
     const isLinux = /\bLinux\b/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)
     const isMac = /Mac/.test(navigator.userAgent) && !isLinux
     let url: string
-    if (!isLinux) {
-      if (isMac) {
-        const encodedPath = path.split('/').map(encodeURIComponent).join('/')
-        url = `asset://localhost${encodedPath}`
-      } else {
-        url = convertFileSrc(path)
-      }
+    const convertedUrl = convertFileSrc(path)
+    if (isMac) {
+      url = buildMacAssetUrl(path)
+    } else if (!isLinux) {
+      url = convertedUrl
     } else {
       try {
         url = await invoke<string>('register_video', { path })
         console.info('[video] using local HTTP server URL:', url)
-        // 診断: JSのfetchで /healthz と HEAD /video を試して、CSPで弾かれてるか実通信失敗か切り分け
         try {
           const base = url.replace(/\/video\/.+$/, '')
           const healthRes = await fetch(`${base}/healthz`)
@@ -434,6 +490,33 @@ export default function App() {
         return
       }
     }
+
+    let fileDiagnostic: VideoFileDiagnostic | null = null
+    try {
+      fileDiagnostic = await invoke<VideoFileDiagnostic>('inspect_video_file', { path })
+    } catch (err) {
+      fileDiagnostic = {
+        exists: false,
+        isFile: false,
+        sizeBytes: null,
+        openOk: false,
+        openError: describeError(err),
+      }
+    }
+    const pathFlags = buildPathFlags(path)
+    const diagnostic: VideoLoadDiagnostic = {
+      sourceKind: 'path',
+      name,
+      originalPath: path,
+      generatedUrl: url,
+      convertedUrl,
+      userAgent: navigator.userAgent,
+      hasEncodedSlash: /%2F/i.test(url),
+      ...pathFlags,
+      file: fileDiagnostic,
+    }
+    setVideoDiagnostic(diagnostic)
+    console.info('[video][diag] load path', diagnostic)
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return url
@@ -1734,6 +1817,7 @@ export default function App() {
             isPlaying={isPlaying}
             totalDuration={duration}
             onLoadVideo={handleVideoInput}
+            videoDiagnostic={videoDiagnostic}
             onTogglePlay={togglePlay}
             onSeek={seekTo}
             subtitleOverlay={subtitleOverlay}
