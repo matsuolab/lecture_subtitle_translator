@@ -1,6 +1,7 @@
 import type { AdminSettings, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
+import { normalizeConcurrency } from '@/lib/concurrency'
 
 const STORAGE_KEY = 'subtitle-editor.admin-settings.v4'
 const ENV_SERVICE_URL = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -26,7 +27,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     pdfExtractionVisionModel: 'gpt-5.4-mini',
     pdfExtractionParallel: false,
     glossaryMaxOutputTokens: 4096,
-    glossaryRequestConcurrency: 7,
+    apiRequestConcurrency: 7,
     embeddingModel: 'text-embedding-3-small',
     semanticCheckMode: 'log_only',
     logRetentionCount: null,
@@ -118,7 +119,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pdfExtractionVisionModel: typeof raw.pdfExtractionVisionModel === 'string' && raw.pdfExtractionVisionModel ? raw.pdfExtractionVisionModel : defaults.pdfExtractionVisionModel,
     pdfExtractionParallel: typeof raw.pdfExtractionParallel === 'boolean' ? raw.pdfExtractionParallel : defaults.pdfExtractionParallel,
     glossaryMaxOutputTokens: normalizeBoundedInteger(raw.glossaryMaxOutputTokens, defaults.glossaryMaxOutputTokens, 256, 16384),
-    glossaryRequestConcurrency: normalizeBoundedInteger(raw.glossaryRequestConcurrency, defaults.glossaryRequestConcurrency, 1, 20),
+    apiRequestConcurrency: normalizeConcurrency(raw.apiRequestConcurrency, defaults.apiRequestConcurrency),
     embeddingModel: typeof raw.embeddingModel === 'string' && raw.embeddingModel ? raw.embeddingModel : defaults.embeddingModel,
     semanticCheckMode: normalizeSemanticCheckMode(raw.semanticCheckMode),
     logRetentionCount: typeof raw.logRetentionCount === 'number' ? raw.logRetentionCount : null,

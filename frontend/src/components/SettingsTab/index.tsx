@@ -541,15 +541,14 @@ export function SettingsTab({
           </div>
           <NumberField
             theme={theme}
-            label="辞書生成: API 並列リクエスト数"
-            value={adminSettings.glossaryRequestConcurrency}
+            label="並列リクエスト数"
+            value={adminSettings.apiRequestConcurrency}
             min={1}
             step={1}
-            onChange={(value) => onAdminSettingsChange({ glossaryRequestConcurrency: Math.trunc(value) })}
+            onChange={(value) => onAdminSettingsChange({ apiRequestConcurrency: Math.trunc(value) })}
           />
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
-            辞書タブで並列化をONにしたとき、同時に投げる API リクエスト数。1〜20。
-            OpenAI Tier1: 4 推奨 / Tier2: 7 / Tier3 以上: 10+。429 が出たら下げます。ローカル LLM もこの値を使います。
+            APIの並列処理限界設定。エラーが出る場合は下げてください。
           </div>
           <ComboField
             theme={theme}

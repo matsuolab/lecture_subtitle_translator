@@ -228,7 +228,7 @@ export function HelpTab() {
               'OpenAI Compatible Base URL: OpenAI互換APIを使う場合だけ入力します。通常は空欄です。',
               '用語辞書: CSV/XLSXを読み込み、確定済み用語をハイライト・用語漏れ・タイポ候補に使います。',
               'PDF辞書作成で数式・図表・画像化文字の抽出精度を上げたい場合は、辞書タブで Vision LLM を有効にし、設定タブの PDF抽出Visionモデル にVision対応モデルIDを指定します。',
-              'PDF辞書作成の並列化ON/OFFは辞書タブで切り替えます。API並列リクエスト数は設定タブで調整します。OFFでは1ページずつ処理します。',
+              'PDF辞書作成の並列化ON/OFFは辞書タブで切り替えます。並列リクエスト数は設定タブで調整します。OFFでは1ページずつ処理します。',
             ]} />
           </SectionCard>
 
@@ -250,7 +250,7 @@ export function HelpTab() {
                     ['enMaxCps', '16.9'],
                     ['pipelineVerboseEnRatio', '1.5'],
                     ['glossaryMaxOutputTokens', '4096'],
-                    ['glossaryRequestConcurrency', '7'],
+                    ['apiRequestConcurrency', '7'],
                   ].map(([key, value]) => (
                     <tr key={key} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
                       <td style={{ padding: '5px 8px', color: theme.textPrimary, fontWeight: 700, whiteSpace: 'nowrap' }}>{key}</td>
