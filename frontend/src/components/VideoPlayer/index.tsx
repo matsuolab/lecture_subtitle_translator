@@ -14,11 +14,21 @@ interface VideoLoadDiagnostic {
   originalPath?: string
   generatedUrl: string
   convertedUrl?: string
+  assetSegments?: string[]
   userAgent: string
   hasEncodedSlash: boolean
   hasNonAsciiPath: boolean
   hasWhitespacePath: boolean
   hasUrlSpecialPath: boolean
+  assetReachable: 'ok' | 'denied' | 'error' | 'skipped'
+  assetHeadStatus: number | null
+  assetHeadError: string | null
+  fallbackUrl?: string
+  fallbackRegistered: boolean
+  fallbackHeadStatus: number | null
+  fallbackHeadContentType: string | null
+  fallbackHeadError: string | null
+  fallbackAttempted: boolean
   file?: {
     exists: boolean
     isFile: boolean
@@ -53,6 +63,18 @@ function classifyVideoError(detail: string, src: string, diagnostic?: VideoLoadD
   }
   if (diagnostic?.file && (!diagnostic.file.exists || !diagnostic.file.isFile || !diagnostic.file.openOk)) {
     return `ファイルアクセス候補: ${diagnostic.file.openError ?? 'ファイルを開けません'}`
+  }
+  if (diagnostic?.assetReachable === 'denied') {
+    return `asset scope候補: Tauri asset protocolが ${diagnostic.assetHeadStatus ?? 'unknown'} を返しURL未解決`
+  }
+  if (diagnostic?.assetReachable === 'error') {
+    return `asset fetch候補: HEADリクエスト失敗 (${diagnostic.assetHeadError ?? 'unknown'})`
+  }
+  if (src.startsWith('http://127.0.0.1:') && detail.includes('MEDIA_ERR_SRC_NOT_SUPPORTED')) {
+    return 'localhost fallback候補: HTTP Range経路でも動画ソースとして受け付けられていません'
+  }
+  if (diagnostic?.assetReachable === 'ok' && src.startsWith('asset://') && detail.includes('MEDIA_ERR_SRC_NOT_SUPPORTED')) {
+    return 'WKWebView候補: asset HEADは成功したが<video>要素がメディアとして受け付けていません'
   }
   if (src.startsWith('asset://') && detail.includes('MEDIA_ERR_SRC_NOT_SUPPORTED')) {
     return 'asset protocol候補: Mac WebViewがこのasset URLを動画ソースとして読めていません'

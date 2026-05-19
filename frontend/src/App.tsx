@@ -26,6 +26,7 @@ import {
 import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
 import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/pipelineClient'
 import { describeError } from '@/lib/describeError'
+import { buildMacAssetUrl } from '@/lib/video/macAssetUrl'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
@@ -41,6 +42,7 @@ type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
 type VideoSource = { name: string; path?: string; file?: File }
 type PendingVideoLoad = { name: string; load: () => void }
+type AssetReachable = 'ok' | 'denied' | 'error' | 'skipped'
 type VideoFileDiagnostic = {
   exists: boolean
   isFile: boolean
@@ -54,12 +56,22 @@ type VideoLoadDiagnostic = {
   originalPath?: string
   generatedUrl: string
   convertedUrl?: string
+  assetSegments?: string[]
   userAgent: string
   hasEncodedSlash: boolean
   hasNonAsciiPath: boolean
   hasWhitespacePath: boolean
   hasUrlSpecialPath: boolean
   file?: VideoFileDiagnostic | null
+  assetReachable: AssetReachable
+  assetHeadStatus: number | null
+  assetHeadError: string | null
+  fallbackUrl?: string
+  fallbackRegistered: boolean
+  fallbackHeadStatus: number | null
+  fallbackHeadContentType: string | null
+  fallbackHeadError: string | null
+  fallbackAttempted: boolean
 }
 
 function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
@@ -73,20 +85,59 @@ function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
   }))
 }
 
-function encodeAssetPathBySegment(path: string): string {
-  const normalized = path.replace(/\\/g, '/')
-  return normalized.split('/').map(segment => encodeURIComponent(segment)).join('/')
-}
-
-function buildMacAssetUrl(path: string): string {
-  return `asset://localhost${encodeAssetPathBySegment(path)}`
-}
-
 function buildPathFlags(path: string) {
   return {
     hasNonAsciiPath: /[^\x00-\x7F]/.test(path),
     hasWhitespacePath: /\s/.test(path),
     hasUrlSpecialPath: /[#?%]/.test(path),
+  }
+}
+
+async function probeAssetHead(url: string): Promise<{
+  assetReachable: AssetReachable
+  assetHeadStatus: number | null
+  assetHeadError: string | null
+}> {
+  if (!url.startsWith('asset://')) {
+    return { assetReachable: 'skipped', assetHeadStatus: null, assetHeadError: null }
+  }
+  try {
+    const head = await fetch(url, { method: 'HEAD' })
+    return {
+      assetReachable: head.ok ? 'ok' : 'denied',
+      assetHeadStatus: head.status,
+      assetHeadError: null,
+    }
+  } catch (err) {
+    return {
+      assetReachable: 'error',
+      assetHeadStatus: null,
+      assetHeadError: describeError(err),
+    }
+  }
+}
+
+async function probeHttpVideoUrl(url: string): Promise<{
+  fallbackHeadStatus: number | null
+  fallbackHeadContentType: string | null
+  fallbackHeadError: string | null
+}> {
+  try {
+    const base = url.replace(/\/video\/.+$/, '')
+    const healthRes = await fetch(`${base}/healthz`)
+    console.info('[video][diag] fallback /healthz fetch:', healthRes.status, await healthRes.text())
+    const headRes = await fetch(url, { method: 'HEAD' })
+    return {
+      fallbackHeadStatus: headRes.status,
+      fallbackHeadContentType: headRes.headers.get('content-type'),
+      fallbackHeadError: null,
+    }
+  } catch (err) {
+    return {
+      fallbackHeadStatus: null,
+      fallbackHeadContentType: null,
+      fallbackHeadError: describeError(err),
+    }
   }
 }
 
@@ -441,6 +492,14 @@ export default function App() {
         openOk: true,
         openError: null,
       },
+      assetReachable: 'skipped',
+      assetHeadStatus: null,
+      assetHeadError: null,
+      fallbackRegistered: false,
+      fallbackHeadStatus: null,
+      fallbackHeadContentType: null,
+      fallbackHeadError: null,
+      fallbackAttempted: false,
     })
     console.info('[video][diag] load file object', {
       name: file.name,
@@ -465,30 +524,64 @@ export default function App() {
     const isLinux = /\bLinux\b/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)
     const isMac = /Mac/.test(navigator.userAgent) && !isLinux
     let url: string
+    let assetSegments: string[] | undefined
+    let fallbackUrl: string | undefined
+    let fallbackRegistered = false
+    let fallbackAttempted = false
+    let fallbackHeadStatus: number | null = null
+    let fallbackHeadContentType: string | null = null
+    let fallbackHeadError: string | null = null
     const convertedUrl = convertFileSrc(path)
     if (isMac) {
-      url = buildMacAssetUrl(path)
+      const macAsset = buildMacAssetUrl(path)
+      url = macAsset.url
+      assetSegments = macAsset.segments
+      try {
+        fallbackUrl = await invoke<string>('register_video', { path })
+        fallbackRegistered = true
+        const fallbackProbe = await probeHttpVideoUrl(fallbackUrl)
+        fallbackHeadStatus = fallbackProbe.fallbackHeadStatus
+        fallbackHeadContentType = fallbackProbe.fallbackHeadContentType
+        fallbackHeadError = fallbackProbe.fallbackHeadError
+        console.info('[video][diag] mac fallback registered', {
+          primaryUrl: url,
+          fallbackUrl,
+          fallbackHeadStatus,
+          fallbackHeadContentType,
+          fallbackHeadError,
+        })
+      } catch (err) {
+        fallbackHeadError = describeError(err)
+        console.error('[video][diag] mac fallback register_video failed:', fallbackHeadError)
+      }
     } else if (!isLinux) {
       url = convertedUrl
     } else {
       try {
         url = await invoke<string>('register_video', { path })
         console.info('[video] using local HTTP server URL:', url)
-        try {
-          const base = url.replace(/\/video\/.+$/, '')
-          const healthRes = await fetch(`${base}/healthz`)
-          console.info('[video][diag] /healthz fetch:', healthRes.status, await healthRes.text())
-          const headRes = await fetch(url, { method: 'HEAD' })
-          console.info('[video][diag] HEAD /video:', headRes.status, 'content-type:', headRes.headers.get('content-type'))
-        } catch (diagErr) {
-          console.error('[video][diag] direct fetch failed (likely CSP block):', diagErr)
-        }
+        const httpProbe = await probeHttpVideoUrl(url)
+        fallbackHeadStatus = httpProbe.fallbackHeadStatus
+        fallbackHeadContentType = httpProbe.fallbackHeadContentType
+        fallbackHeadError = httpProbe.fallbackHeadError
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error('[video] register_video failed:', msg)
         alert(`動画読込失敗: register_video → ${msg}`)
         return
       }
+    }
+
+    const assetProbe = await probeAssetHead(url)
+    if (isMac && fallbackUrl && assetProbe.assetReachable !== 'ok') {
+      console.warn('[video][diag] asset HEAD failed; using localhost fallback immediately', {
+        assetReachable: assetProbe.assetReachable,
+        assetHeadStatus: assetProbe.assetHeadStatus,
+        assetHeadError: assetProbe.assetHeadError,
+        fallbackUrl,
+      })
+      url = fallbackUrl
+      fallbackAttempted = true
     }
 
     let fileDiagnostic: VideoFileDiagnostic | null = null
@@ -510,10 +603,18 @@ export default function App() {
       originalPath: path,
       generatedUrl: url,
       convertedUrl,
+      assetSegments,
       userAgent: navigator.userAgent,
       hasEncodedSlash: /%2F/i.test(url),
       ...pathFlags,
       file: fileDiagnostic,
+      ...assetProbe,
+      fallbackUrl,
+      fallbackRegistered,
+      fallbackHeadStatus,
+      fallbackHeadContentType,
+      fallbackHeadError,
+      fallbackAttempted,
     }
     setVideoDiagnostic(diagnostic)
     console.info('[video][diag] load path', diagnostic)
@@ -1090,6 +1191,33 @@ export default function App() {
     const name = path.split(/[\\/]/).pop() ?? path
     confirmAndLoadVideo(name, () => loadVideoPath(path))
   }, [confirmAndLoadVideo, loadVideoPath])
+
+  const handleVideoPlaybackError = useCallback(() => {
+    onVideoError()
+    if (!videoDiagnostic?.fallbackUrl || videoDiagnostic.fallbackAttempted || videoUrl === videoDiagnostic.fallbackUrl) {
+      return
+    }
+    const fallbackUrl = videoDiagnostic.fallbackUrl
+    console.warn('[video][diag] asset video error; switching to localhost fallback', {
+      failedUrl: videoUrl,
+      fallbackUrl,
+      assetReachable: videoDiagnostic.assetReachable,
+      assetHeadStatus: videoDiagnostic.assetHeadStatus,
+      fallbackHeadStatus: videoDiagnostic.fallbackHeadStatus,
+      fallbackHeadContentType: videoDiagnostic.fallbackHeadContentType,
+      file: videoDiagnostic.file,
+    })
+    setVideoDiagnostic({
+      ...videoDiagnostic,
+      generatedUrl: fallbackUrl,
+      hasEncodedSlash: /%2F/i.test(fallbackUrl),
+      fallbackAttempted: true,
+    })
+    setVideoUrl(prev => {
+      if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return fallbackUrl
+    })
+  }, [onVideoError, videoDiagnostic, videoUrl])
 
   const handleRunPipelineFromReport = useCallback(() => {
     if (!videoSource) return
@@ -1826,7 +1954,7 @@ export default function App() {
             onPlay={onPlay}
             onPause={onPause}
             onLoadedMetadata={onLoadedMetadata}
-            onError={onVideoError}
+            onError={handleVideoPlaybackError}
           />
           {/* 縦リサイズハンドル (動画 ↕ タイムライン) */}
           <div
