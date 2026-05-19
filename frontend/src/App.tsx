@@ -42,6 +42,7 @@ type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
 type VideoSource = { name: string; path?: string; file?: File }
 type PendingVideoLoad = { name: string; load: () => void }
+const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi']
 type AssetReachable = 'ok' | 'denied' | 'error' | 'skipped'
 type VideoFileDiagnostic = {
   exists: boolean
@@ -91,6 +92,11 @@ function buildPathFlags(path: string) {
     hasWhitespacePath: /\s/.test(path),
     hasUrlSpecialPath: /[#?%]/.test(path),
   }
+}
+
+function isVideoPathLike(pathOrName: string): boolean {
+  const lower = pathOrName.toLowerCase()
+  return VIDEO_EXTENSIONS.some(ext => lower.endsWith(ext))
 }
 
 async function probeAssetHead(url: string): Promise<{
@@ -1241,7 +1247,7 @@ export default function App() {
     if (!file) return
     const name = file.name.toLowerCase()
     // 動画ファイルはTauriネイティブD&Dハンドラに委ねる（ファイルパス取得のため）
-    if (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.mkv') || name.endsWith('.webm')) return
+    if (isVideoPathLike(name)) return
     lastHtmlDropRef.current = Date.now()
     if (name.endsWith('.srt') || name.endsWith('.txt')) {
       try {
@@ -1292,7 +1298,7 @@ export default function App() {
       const path = paths[0]
       const name = path.toLowerCase()
       try {
-        if (name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.mkv') || name.endsWith('.webm')) {
+        if (isVideoPathLike(name)) {
           handleVideoPathInput(path)
           return
         }
@@ -1321,7 +1327,7 @@ export default function App() {
           return
         }
         alert(`非対応のファイル形式です: ${path}
-対応形式: .srt, .txt, .json, .csv, .xlsx, .mp4`)
+対応形式: .srt, .txt, .json, .csv, .xlsx, ${VIDEO_EXTENSIONS.join(', ')}`)
       } catch (err) {
         alert(`読み込みに失敗しました: ${describeError(err)}`)
       }
@@ -1945,6 +1951,7 @@ export default function App() {
             isPlaying={isPlaying}
             totalDuration={duration}
             onLoadVideo={handleVideoInput}
+            preferNativeVideoDrop={isTauri()}
             videoDiagnostic={videoDiagnostic}
             onTogglePlay={togglePlay}
             onSeek={seekTo}

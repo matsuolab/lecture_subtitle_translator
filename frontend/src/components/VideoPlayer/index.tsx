@@ -55,6 +55,7 @@ interface VideoPlayerProps {
   onLoadedMetadata: () => void
   onError: () => void
   videoDiagnostic?: VideoLoadDiagnostic | null
+  preferNativeVideoDrop?: boolean
 }
 
 function classifyVideoError(detail: string, src: string, diagnostic?: VideoLoadDiagnostic | null): string {
@@ -102,6 +103,7 @@ export function VideoPlayer({
   onLoadedMetadata,
   onError,
   videoDiagnostic,
+  preferNativeVideoDrop = false,
 }: VideoPlayerProps) {
   const { theme } = useTheme()
   const seekBarRef = useRef<HTMLDivElement>(null)
@@ -129,9 +131,10 @@ export function VideoPlayer({
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
+    if (preferNativeVideoDrop) return
     const file = e.dataTransfer.files[0]
     if (file) onLoadVideo(file)
-  }, [onLoadVideo])
+  }, [onLoadVideo, preferNativeVideoDrop])
   const progress = totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0
 
   const handleSeekMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
