@@ -4,6 +4,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
+import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 
 const MAX_SEGMENTS_PER_REQUEST = 20
 const COUNT_MISMATCH_RE = /correction API returned (\d+) items for (\d+) inputs/
@@ -236,15 +237,20 @@ async function correctWithLlm(
   glossaryTerms: string[],
   threshold: number,
   maxSegmentsPerRequest: number,
+  requestConcurrency: number,
 ): Promise<CorrectedSegmentLite[]> {
   const inputs = segments.map((seg) => ({ id: seg.id ?? 0, text: seg.text ?? '' }))
-  const correctedTexts: string[] = []
+  const batches: Array<Array<{ id: number; text: string }>> = []
 
   for (let start = 0; start < inputs.length; start += maxSegmentsPerRequest) {
-    const batch = inputs.slice(start, start + maxSegmentsPerRequest)
-    const batchResults = await correctBatchWithFallback(batch, glossaryTerms, apiKey, baseUrl, model)
-    correctedTexts.push(...batchResults)
+    batches.push(inputs.slice(start, start + maxSegmentsPerRequest))
   }
+  const batchResults = await mapWithConcurrency(
+    batches.length,
+    requestConcurrency,
+    (index) => correctBatchWithFallback(batches[index], glossaryTerms, apiKey, baseUrl, model),
+  )
+  const correctedTexts = batchResults.flat()
 
   return segments.map((seg, idx) => {
     const source = seg.text ?? ''
@@ -273,5 +279,15 @@ export async function correctSegments(
     : MAX_SEGMENTS_PER_REQUEST
 
   const threshold = options.threshold ?? 0.2
-  return correctWithLlm(segments, connection.apiKey, connection.baseUrl, model, glossaryTerms, threshold, maxSegmentsPerRequest)
+  const requestConcurrency = normalizeConcurrency(settings.apiRequestConcurrency, 1)
+  return correctWithLlm(
+    segments,
+    connection.apiKey,
+    connection.baseUrl,
+    model,
+    glossaryTerms,
+    threshold,
+    maxSegmentsPerRequest,
+    requestConcurrency,
+  )
 }

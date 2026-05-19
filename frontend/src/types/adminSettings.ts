@@ -17,7 +17,7 @@ export interface AdminSettings {
   pdfExtractionVisionModel: string
   pdfExtractionParallel: boolean
   glossaryMaxOutputTokens: number
-  glossaryRequestConcurrency: number
+  apiRequestConcurrency: number
   embeddingModel: string
   // セマンティックチェック（圧縮前後の意味類似度を Embedding で計測）
   semanticCheckMode: SemanticCheckMode

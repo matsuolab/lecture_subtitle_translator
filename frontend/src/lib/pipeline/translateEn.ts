@@ -6,6 +6,7 @@ import { pickTranslateSystemPrompt, resolveTranslateModelId } from './prompts'
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
+import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 
 const MAX_SEGMENTS_PER_REQUEST = 40
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
@@ -36,6 +37,7 @@ function resolveApiConfig(settings: AdminSettings): {
   model: string
   systemPrompt: string
   maxSegmentsPerRequest: number
+  requestConcurrency: number
 } {
   const connection = requireAiConnection(settings)
   const model = requireChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel), 'translation')
@@ -49,6 +51,7 @@ function resolveApiConfig(settings: AdminSettings): {
     model,
     systemPrompt: pickTranslateSystemPrompt(model),
     maxSegmentsPerRequest,
+    requestConcurrency: normalizeConcurrency(settings.apiRequestConcurrency, 1),
   }
 }
 
@@ -180,12 +183,16 @@ async function translateInBatches(
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
 ): Promise<string[]> {
-  const translated: string[] = []
+  const batches: string[][] = []
   for (let start = 0; start < texts.length; start += config.maxSegmentsPerRequest) {
-    const batch = texts.slice(start, start + config.maxSegmentsPerRequest)
-    translated.push(...(await translateBatchWithFallback(batch, config, glossaryTerms)))
+    batches.push(texts.slice(start, start + config.maxSegmentsPerRequest))
   }
-  return translated
+  const results = await mapWithConcurrency(
+    batches.length,
+    config.requestConcurrency,
+    (index) => translateBatchWithFallback(batches[index], config, glossaryTerms),
+  )
+  return results.flat()
 }
 
 export async function translateEn(blocks: JaBlock[], settings: AdminSettings, glossaryTerms: string[] = []): Promise<EnBlock[]> {

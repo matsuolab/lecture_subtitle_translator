@@ -21,6 +21,7 @@ import type {
 } from '@/context/GlossaryContext'
 import { requireAiConnection, requireChatModelForProvider, resolveChatCompletionTokenLimitForProvider, resolveJsonResponseFormatForProvider } from '@/lib/pipeline/aiProvider'
 import { parseJsonObjectFromLlmContent } from '@/lib/pipeline/jsonResponse'
+import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { tauriFetch } from '@/lib/tauriFetch'
 import type { AdminSettings } from '@/types/adminSettings'
 
@@ -120,8 +121,6 @@ const LOCAL_DETAIL_BATCH_SIZE = 5
 
 const MIN_GLOSSARY_OUTPUT_TOKENS = 256
 const MAX_GLOSSARY_OUTPUT_TOKENS = 16384
-const MIN_GLOSSARY_CONCURRENCY = 1
-const MAX_GLOSSARY_CONCURRENCY = 20
 
 /** 講義主題把握で読み込む最大ページ数 (タイトル・目次・はじめに想定) */
 const THEME_PROBE_MAX_PAGES = 5
@@ -138,7 +137,7 @@ function resolveGlossaryMaxOutputTokens(settings: AdminSettings): number {
 
 function resolveGlossaryConcurrency(settings: AdminSettings): number {
   if (!settings.pdfExtractionParallel) return 1
-  return clamp(Math.trunc(settings.glossaryRequestConcurrency), MIN_GLOSSARY_CONCURRENCY, MAX_GLOSSARY_CONCURRENCY)
+  return normalizeConcurrency(settings.apiRequestConcurrency, 1)
 }
 
 export type GlossaryGenerationProgressEvent = {
@@ -194,26 +193,6 @@ function chunkPages(pages: ExtractedPdfPage[], useVision: boolean, maxChars: num
 
   if (current.length > 0) chunks.push(current)
   return chunks
-}
-
-async function mapWithConcurrency<T>(
-  count: number,
-  concurrency: number,
-  run: (index: number) => Promise<T>,
-): Promise<T[]> {
-  const results: T[] = []
-  let nextIndex = 0
-  const workerCount = Math.max(1, Math.min(concurrency, count))
-
-  await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (nextIndex < count) {
-      const index = nextIndex
-      nextIndex += 1
-      results[index] = await run(index)
-    }
-  }))
-
-  return results
 }
 
 function formatPagesForPrompt(pages: ExtractedPdfPage[], maxChars: number): string {
