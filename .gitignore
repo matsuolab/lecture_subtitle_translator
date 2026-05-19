@@ -10,6 +10,10 @@ CODEX.md
 AGENTS.md
 
 # PoC actual data (real lecture content - do not commit)
+poc/*.md
+!poc/README.md
+poc/**/*.md
+!poc/**/README.md
 poc/data/
 poc/.env
 poc/results/
