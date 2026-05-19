@@ -8,6 +8,26 @@ interface SubtitleOverlay {
   progress: number // 0-100
 }
 
+interface VideoLoadDiagnostic {
+  sourceKind: 'file' | 'path'
+  name: string
+  originalPath?: string
+  generatedUrl: string
+  convertedUrl?: string
+  userAgent: string
+  hasEncodedSlash: boolean
+  hasNonAsciiPath: boolean
+  hasWhitespacePath: boolean
+  hasUrlSpecialPath: boolean
+  file?: {
+    exists: boolean
+    isFile: boolean
+    sizeBytes: number | null
+    openOk: boolean
+    openError: string | null
+  } | null
+}
+
 interface VideoPlayerProps {
   videoRef: React.RefObject<HTMLVideoElement | null>
   videoUrl: string | null
@@ -24,6 +44,23 @@ interface VideoPlayerProps {
   onPause: () => void
   onLoadedMetadata: () => void
   onError: () => void
+  videoDiagnostic?: VideoLoadDiagnostic | null
+}
+
+function classifyVideoError(detail: string, src: string, diagnostic?: VideoLoadDiagnostic | null): string {
+  if (diagnostic?.hasEncodedSlash || /asset:\/\/localhost\/%2F/i.test(src)) {
+    return 'asset URL生成エラー候補: パス区切りが%2Fに変換されています'
+  }
+  if (diagnostic?.file && (!diagnostic.file.exists || !diagnostic.file.isFile || !diagnostic.file.openOk)) {
+    return `ファイルアクセス候補: ${diagnostic.file.openError ?? 'ファイルを開けません'}`
+  }
+  if (src.startsWith('asset://') && detail.includes('MEDIA_ERR_SRC_NOT_SUPPORTED')) {
+    return 'asset protocol候補: Mac WebViewがこのasset URLを動画ソースとして読めていません'
+  }
+  if (detail.includes('MEDIA_ERR_DECODE')) {
+    return 'メディア形式候補: コンテナまたはコーデックのデコードに失敗しています'
+  }
+  return 'メディア読み込み候補: URL・ファイルアクセス・形式の診断ログを確認してください'
 }
 
 export function VideoPlayer({
@@ -42,6 +79,7 @@ export function VideoPlayer({
   onPause,
   onLoadedMetadata,
   onError,
+  videoDiagnostic,
 }: VideoPlayerProps) {
   const { theme } = useTheme()
   const seekBarRef = useRef<HTMLDivElement>(null)
@@ -130,9 +168,17 @@ export function VideoPlayer({
               }
               const detail = err ? `${codeMap[err.code] ?? `code=${err.code}`}: ${err.message}` : 'unknown'
               const src = target.src
-              console.error('[video] onError:', detail, 'src:', src)
+              const mediaState = {
+                currentSrc: target.currentSrc,
+                networkState: target.networkState,
+                readyState: target.readyState,
+                duration: Number.isFinite(target.duration) ? target.duration : null,
+                src,
+              }
+              const cause = classifyVideoError(detail, src, videoDiagnostic)
+              console.error('[video] onError:', detail, cause, mediaState, videoDiagnostic)
               onError()
-              setDropError(`動画再生失敗: ${detail} (src=${src.slice(0, 80)}...)`)
+              setDropError(`動画再生失敗: ${cause} / ${detail} (src=${src.slice(0, 80)}...)`)
             }}
           />
         ) : (
