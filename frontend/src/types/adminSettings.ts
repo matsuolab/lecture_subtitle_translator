@@ -52,6 +52,8 @@ export interface AdminSettings {
   subtitleLanguageLabel: string
   transcriptLanguageLabel: string
   languageProfileConfigJson: string
+  textNormalizationEnabled: boolean
+  textNormalizationRulesJson: string
 
   // プロンプト上書き（'' = デフォルト使用）
   compressPromptOverride: string

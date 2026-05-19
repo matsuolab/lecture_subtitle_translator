@@ -1,5 +1,6 @@
 import type { AdminSettings, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
+import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
 
 const STORAGE_KEY = 'subtitle-editor.admin-settings.v4'
 const ENV_SERVICE_URL = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -55,6 +56,8 @@ export function getDefaultAdminSettings(): AdminSettings {
     subtitleLanguageLabel: 'English',
     transcriptLanguageLabel: 'Japanese',
     languageProfileConfigJson: DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON,
+    textNormalizationEnabled: true,
+    textNormalizationRulesJson: DEFAULT_TEXT_NORMALIZATION_RULES_JSON,
     compressPromptOverride: '',
     expandPromptOverride: '',
   }
@@ -145,6 +148,8 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     subtitleLanguageLabel: typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel ? raw.subtitleLanguageLabel : defaults.subtitleLanguageLabel,
     transcriptLanguageLabel: typeof raw.transcriptLanguageLabel === 'string' && raw.transcriptLanguageLabel ? raw.transcriptLanguageLabel : defaults.transcriptLanguageLabel,
     languageProfileConfigJson: typeof raw.languageProfileConfigJson === 'string' && raw.languageProfileConfigJson ? raw.languageProfileConfigJson : defaults.languageProfileConfigJson,
+    textNormalizationEnabled: typeof raw.textNormalizationEnabled === 'boolean' ? raw.textNormalizationEnabled : defaults.textNormalizationEnabled,
+    textNormalizationRulesJson: typeof raw.textNormalizationRulesJson === 'string' ? raw.textNormalizationRulesJson : defaults.textNormalizationRulesJson,
     compressPromptOverride: typeof raw.compressPromptOverride === 'string' ? raw.compressPromptOverride : '',
     expandPromptOverride: typeof raw.expandPromptOverride === 'string' ? raw.expandPromptOverride : '',
   }

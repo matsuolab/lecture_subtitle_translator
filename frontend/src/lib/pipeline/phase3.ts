@@ -1,10 +1,12 @@
 import type { PipelineReviewItem } from '@/types/pipeline'
 import type { SubtitleBlock } from '@/types/subtitle'
+import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock } from './blockTypes'
 import { toSubtitleBlocks } from './toSubtitleBlocks'
 import { checkTerminology } from './terminologyCheck'
 import type { PipelineThresholds } from './blockTypes'
 import { buildReviewItemsForBlock } from './reviewDiagnostics'
+import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -16,13 +18,45 @@ export interface Phase3Result {
 
 export async function runPhase3(
   enBlocks: EnBlock[],
+  settings: AdminSettings,
   glossaryTerms: string[],
   thresholds: PipelineThresholds,
   runNode: RunNode,
 ): Promise<Phase3Result> {
-  const terminology = await runNode('terminologyCheck', () => checkTerminology(enBlocks, glossaryTerms))
-  const reviewItems: PipelineReviewItem[] = enBlocks.flatMap(block => buildReviewItemsForBlock(block, thresholds))
-  const blocks = await runNode('toSubtitleBlocks', () => toSubtitleBlocks(enBlocks, reviewItems))
+  const reviewItems: PipelineReviewItem[] = []
+  let normalizedBlocks = enBlocks
+
+  if (settings.textNormalizationEnabled) {
+    try {
+      const config = parseTextNormalizationConfig(settings.textNormalizationRulesJson)
+      normalizedBlocks = await runNode('normalizeSubtitleText', () => normalizeEnBlocks(enBlocks, config, thresholds))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      normalizedBlocks = await runNode('normalizeSubtitleText', () => enBlocks)
+      reviewItems.push({
+        id: 'text-normalization-invalid-rules',
+        nodeId: 'normalizeSubtitleText',
+        reason: `text normalization rules invalid: ${message}`,
+        category: 'metadata',
+        priority: 'should_review',
+        disposition: 'manual_review',
+        title: '正規化ルールが不正です',
+        action: '正規化ルールJSONが不正なため、字幕テキストの正規化を適用しませんでした',
+        details: [message],
+        proposal: {
+          kind: 'verify_terms',
+          confidence: 1,
+          rationale: '正規化ルールを読み込めなかったため、納品前に設定を修正してください',
+        },
+        score: 0,
+      })
+      console.warn(`Text normalization skipped: ${message}`)
+    }
+  }
+
+  const terminology = await runNode('terminologyCheck', () => checkTerminology(normalizedBlocks, glossaryTerms))
+  reviewItems.push(...normalizedBlocks.flatMap(block => buildReviewItemsForBlock(block, thresholds)))
+  const blocks = await runNode('toSubtitleBlocks', () => toSubtitleBlocks(normalizedBlocks, reviewItems))
 
   terminology.misses.forEach((miss, index) => {
     reviewItems.push({

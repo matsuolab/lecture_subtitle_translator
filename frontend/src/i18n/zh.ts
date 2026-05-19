@@ -258,5 +258,5 @@ export const zh: LocaleStrings = {
   settingsSemanticCheckOff: '关闭',
   settingsSemanticCheckLogOnly: '仅记录（不影响输出）',
   settingsSemanticCheckEnforce: '启用（失败时回退）',
-  settingsSemanticCheckDesc: '使用嵌入向量测量压缩前后的语义相似度。"仅记录"模式只保存分数不影响输出。"启用"模式会回退低于质量阈值的压缩。OpenAI兼容的本地 LLM 不支持。',
+  settingsSemanticCheckDesc: '使用嵌入向量测量压缩前后的语义相似度。"仅记录"模式只保存分数不影响输出。"启用"模式会回退低于质量阈值的压缩。OpenAI兼容本地服务只要所选嵌入模型和 /embeddings 端点可用，也会运行。',
 }
