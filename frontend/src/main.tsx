@@ -5,6 +5,7 @@ import App from './App.tsx'
 import { ThemeProvider } from '@/context/ThemeContext'
 import { LocaleProvider } from '@/context/LocaleContext'
 import { GlossaryProvider } from '@/context/GlossaryContext'
+import { ToastProvider } from '@/context/ToastContext'
 
 type StartupErrorState = {
   error: Error | null
@@ -84,9 +85,11 @@ root.render(
     <StartupErrorBoundary>
       <LocaleProvider>
         <ThemeProvider>
-          <GlossaryProvider>
-            <App />
-          </GlossaryProvider>
+          <ToastProvider>
+            <GlossaryProvider>
+              <App />
+            </GlossaryProvider>
+          </ToastProvider>
         </ThemeProvider>
       </LocaleProvider>
     </StartupErrorBoundary>

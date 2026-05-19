@@ -1,6 +1,21 @@
+export type ToastMessageParams = Record<string, number | string>
+
+export type ToastMessage = string | ((params: ToastMessageParams) => string)
+
 export interface LocaleStrings {
   id: string
   label: string
+  toast: {
+    exportSrt: ToastMessage
+    saveProjectJson: ToastMessage
+    exportCsv: ToastMessage
+    exportJson: ToastMessage
+    importGlossary: ToastMessage
+    saveSettings: ToastMessage
+    invalidNormalizationRules: ToastMessage
+    unsupportedGlossaryFile: ToastMessage
+    glossaryImportError: ToastMessage
+  }
 
   videoPlayer: string
   tabSubtitles: string

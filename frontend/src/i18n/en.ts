@@ -3,6 +3,17 @@ import type { LocaleStrings } from './types'
 export const en: LocaleStrings = {
   id: 'en',
   label: 'English',
+  toast: {
+    exportSrt: 'SRT exported',
+    saveProjectJson: 'JSON saved',
+    exportCsv: 'CSV exported',
+    exportJson: 'JSON exported',
+    importGlossary: ({ added = 0, updated = 0 }) => `Glossary imported: ${added} added, ${updated} updated`,
+    saveSettings: 'Settings saved',
+    invalidNormalizationRules: ({ error = '' }) => `Normalization rules JSON is invalid. ${error}`,
+    unsupportedGlossaryFile: 'Unsupported format. Use CSV, XLSX, or PDF.',
+    glossaryImportError: ({ error = '' }) => `Import error: ${error}`,
+  },
 
   videoPlayer: 'Video Player',
   tabSubtitles: 'Subtitle Blocks',

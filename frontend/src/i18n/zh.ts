@@ -3,6 +3,17 @@ import type { LocaleStrings } from './types'
 export const zh: LocaleStrings = {
   id: 'zh',
   label: '中文',
+  toast: {
+    exportSrt: 'SRT 已导出',
+    saveProjectJson: 'JSON 已保存',
+    exportCsv: 'CSV 已导出',
+    exportJson: 'JSON 已导出',
+    importGlossary: ({ added = 0, updated = 0 }) => `词汇表已导入：新增 ${added} 条，更新 ${updated} 条`,
+    saveSettings: '设置已保存',
+    invalidNormalizationRules: ({ error = '' }) => `规范化规则 JSON 无效。${error}`,
+    unsupportedGlossaryFile: '不支持的格式。请使用 CSV、XLSX 或 PDF。',
+    glossaryImportError: ({ error = '' }) => `导入错误：${error}`,
+  },
 
   videoPlayer: '视频播放器',
   tabSubtitles: '字幕块',

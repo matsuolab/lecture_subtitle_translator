@@ -4,6 +4,7 @@ import { themes } from '@/themes'
 import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
+import { useToast } from '@/context/ToastContext'
 import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
 import {
   DEFAULT_GEMINI_CHAT_MODEL,
@@ -46,6 +47,7 @@ export function SettingsTab({
 }: SettingsTabProps) {
   const { theme, setThemeId } = useTheme()
   const { strings: t, setLocaleId } = useLocale()
+  const toast = useToast()
   const currentVersion = (import.meta.env.VITE_APP_VERSION as string | undefined) || null
 
   const [availableModels, setAvailableModels] = React.useState<string[]>(() => {
@@ -179,12 +181,13 @@ export function SettingsTab({
   function applyNormalizationJsonDraft() {
     const result = validateTextNormalizationRulesJson(normalizationJsonDraft)
     if (!result.ok) {
-      alert(`正規化ルールJSONが不正です。\n${result.error}`)
+      toast.error('invalidNormalizationRules', { error: result.error ?? '' })
       return
     }
     const formatted = JSON.stringify(result.config, null, 2)
     setNormalizationJsonDraft(formatted)
     onAdminSettingsChange({ textNormalizationRulesJson: formatted })
+    toast.success('saveSettings')
   }
 
   async function importNormalizationRules(file: File | undefined) {
@@ -203,7 +206,7 @@ export function SettingsTab({
   function exportNormalizationRules() {
     const result = validateTextNormalizationRulesJson(normalizationJsonDraft)
     if (!result.ok) {
-      alert(`正規化ルールJSONが不正です。\n${result.error}`)
+      toast.error('invalidNormalizationRules', { error: result.error ?? '' })
       return
     }
     const blob = new Blob([JSON.stringify(result.config, null, 2)], { type: 'application/json' })
@@ -213,6 +216,7 @@ export function SettingsTab({
     a.download = 'subtitle-text-normalization-rules.json'
     a.click()
     URL.revokeObjectURL(url)
+    toast.success('exportJson')
   }
 
   function addNormalizationRule() {

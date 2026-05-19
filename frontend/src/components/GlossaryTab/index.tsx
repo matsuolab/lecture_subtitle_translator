@@ -3,6 +3,7 @@ import { FileText, Upload, Download, Trash2, Sparkles } from 'lucide-react'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
+import { useToast } from '@/context/ToastContext'
 import { parseGlossaryCsv, exportGlossaryCsv } from '@/lib/glossary/csvParser'
 import { generateSelfMadeGlossaryFromPdf, type GlossaryGenerationProgressEvent } from '@/lib/glossary/documentGlossaryGenerator'
 import { extractPdfDocument } from '@/lib/glossary/pdfExtractor'
@@ -33,6 +34,7 @@ export function GlossaryTab({
 }: GlossaryTabProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
+  const toast = useToast()
   const {
     glossary,
     setGlossary,
@@ -118,10 +120,12 @@ export function GlossaryTab({
         const entries = parseGlossaryCsv(await file.text())
         const { added, updated } = importEntries(entries)
         showMsg(`インポート完了: ${added} 件追加、${updated} 件更新`)
+        toast.success('importGlossary', { added, updated })
       } else if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
         const entries = await convertMatsuoLabXlsx(file)
         const { added, updated } = importEntries(entries)
         showMsg(`XLSX インポート完了: ${added} 件追加、${updated} 件更新`)
+        toast.success('importGlossary', { added, updated })
       } else if (name.endsWith('.pdf')) {
         setGenerationLog([])
         const document = await extractPdfDocument(file, { renderPageImages: adminSettings.pdfExtractionUseVision })
@@ -140,15 +144,19 @@ export function GlossaryTab({
         const added = addedTotal
         const updated = updatedTotal
         showMsg(`自作辞書を作成しました: ${added} 件追加、${updated} 件更新`)
+        toast.success('importGlossary', { added, updated })
       } else {
         showMsg('非対応形式です（CSV / XLSX / PDF を使用してください）')
+        toast.error('unsupportedGlossaryFile')
       }
     } catch (err) {
-      showMsg(`読み込みエラー: ${describeError(err)}`)
+      const error = describeError(err)
+      showMsg(`読み込みエラー: ${error}`)
+      toast.error('glossaryImportError', { error })
     } finally {
       setIsImporting(false)
     }
-  }, [adminSettings, appendGenerationLog, importEntries, importSelfMadeEntries, isBusy, setGenerationLog])
+  }, [adminSettings, appendGenerationLog, importEntries, importSelfMadeEntries, isBusy, setGenerationLog, toast])
 
   const createFromPdf = useCallback(async (file: File) => {
     if (isBusy) return
@@ -172,13 +180,16 @@ export function GlossaryTab({
         },
       })
       showMsg(`PDFから自作辞書を作成しました: ${addedTotal} 件追加、${updatedTotal} 件更新`)
+      toast.success('importGlossary', { added: addedTotal, updated: updatedTotal })
     } catch (err) {
-      appendGenerationLog(`ERROR: ${describeError(err)}`)
-      showMsg(`辞書作成エラー: ${describeError(err)}`)
+      const error = describeError(err)
+      appendGenerationLog(`ERROR: ${error}`)
+      showMsg(`辞書作成エラー: ${error}`)
+      toast.error('glossaryImportError', { error })
     } finally {
       setIsGenerating(false)
     }
-  }, [adminSettings, appendGenerationLog, importSelfMadeEntries, isBusy, setGenerationLog, setIsGenerating])
+  }, [adminSettings, appendGenerationLog, importSelfMadeEntries, isBusy, setGenerationLog, setIsGenerating, toast])
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -218,7 +229,8 @@ export function GlossaryTab({
     a.download = 'glossary.csv'
     a.click()
     URL.revokeObjectURL(url)
-  }, [glossary])
+    toast.success('exportCsv')
+  }, [glossary, toast])
 
   const handleExportSelfMadeConfirmed = useCallback(() => {
     if (isBusy) return
@@ -244,7 +256,8 @@ export function GlossaryTab({
     a.download = 'self-made-glossary-confirmed.csv'
     a.click()
     URL.revokeObjectURL(url)
-  }, [isBusy, selfMadeGlossary])
+    toast.success('exportCsv')
+  }, [isBusy, selfMadeGlossary, toast])
 
   const handleExportSelfMadeAll = useCallback(() => {
     if (isBusy) return
@@ -255,7 +268,8 @@ export function GlossaryTab({
     a.download = 'self-made-glossary.json'
     a.click()
     URL.revokeObjectURL(url)
-  }, [isBusy, selfMadeGlossary])
+    toast.success('exportJson')
+  }, [isBusy, selfMadeGlossary, toast])
 
   const handleToggleConfirmed = useCallback((entry: SelfMadeGlossaryEntry, field: 'jaConfirmed' | 'enConfirmed') => {
     if (isBusy) return
