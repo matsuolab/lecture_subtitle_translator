@@ -146,6 +146,7 @@ export function GlossaryTab({
         const added = addedTotal
         const updated = updatedTotal
         showMsg(`自作辞書を作成しました: ${added} 件追加、${updated} 件更新`)
+        setGenerationLog([])
         toast.success('importGlossary', { added, updated })
       } else {
         showMsg('非対応形式です（CSV / XLSX / PDF を使用してください）')
@@ -182,6 +183,7 @@ export function GlossaryTab({
         },
       })
       showMsg(`PDFから自作辞書を作成しました: ${addedTotal} 件追加、${updatedTotal} 件更新`)
+      setGenerationLog([])
       toast.success('importGlossary', { added: addedTotal, updated: updatedTotal })
     } catch (err) {
       const error = describeError(err)

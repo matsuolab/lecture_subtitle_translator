@@ -2067,7 +2067,7 @@ export default function App() {
                 onServiceCheck={handleServiceCheck}
               />
             )}
-            {!isResizing && activeTab !== 'dictionary' && (glossaryGenerationLog.length > 0 || glossaryGenerationBusy) && (
+            {!isResizing && activeTab !== 'dictionary' && glossaryGenerationBusy && (
               <div style={{
                 position: 'absolute',
                 right: 16,
