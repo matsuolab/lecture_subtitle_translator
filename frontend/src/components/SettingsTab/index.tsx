@@ -12,6 +12,11 @@ import {
   LOCAL_OPENAI_COMPAT_BASE_URL,
   resolveAiConnection,
 } from '@/lib/pipeline/aiProvider'
+import {
+  normalizeSubtitleText,
+  parseTextNormalizationConfig,
+  validateTextNormalizationRulesJson,
+} from '@/lib/pipeline/textNormalization'
 import { tauriFetch } from '@/lib/tauriFetch'
 
 type ServiceCheckState = {
@@ -50,7 +55,25 @@ export function SettingsTab({
     } catch { return [] }
   })
   const [modelRefreshState, setModelRefreshState] = React.useState<'idle' | 'loading' | 'error'>('idle')
+  const [normalizationOpen, setNormalizationOpen] = React.useState(false)
+  const [normalizationJsonDraft, setNormalizationJsonDraft] = React.useState(adminSettings.textNormalizationRulesJson)
+  const [normalizationPreview, setNormalizationPreview] = React.useState('It’s “machine learning” with\u00A0NBSP.')
+  const [normalizationMatchInput, setNormalizationMatchInput] = React.useState('')
+  const [normalizationReplacementInput, setNormalizationReplacementInput] = React.useState('')
   const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
+  const normalizationValidation = React.useMemo(
+    () => validateTextNormalizationRulesJson(normalizationJsonDraft),
+    [normalizationJsonDraft],
+  )
+  const activeNormalizationRuleCount = normalizationValidation.config?.rules.filter(rule => rule.enabled).length ?? 0
+  const normalizationPreviewOutput = React.useMemo(() => {
+    if (!normalizationValidation.ok || !normalizationValidation.config) return normalizationPreview
+    return normalizeSubtitleText(normalizationPreview, normalizationValidation.config)
+  }, [normalizationPreview, normalizationValidation])
+
+  React.useEffect(() => {
+    setNormalizationJsonDraft(adminSettings.textNormalizationRulesJson)
+  }, [adminSettings.textNormalizationRulesJson])
 
   async function handleRefreshModels() {
     setModelRefreshState('loading')
@@ -151,6 +174,99 @@ export function SettingsTab({
       expandModel: DEFAULT_OPENAI_CHAT_MODEL,
       contextMergeModel: 'gpt-5.5',
     })
+  }
+
+  function applyNormalizationJsonDraft() {
+    const result = validateTextNormalizationRulesJson(normalizationJsonDraft)
+    if (!result.ok) {
+      alert(`正規化ルールJSONが不正です。\n${result.error}`)
+      return
+    }
+    const formatted = JSON.stringify(result.config, null, 2)
+    setNormalizationJsonDraft(formatted)
+    onAdminSettingsChange({ textNormalizationRulesJson: formatted })
+  }
+
+  async function importNormalizationRules(file: File | undefined) {
+    if (!file) return
+    const text = await file.text()
+    const result = validateTextNormalizationRulesJson(text)
+    if (!result.ok) {
+      alert(`正規化ルールJSONが不正です。\n${result.error}`)
+      return
+    }
+    const formatted = JSON.stringify(result.config, null, 2)
+    setNormalizationJsonDraft(formatted)
+    onAdminSettingsChange({ textNormalizationRulesJson: formatted })
+  }
+
+  function exportNormalizationRules() {
+    const result = validateTextNormalizationRulesJson(normalizationJsonDraft)
+    if (!result.ok) {
+      alert(`正規化ルールJSONが不正です。\n${result.error}`)
+      return
+    }
+    const blob = new Blob([JSON.stringify(result.config, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'subtitle-text-normalization-rules.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function addNormalizationRule() {
+    const match = normalizationMatchInput
+    if (!match) {
+      alert('変換元を入力してください。')
+      return
+    }
+    const result = validateTextNormalizationRulesJson(normalizationJsonDraft)
+    if (!result.ok || !result.config) {
+      alert(`正規化ルールJSONが不正です。\n${result.error}`)
+      return
+    }
+    const exists = result.config.rules.some(rule =>
+      rule.match === match && rule.replacement === normalizationReplacementInput && rule.matchType === 'literal',
+    )
+    if (exists) {
+      alert('同じ変換ルールが既にあります。')
+      return
+    }
+    const nextRules = [
+      ...result.config.rules,
+      {
+        enabled: true,
+        match,
+        replacement: normalizationReplacementInput,
+        matchType: 'literal' as const,
+      },
+    ]
+    const formatted = JSON.stringify({ version: 1, rules: nextRules }, null, 2)
+    setNormalizationJsonDraft(formatted)
+    onAdminSettingsChange({ textNormalizationRulesJson: formatted })
+    setNormalizationMatchInput('')
+    setNormalizationReplacementInput('')
+  }
+
+  function toggleNormalizationRule(index: number, enabled: boolean) {
+    const config = parseTextNormalizationConfig(normalizationJsonDraft)
+    const formatted = JSON.stringify({
+      ...config,
+      rules: config.rules.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, enabled } : rule),
+    }, null, 2)
+    setNormalizationJsonDraft(formatted)
+    onAdminSettingsChange({ textNormalizationRulesJson: formatted })
+  }
+
+  function deleteNormalizationRule(index: number) {
+    const config = parseTextNormalizationConfig(normalizationJsonDraft)
+    const formatted = JSON.stringify({
+      ...config,
+      rules: config.rules.filter((_, ruleIndex) => ruleIndex !== index),
+    }, null, 2)
+    setNormalizationJsonDraft(formatted)
+    onAdminSettingsChange({ textNormalizationRulesJson: formatted })
   }
 
   return (
@@ -407,13 +523,6 @@ export function SettingsTab({
             hint="辞書作成でVision LLMを有効にした場合だけ使います。テキスト専用モデルでは失敗します"
             onChange={(value) => onAdminSettingsChange({ pdfExtractionVisionModel: value })}
           />
-          <ToggleField
-            theme={theme}
-            label="PDF辞書作成を並列化"
-            checked={adminSettings.pdfExtractionParallel}
-            hint="OFFでは1ページずつ処理します。ONではローカルLLMは2並列、API側は下の「並列リクエスト数」で処理します"
-            onChange={(value) => onAdminSettingsChange({ pdfExtractionParallel: value })}
-          />
           <NumberField
             theme={theme}
             label="辞書生成: 出力トークン上限 (max_tokens)"
@@ -435,7 +544,7 @@ export function SettingsTab({
             onChange={(value) => onAdminSettingsChange({ glossaryRequestConcurrency: Math.trunc(value) })}
           />
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
-            Vision/非Visionモードで同時に投げる API リクエスト数。1〜20。
+            辞書タブで並列化をONにしたとき、同時に投げる API リクエスト数。1〜20。
             OpenAI Tier1: 4 推奨 / Tier2: 7 / Tier3 以上: 10+。429 が出たら下げます。ローカル LLM もこの値を使います。
           </div>
           <ComboField
@@ -646,6 +755,158 @@ export function SettingsTab({
             {t.settingsSemanticCheckDesc}
           </div>
         </FieldCard>
+
+        <FieldCard theme={theme}>
+          <button
+            type="button"
+            onClick={() => setNormalizationOpen(value => !value)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+              width: '100%',
+              padding: 0,
+              border: 0,
+              background: 'transparent',
+              color: theme.textPrimary,
+              cursor: 'pointer',
+              textAlign: 'left',
+            }}
+          >
+            <span style={{ fontSize: 12, fontWeight: 700 }}>正規化ルール設定</span>
+            <span style={{ fontSize: 11, color: theme.textSecondary }}>
+              {adminSettings.textNormalizationEnabled ? `ON / ${activeNormalizationRuleCount}件` : 'OFF'} {normalizationOpen ? '▲' : '▼'}
+            </span>
+          </button>
+          <ToggleField
+            theme={theme}
+            label="字幕テキスト正規化を有効にする"
+            checked={adminSettings.textNormalizationEnabled}
+            hint="自動生成の字幕ブロック出力前と、SRT出力時に同じルールを適用します。"
+            onChange={(value) => onAdminSettingsChange({ textNormalizationEnabled: value })}
+          />
+          {normalizationOpen && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 1fr) minmax(120px, 1fr) auto', gap: 8, alignItems: 'end' }}>
+                <Field
+                  theme={theme}
+                  label="変換元"
+                  value={normalizationMatchInput}
+                  placeholder="例: “"
+                  onChange={setNormalizationMatchInput}
+                />
+                <Field
+                  theme={theme}
+                  label="変換先"
+                  value={normalizationReplacementInput}
+                  placeholder='例: "'
+                  onChange={setNormalizationReplacementInput}
+                />
+                <button type="button" onClick={addNormalizationRule} style={{ ...smallButtonStyle(theme), minHeight: 34 }}>
+                  追加
+                </button>
+              </div>
+
+              {normalizationValidation.ok && normalizationValidation.config ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {normalizationValidation.config.rules.map((rule, index) => (
+                    <div
+                      key={`${index}-${rule.match}-${rule.replacement}-${rule.matchType}`}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'auto minmax(80px, 1fr) auto minmax(80px, 1fr) auto',
+                        gap: 8,
+                        alignItems: 'center',
+                        padding: 8,
+                        border: `1px solid ${theme.panelBorder}`,
+                        borderRadius: 8,
+                        background: theme.panelBg,
+                        fontSize: 12,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={rule.enabled}
+                        onChange={(event) => toggleNormalizationRule(index, event.target.checked)}
+                      />
+                      <code style={{ color: theme.textPrimary, overflowWrap: 'anywhere' }}>{JSON.stringify(rule.match)}</code>
+                      <span style={{ color: theme.textSecondary }}>→</span>
+                      <code style={{ color: theme.textPrimary, overflowWrap: 'anywhere' }}>{JSON.stringify(rule.replacement)}</code>
+                      <button
+                        type="button"
+                        onClick={() => deleteNormalizationRule(index)}
+                        style={{
+                          padding: '5px 8px',
+                          borderRadius: 6,
+                          border: `1px solid ${theme.panelBorder}`,
+                          background: theme.cardBg,
+                          color: theme.textSecondary,
+                          cursor: 'pointer',
+                          fontSize: 11,
+                        }}
+                      >
+                        削除
+                      </button>
+                      <div style={{ gridColumn: '2 / -1', color: theme.textSecondary, fontSize: 11 }}>
+                        {rule.matchType === 'regex' ? 'regex' : 'literal'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ color: '#ef4444', fontSize: 12, lineHeight: 1.6 }}>
+                  JSONが不正です: {normalizationValidation.error}
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <TextareaField
+                  theme={theme}
+                  label="プレビュー入力（自由入力）"
+                  value={normalizationPreview}
+                  placeholder="ここに任意の字幕テキストを入力"
+                  onChange={setNormalizationPreview}
+                />
+                <TextareaField
+                  theme={theme}
+                  label="プレビュー出力"
+                  value={normalizationPreviewOutput}
+                  onChange={() => undefined}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button type="button" onClick={exportNormalizationRules} style={smallButtonStyle(theme)}>JSONエクスポート</button>
+                <label style={smallButtonStyle(theme)}>
+                  JSONインポート
+                  <input
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={(event) => {
+                      void importNormalizationRules(event.target.files?.[0])
+                      event.target.value = ''
+                    }}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+              </div>
+
+              <TextareaField
+                theme={theme}
+                label="ルールJSON"
+                value={normalizationJsonDraft}
+                onChange={setNormalizationJsonDraft}
+              />
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button type="button" onClick={applyNormalizationJsonDraft} style={smallButtonStyle(theme)}>JSONを検証して保存</button>
+                <span style={{ fontSize: 11, color: normalizationValidation.ok ? theme.textSecondary : '#ef4444' }}>
+                  {normalizationValidation.ok ? 'JSONは有効です' : normalizationValidation.error}
+                </span>
+              </div>
+            </div>
+          )}
+        </FieldCard>
       </Section>
 
       <Section title={t.settingsPipelineThresholdsTitle} theme={theme}>
@@ -808,6 +1069,22 @@ function FieldCard({ theme, children }: { theme: Theme; children: React.ReactNod
       {children}
     </div>
   )
+}
+
+function smallButtonStyle(theme: Theme): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '7px 10px',
+    borderRadius: 8,
+    border: `1px solid ${theme.panelBorder}`,
+    background: theme.panelBg,
+    color: theme.textPrimary,
+    cursor: 'pointer',
+    fontSize: 12,
+    fontWeight: 600,
+  }
 }
 
 function Field({

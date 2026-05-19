@@ -259,5 +259,5 @@ export const ja: LocaleStrings = {
   settingsSemanticCheckOff: 'オフ',
   settingsSemanticCheckLogOnly: 'ログのみ（採否影響なし）',
   settingsSemanticCheckEnforce: '有効（失敗で差し戻し）',
-  settingsSemanticCheckDesc: '圧縮前後の意味類似度を Embedding で計測します。「ログのみ」はスコアを記録するだけで採否に影響しません。「有効」は閾値（品質閾値・補正）を下回った変更を差し戻します。OpenAI互換ローカル LLM では動作しません。',
+  settingsSemanticCheckDesc: '圧縮前後の意味類似度を Embedding で計測します。「ログのみ」はスコアを記録するだけで採否に影響しません。「有効」は閾値（品質閾値・補正）を下回った変更を差し戻します。OpenAI互換ローカル LLM でも、指定したEmbeddingモデルと /embeddings が利用できる場合は動作します。',
 }

@@ -258,5 +258,5 @@ export const en: LocaleStrings = {
   settingsSemanticCheckOff: 'Off',
   settingsSemanticCheckLogOnly: 'Log only (no impact on output)',
   settingsSemanticCheckEnforce: 'Enforce (revert on failure)',
-  settingsSemanticCheckDesc: 'Measure semantic similarity before/after compression using embeddings. Log-only records scores without affecting output. Enforce reverts compressions that fall below the quality threshold. Not available for OpenAI-compatible local LLMs.',
+  settingsSemanticCheckDesc: 'Measure semantic similarity before/after compression using embeddings. Log-only records scores without affecting output. Enforce reverts compressions that fall below the quality threshold. Local OpenAI-compatible servers are supported when the selected embedding model and /embeddings endpoint are available.',
 }

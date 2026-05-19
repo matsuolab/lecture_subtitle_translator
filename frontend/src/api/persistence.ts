@@ -1,6 +1,7 @@
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineRunResult } from '@/types/pipeline'
+import { normalizeSubtitleText, parseTextNormalizationConfig } from '@/lib/pipeline/textNormalization'
 
 const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
 
@@ -213,11 +214,25 @@ function parseSrt(text: string): SubtitleBlock[] {
 
 // ─── SRT エクスポート ──────────────────────────────────────────────────────
 
-export function exportSrt(blocks: SubtitleBlock[]): void {
+export function exportSrt(blocks: SubtitleBlock[], settings: AdminSettings): void {
+  let normalizeSource = (text: string) => text
+  if (settings.textNormalizationEnabled) {
+    try {
+      const config = parseTextNormalizationConfig(settings.textNormalizationRulesJson)
+      normalizeSource = (text: string) => normalizeSubtitleText(text, config)
+    } catch {
+      const proceed = window.confirm(
+        '正規化ルールが不正です\n\n' +
+        '正規化ルールJSONを読み込めないため、字幕テキストを正規化できません。正規化せずにSRTを出力しますか？',
+      )
+      if (!proceed) return
+    }
+  }
+
   const lines = blocks.map((block, i) => {
     const start = secondsToSrtTime(block.startTime)
     const end   = secondsToSrtTime(block.endTime)
-    return `${i + 1}\n${start} --> ${end}\n${block.source}`
+    return `${i + 1}\n${start} --> ${end}\n${normalizeSource(block.source)}`
   })
   downloadFile(lines.join('\n\n') + '\n', 'subtitles.srt', 'text/plain')
 }

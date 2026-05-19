@@ -186,7 +186,7 @@ export async function runLocalPostPipeline(
     const enBlocks = await runPhase2(jaBlocks, settings, thresholds, runNode, (nodeId, message) => {
       record(nodeId, 'success', 0, message)
     }, glossary.translationTerms)
-    const phase3 = await runPhase3(enBlocks, glossary.translationTerms, thresholds, runNode)
+    const phase3 = await runPhase3(enBlocks, settings, glossary.translationTerms, thresholds, runNode)
 
     const terminologyMustCount = phase3.reviewItems
       .filter((item) => item.blockId === undefined && item.priority === 'must_review')

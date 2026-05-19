@@ -1,5 +1,5 @@
 import type { AdminSettings } from '@/types/adminSettings'
-import { requireAiConnection, resolveAiProvider } from './aiProvider'
+import { requireAiConnection } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
 
 const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small'
@@ -10,15 +10,17 @@ interface EmbeddingResponse {
 
 /**
  * Embedding 計算が利用可能かを判定。
- * - local_openai プロバイダは Embedding API を持たないことが多いため除外
- * - API キーがない場合も不可
+ * - OpenAI / Gemini は API キーが必要
+ * - Local OpenAI Compatible は API キーなしでも /embeddings が応答すれば利用可能
  */
 export function isSemanticCheckAvailable(settings: AdminSettings): boolean {
   if (settings.semanticCheckMode === 'off') return false
-  if (resolveAiProvider(settings) === 'local_openai') return false
-  const connection = requireAiConnection(settings, 'semantic check')
-  if (!connection.apiKey) return false
-  return true
+  try {
+    const connection = requireAiConnection(settings, 'semantic check')
+    return connection.provider === 'local_openai' || Boolean(connection.apiKey)
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -40,7 +42,7 @@ export async function fetchEmbeddings(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${connection.apiKey}`,
+        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
       },
       body: JSON.stringify({
         model,

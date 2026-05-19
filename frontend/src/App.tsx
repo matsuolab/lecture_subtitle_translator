@@ -207,6 +207,8 @@ function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> 
     subtitleLanguageLabel: settings.subtitleLanguageLabel,
     transcriptLanguageLabel: settings.transcriptLanguageLabel,
     languageProfileConfigJson: settings.languageProfileConfigJson,
+    textNormalizationEnabled: settings.textNormalizationEnabled,
+    textNormalizationRulesJson: settings.textNormalizationRulesJson,
     openaiCompatibleBaseUrl: settings.openaiCompatibleBaseUrl,
     enMaxCharsPerLine: settings.enMaxCharsPerLine,
     enMaxCps: settings.enMaxCps,
@@ -1857,7 +1859,7 @@ export default function App() {
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <FolderOpen size={11} />SRT読込
               </button>
-              <button onClick={() => exportSrt(blocks)} title={t.exportSrtTitle}
+              <button onClick={() => exportSrt(blocks, adminSettings)} title={t.exportSrtTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <Download size={11} />SRT出力
               </button>
