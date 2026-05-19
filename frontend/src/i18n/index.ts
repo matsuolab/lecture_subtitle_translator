@@ -1,4 +1,4 @@
-export type { LocaleStrings } from './types'
+export type { LocaleStrings, ToastMessageParams } from './types'
 export { ja } from './ja'
 export { en } from './en'
 export { zh } from './zh'

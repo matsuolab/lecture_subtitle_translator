@@ -3,6 +3,17 @@ import type { LocaleStrings } from './types'
 export const ja: LocaleStrings = {
   id: 'ja',
   label: '日本語',
+  toast: {
+    exportSrt: 'SRTを出力しました',
+    saveProjectJson: 'JSONを保存しました',
+    exportCsv: 'CSVをエクスポートしました',
+    exportJson: 'JSONをエクスポートしました',
+    importGlossary: ({ added = 0, updated = 0 }) => `辞書をインポートしました: ${added} 件追加、${updated} 件更新`,
+    saveSettings: '設定を保存しました',
+    invalidNormalizationRules: ({ error = '' }) => `正規化ルールJSONが不正です。${error}`,
+    unsupportedGlossaryFile: '非対応形式です（CSV / XLSX / PDF を使用してください）',
+    glossaryImportError: ({ error = '' }) => `読み込みエラー: ${error}`,
+  },
 
   videoPlayer: '動画プレイヤー',
   tabSubtitles: '字幕ブロック',

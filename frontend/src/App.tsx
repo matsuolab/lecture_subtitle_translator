@@ -34,6 +34,7 @@ import type { LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary, type GlossaryEntry, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
+import { useToast } from '@/context/ToastContext'
 import { applyGlossaryToText } from '@/utils/glossaryApply'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
@@ -256,6 +257,7 @@ function getPipelineClientDebug(error: unknown): {
 export default function App() {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
+  const toast = useToast()
   const { glossary, selfMadeGlossary, importEntries } = useGlossary()
   const restoredSession = loadSessionSnapshotFromLocalStorage()
   const restored = restoredSession?.blocks ?? loadFromLocalStorage()
@@ -978,6 +980,16 @@ export default function App() {
       pipelineHistory,
     },
   }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
+
+  const handleExportSrt = useCallback(() => {
+    exportSrt(blocks, adminSettings)
+    toast.success('exportSrt')
+  }, [adminSettings, blocks, toast])
+
+  const handleExportProjectJson = useCallback(() => {
+    exportProjectJson(buildSessionExport())
+    toast.success('saveProjectJson')
+  }, [buildSessionExport, toast])
 
   const confirmAndLoadVideo = useCallback((name: string, doLoad: () => void) => {
     if (blocks.length > 0) {
@@ -1859,7 +1871,7 @@ export default function App() {
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <FolderOpen size={11} />SRT読込
               </button>
-              <button onClick={() => exportSrt(blocks, adminSettings)} title={t.exportSrtTitle}
+              <button onClick={handleExportSrt} title={t.exportSrtTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <Download size={11} />SRT出力
               </button>
@@ -1868,7 +1880,7 @@ export default function App() {
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <FolderOpen size={11} />JSON読込
               </button>
-              <button onClick={() => exportProjectJson(buildSessionExport())} title={t.saveProjectTitle}
+              <button onClick={handleExportProjectJson} title={t.saveProjectTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <Save size={11} />JSON保存
               </button>
