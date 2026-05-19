@@ -7,6 +7,7 @@ docs/
 notes/
 .codex/
 CODEX.md
+AGENTS.md
 
 # PoC actual data (real lecture content - do not commit)
 poc/data/
