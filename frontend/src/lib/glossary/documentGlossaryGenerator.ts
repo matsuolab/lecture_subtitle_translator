@@ -377,6 +377,23 @@ const ABSOLUTE_RULES = `絶対に守ること:
 - jaSource / enSource は申告したら検証されます。PDF に実在しない値を "document" 申告すると後段で削除されます
 - JSON のみを返す`
 
+const FORMULA_NOTATION_RULES = `数式・記号 (category="formula") の表記ルール:
+- displayText: 人間が見て分かる Unicode + ^/_ 記法
+  - 上付きは ^x または ^(...) で表現
+    例: θ^(t+1), x^2, e^(-x), x^(i,j)
+  - 下付きは _x または _(...) で表現
+    例: x_i, a_(i,j), L_train
+  - ギリシャ文字・演算子はそのまま Unicode (θ, ∇, η, ε, Σ, ∂, ∈, ≤, ≥, ⋯)
+  - 連続演算子・括弧は適切に保つ (= − + ⋅ / ( ) [ ] { })
+- latex: 標準 LaTeX 記法 (整形・字幕生成用)
+    例: "\\theta^{(t+1)} = \\theta^{(t)} - \\eta \\nabla E(\\theta^{(t)})"
+- formula: 検索キー用の ASCII 互換シンプル表記。表現困難なら空欄
+
+絶対禁止:
+- PDF テキスト抽出で上付き・下付き・ギリシャ文字が崩れている場合に、その崩れた表記をそのまま displayText/latex に入れる
+  (例: PDF テキスト抽出が "θ(t+1)" になっていても、本来 "θ^(t+1)" なら正しく上付きを復元する)
+- 元の数式の意味を変える (項を入れ替える、新しい変数を導入する、係数を勝手に変える) ことは禁止`
+
 function buildCandidatePrompt(
   document: ExtractedPdfDocument,
   pages: ExtractedPdfPage[],
@@ -394,6 +411,8 @@ ${CATEGORY_GUIDE}
 ${EXTRACTION_RULES}
 
 ${ABSOLUTE_RULES}
+
+${FORMULA_NOTATION_RULES}
 
 候補抽出段の追加制約:
 - 1 候補は text/category/page/snippet を基本とする
@@ -454,6 +473,8 @@ ${themeContext ? `${themeContext}\n` : ''}
 ${CATEGORY_GUIDE}
 
 ${ABSOLUTE_RULES}
+
+${FORMULA_NOTATION_RULES}
 
 詳細展開段の追加制約:
 - 新しい候補を追加しない
