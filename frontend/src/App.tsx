@@ -71,6 +71,11 @@ type VideoLoadDiagnostic = {
   fallbackRegistered: boolean
   fallbackHeadStatus: number | null
   fallbackHeadContentType: string | null
+  fallbackHeadContentLength: string | null
+  fallbackHeadAcceptRanges: string | null
+  fallbackRangeStatus: number | null
+  fallbackRangeContentRange: string | null
+  fallbackRangeContentLength: string | null
   fallbackHeadError: string | null
   fallbackAttempted: boolean
 }
@@ -126,6 +131,11 @@ async function probeAssetHead(url: string): Promise<{
 async function probeHttpVideoUrl(url: string): Promise<{
   fallbackHeadStatus: number | null
   fallbackHeadContentType: string | null
+  fallbackHeadContentLength: string | null
+  fallbackHeadAcceptRanges: string | null
+  fallbackRangeStatus: number | null
+  fallbackRangeContentRange: string | null
+  fallbackRangeContentLength: string | null
   fallbackHeadError: string | null
 }> {
   try {
@@ -133,15 +143,33 @@ async function probeHttpVideoUrl(url: string): Promise<{
     const healthRes = await fetch(`${base}/healthz`)
     console.info('[video][diag] fallback /healthz fetch:', healthRes.status, await healthRes.text())
     const headRes = await fetch(url, { method: 'HEAD' })
+    const rangeRes = await fetch(url, { headers: { Range: 'bytes=0-99' } })
+    const rangeBody = await rangeRes.arrayBuffer()
+    console.info('[video][diag] fallback range fetch:', {
+      status: rangeRes.status,
+      contentRange: rangeRes.headers.get('content-range'),
+      contentLength: rangeRes.headers.get('content-length'),
+      bytesRead: rangeBody.byteLength,
+    })
     return {
       fallbackHeadStatus: headRes.status,
       fallbackHeadContentType: headRes.headers.get('content-type'),
+      fallbackHeadContentLength: headRes.headers.get('content-length'),
+      fallbackHeadAcceptRanges: headRes.headers.get('accept-ranges'),
+      fallbackRangeStatus: rangeRes.status,
+      fallbackRangeContentRange: rangeRes.headers.get('content-range'),
+      fallbackRangeContentLength: rangeRes.headers.get('content-length'),
       fallbackHeadError: null,
     }
   } catch (err) {
     return {
       fallbackHeadStatus: null,
       fallbackHeadContentType: null,
+      fallbackHeadContentLength: null,
+      fallbackHeadAcceptRanges: null,
+      fallbackRangeStatus: null,
+      fallbackRangeContentRange: null,
+      fallbackRangeContentLength: null,
       fallbackHeadError: describeError(err),
     }
   }
@@ -504,6 +532,11 @@ export default function App() {
       fallbackRegistered: false,
       fallbackHeadStatus: null,
       fallbackHeadContentType: null,
+      fallbackHeadContentLength: null,
+      fallbackHeadAcceptRanges: null,
+      fallbackRangeStatus: null,
+      fallbackRangeContentRange: null,
+      fallbackRangeContentLength: null,
       fallbackHeadError: null,
       fallbackAttempted: false,
     })
@@ -536,8 +569,23 @@ export default function App() {
     let fallbackAttempted = false
     let fallbackHeadStatus: number | null = null
     let fallbackHeadContentType: string | null = null
+    let fallbackHeadContentLength: string | null = null
+    let fallbackHeadAcceptRanges: string | null = null
+    let fallbackRangeStatus: number | null = null
+    let fallbackRangeContentRange: string | null = null
+    let fallbackRangeContentLength: string | null = null
     let fallbackHeadError: string | null = null
     const convertedUrl = convertFileSrc(path)
+    const applyFallbackProbe = (probe: Awaited<ReturnType<typeof probeHttpVideoUrl>>) => {
+      fallbackHeadStatus = probe.fallbackHeadStatus
+      fallbackHeadContentType = probe.fallbackHeadContentType
+      fallbackHeadContentLength = probe.fallbackHeadContentLength
+      fallbackHeadAcceptRanges = probe.fallbackHeadAcceptRanges
+      fallbackRangeStatus = probe.fallbackRangeStatus
+      fallbackRangeContentRange = probe.fallbackRangeContentRange
+      fallbackRangeContentLength = probe.fallbackRangeContentLength
+      fallbackHeadError = probe.fallbackHeadError
+    }
     if (isMac) {
       const macAsset = buildMacAssetUrl(path)
       url = macAsset.url
@@ -546,14 +594,17 @@ export default function App() {
         fallbackUrl = await invoke<string>('register_video', { path })
         fallbackRegistered = true
         const fallbackProbe = await probeHttpVideoUrl(fallbackUrl)
-        fallbackHeadStatus = fallbackProbe.fallbackHeadStatus
-        fallbackHeadContentType = fallbackProbe.fallbackHeadContentType
-        fallbackHeadError = fallbackProbe.fallbackHeadError
+        applyFallbackProbe(fallbackProbe)
         console.info('[video][diag] mac fallback registered', {
           primaryUrl: url,
           fallbackUrl,
           fallbackHeadStatus,
           fallbackHeadContentType,
+          fallbackHeadContentLength,
+          fallbackHeadAcceptRanges,
+          fallbackRangeStatus,
+          fallbackRangeContentRange,
+          fallbackRangeContentLength,
           fallbackHeadError,
         })
       } catch (err) {
@@ -567,27 +618,13 @@ export default function App() {
         url = await invoke<string>('register_video', { path })
         console.info('[video] using local HTTP server URL:', url)
         const httpProbe = await probeHttpVideoUrl(url)
-        fallbackHeadStatus = httpProbe.fallbackHeadStatus
-        fallbackHeadContentType = httpProbe.fallbackHeadContentType
-        fallbackHeadError = httpProbe.fallbackHeadError
+        applyFallbackProbe(httpProbe)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error('[video] register_video failed:', msg)
         alert(`動画読込失敗: register_video → ${msg}`)
         return
       }
-    }
-
-    const assetProbe = await probeAssetHead(url)
-    if (isMac && fallbackUrl && assetProbe.assetReachable !== 'ok') {
-      console.warn('[video][diag] asset HEAD failed; using localhost fallback immediately', {
-        assetReachable: assetProbe.assetReachable,
-        assetHeadStatus: assetProbe.assetHeadStatus,
-        assetHeadError: assetProbe.assetHeadError,
-        fallbackUrl,
-      })
-      url = fallbackUrl
-      fallbackAttempted = true
     }
 
     let fileDiagnostic: VideoFileDiagnostic | null = null
@@ -602,6 +639,21 @@ export default function App() {
         openError: describeError(err),
       }
     }
+    const assetProbe = await probeAssetHead(url)
+    const isLargeMacVideo = isMac && (fileDiagnostic?.sizeBytes ?? 0) >= 2 * 1024 * 1024 * 1024
+    if (isMac && fallbackUrl && (assetProbe.assetReachable !== 'ok' || isLargeMacVideo)) {
+      console.warn('[video][diag] using localhost fallback immediately', {
+        reason: isLargeMacVideo ? 'large-video-byte-range' : 'asset-head-failed',
+        assetReachable: assetProbe.assetReachable,
+        assetHeadStatus: assetProbe.assetHeadStatus,
+        assetHeadError: assetProbe.assetHeadError,
+        fallbackUrl,
+        file: fileDiagnostic,
+      })
+      url = fallbackUrl
+      fallbackAttempted = true
+    }
+
     const pathFlags = buildPathFlags(path)
     const diagnostic: VideoLoadDiagnostic = {
       sourceKind: 'path',
@@ -619,6 +671,11 @@ export default function App() {
       fallbackRegistered,
       fallbackHeadStatus,
       fallbackHeadContentType,
+      fallbackHeadContentLength,
+      fallbackHeadAcceptRanges,
+      fallbackRangeStatus,
+      fallbackRangeContentRange,
+      fallbackRangeContentLength,
       fallbackHeadError,
       fallbackAttempted,
     }

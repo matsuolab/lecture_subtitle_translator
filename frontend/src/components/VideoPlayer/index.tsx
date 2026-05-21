@@ -27,6 +27,11 @@ interface VideoLoadDiagnostic {
   fallbackRegistered: boolean
   fallbackHeadStatus: number | null
   fallbackHeadContentType: string | null
+  fallbackHeadContentLength: string | null
+  fallbackHeadAcceptRanges: string | null
+  fallbackRangeStatus: number | null
+  fallbackRangeContentRange: string | null
+  fallbackRangeContentLength: string | null
   fallbackHeadError: string | null
   fallbackAttempted: boolean
   file?: {
