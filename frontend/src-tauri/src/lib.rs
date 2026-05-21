@@ -600,61 +600,100 @@ fn handle_video_request(
         .find(|h| h.field.equiv("Range"))
         .map(|h| h.value.as_str().to_string());
 
-    let mut file = match fs::File::open(&path) {
-        Ok(f) => f,
-        Err(_) => {
-            return request.respond(
-                tiny_http::Response::from_string("open failed").with_status_code(500),
+    if request.method() == &tiny_http::Method::Head {
+        let mut response = tiny_http::Response::empty(200);
+        response.add_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap(),
+        );
+        response.add_header(
+            tiny_http::Header::from_bytes(&b"Content-Length"[..], file_size.to_string().as_bytes())
+                .unwrap(),
+        );
+        response.add_header(
+            tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+        );
+        response.add_header(
+            tiny_http::Header::from_bytes(
+                &b"Cache-Control"[..],
+                &b"no-cache, no-store, must-revalidate"[..],
+            )
+            .unwrap(),
+        );
+        for h in cors_headers() {
+            response.add_header(h);
+        }
+        return request.respond(response);
+    }
+
+    let parsed_range = range_str
+        .as_deref()
+        .map(|r| parse_range_header(r, file_size))
+        .transpose();
+    let parsed_range = match parsed_range {
+        Ok(range) => range,
+        Err(()) => {
+            let mut response = tiny_http::Response::empty(416);
+            response.add_header(
+                tiny_http::Header::from_bytes(
+                    &b"Content-Range"[..],
+                    format!("bytes */{file_size}").as_bytes(),
+                )
+                .unwrap(),
             );
+            response.add_header(
+                tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+            );
+            for h in cors_headers() {
+                response.add_header(h);
+            }
+            return request.respond(response);
         }
     };
-
-    let has_range = range_str.is_some();
-    let (start, end) = if let Some(range) = range_str
-        .as_deref()
-        .and_then(|r| parse_range_header(r, file_size))
-    {
+    let (start, end) = if let Some(range) = parsed_range {
         let (s, e) = range;
-        let actual_end = e.min(s + VIDEO_CHUNK_MAX - 1).min(file_size.saturating_sub(1));
+        let actual_end = e
+            .min(s + VIDEO_CHUNK_MAX - 1)
+            .min(file_size.saturating_sub(1));
         (s, actual_end)
     } else {
-        // Rangeなしの初回要求: 全長ヒントを返しつつ最初のチャンクを送る
+        // Rangeなしの初回GETにも206を返す。200で先頭チャンクだけを返すとWKWebViewが
+        // 大容量MP4を壊れたソースとして扱うことがある。
         (0, file_size.saturating_sub(1).min(VIDEO_CHUNK_MAX - 1))
     };
     let length = end.saturating_sub(start) + 1;
 
+    let mut file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => {
+            return request
+                .respond(tiny_http::Response::from_string("open failed").with_status_code(500));
+        }
+    };
+
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return request.respond(
-            tiny_http::Response::from_string("seek failed").with_status_code(416),
-        );
+        return request
+            .respond(tiny_http::Response::from_string("seek failed").with_status_code(416));
     }
 
     let limited = file.take(length);
-    // Rangeリクエスト → 206 Partial Content
-    // 通常GET → 200 OK
-    let status = if has_range { 206 } else { 200 };
     let mut response = tiny_http::Response::new(
-        tiny_http::StatusCode(status),
+        tiny_http::StatusCode(206),
         Vec::new(),
         limited,
         Some(length as usize),
         None,
     );
+    response
+        .add_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap());
     response.add_header(
-        tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap(),
+        tiny_http::Header::from_bytes(
+            &b"Content-Range"[..],
+            format!("bytes {start}-{end}/{file_size}").as_bytes(),
+        )
+        .unwrap(),
     );
-    if has_range {
-        response.add_header(
-            tiny_http::Header::from_bytes(
-                &b"Content-Range"[..],
-                format!("bytes {start}-{end}/{file_size}").as_bytes(),
-            )
-            .unwrap(),
-        );
-    }
-    response.add_header(
-        tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
-    );
+    response
+        .add_header(tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap());
     response.add_header(
         tiny_http::Header::from_bytes(
             &b"Cache-Control"[..],
@@ -669,17 +708,33 @@ fn handle_video_request(
     request.respond(response)
 }
 
-fn parse_range_header(range: &str, file_size: u64) -> Option<(u64, u64)> {
-    let range = range.strip_prefix("bytes=")?;
+fn parse_range_header(range: &str, file_size: u64) -> Result<(u64, u64), ()> {
+    let range = range.strip_prefix("bytes=").ok_or(())?;
     let mut parts = range.splitn(2, '-');
-    let start: u64 = parts.next()?.parse().ok()?;
-    let end: u64 = parts
-        .next()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(file_size.saturating_sub(1))
-        .min(file_size.saturating_sub(1));
-    (start <= end && start < file_size).then_some((start, end))
+    let start_part = parts.next().ok_or(())?;
+    let end_part = parts.next().ok_or(())?;
+    let (start, end) = if start_part.is_empty() {
+        let suffix_len: u64 = end_part.parse().map_err(|_| ())?;
+        if suffix_len == 0 || file_size == 0 {
+            return Err(());
+        }
+        let start = file_size.saturating_sub(suffix_len);
+        (start, file_size.saturating_sub(1))
+    } else {
+        let start: u64 = start_part.parse().map_err(|_| ())?;
+        let end = if end_part.is_empty() {
+            file_size.saturating_sub(1)
+        } else {
+            end_part
+                .parse::<u64>()
+                .map_err(|_| ())?
+                .min(file_size.saturating_sub(1))
+        };
+        (start, end)
+    };
+    (start <= end && start < file_size)
+        .then_some((start, end))
+        .ok_or(())
 }
 
 fn generate_video_token() -> String {
