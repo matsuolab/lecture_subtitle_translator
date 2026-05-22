@@ -19,6 +19,7 @@ import {
   validateTextNormalizationRulesJson,
 } from '@/lib/pipeline/textNormalization'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { getWorkLogDir, isWorkLogPersistent, openWorkLogDir } from '@/lib/worklog/repository'
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -178,6 +179,31 @@ export function SettingsTab({
     })
   }
 
+  async function handlePickWorkLogDir() {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: 'ワークログの保管場所を選択',
+      })
+      if (typeof picked === 'string') {
+        onAdminSettingsChange({ workLogDir: picked })
+      }
+    } catch {
+      alert('フォルダの選択に失敗しました。')
+    }
+  }
+
+  async function handleOpenWorkLogDir() {
+    try {
+      const dir = await getWorkLogDir(adminSettings.workLogDir)
+      await openWorkLogDir(dir)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'フォルダを開けませんでした。')
+    }
+  }
+
   function applyNormalizationJsonDraft() {
     const result = validateTextNormalizationRulesJson(normalizationJsonDraft)
     if (!result.ok) {
@@ -326,6 +352,46 @@ export function SettingsTab({
             <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
               {currentVersion && currentVersion !== '0.0.0' ? currentVersion : '開発ビルド'}
             </div>
+          </div>
+        </FieldCard>
+      </Section>
+
+      <Section title="ワークログ（作業データ記録）" theme={theme}>
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>保管場所</div>
+          <div style={{
+            padding: '8px 10px',
+            borderRadius: 8,
+            border: `1px solid ${theme.panelBorder}`,
+            background: theme.panelBg,
+            color: theme.textSecondary,
+            fontSize: 11,
+            lineHeight: 1.6,
+            wordBreak: 'break-all',
+          }}>
+            {adminSettings.workLogDir.trim() || '既定（アプリデータ領域内の worklogs フォルダ）'}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={handlePickWorkLogDir} style={smallButtonStyle(theme)}>
+              フォルダを選択
+            </button>
+            {adminSettings.workLogDir.trim() && (
+              <button
+                type="button"
+                onClick={() => onAdminSettingsChange({ workLogDir: '' })}
+                style={smallButtonStyle(theme)}
+              >
+                既定に戻す
+              </button>
+            )}
+            <button type="button" onClick={handleOpenWorkLogDir} style={smallButtonStyle(theme)}>
+              フォルダを開く
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            書き起こし・AI修正・手動編集の作業履歴をセッションごとの JSONL ファイルに記録します。
+            保管場所を変更すると、変更後の新しいセッションから新フォルダに保存されます（過去のログは移動しません）。
+            {!isWorkLogPersistent() && ' ※ブラウザ実行のため、ワークログはメモリ保持のみ（リロードで消えます）。'}
           </div>
         </FieldCard>
       </Section>

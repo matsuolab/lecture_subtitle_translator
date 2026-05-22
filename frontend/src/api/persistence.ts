@@ -1,6 +1,7 @@
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineRunResult } from '@/types/pipeline'
+import type { WorkLogExport } from '@/lib/worklog/types'
 import { normalizeSubtitleText, parseTextNormalizationConfig } from '@/lib/pipeline/textNormalization'
 
 const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
@@ -17,6 +18,8 @@ export interface SessionExportData {
     adminSettings?: Partial<AdminSettings>
     pipelineRun?: PipelineRunResult
     pipelineHistory?: PipelineRunResult[]
+    /** 現セッションのワークログ（書き起こし起点→修正の作業履歴） */
+    workLog?: WorkLogExport
   }
 }
 
@@ -87,12 +90,24 @@ export function clearLocalStorage(): void {
 
 // ─── JSON プロジェクトファイル ─────────────────────────────────────────────
 
+/** ISO日時を YYYYMMDD-HHMMSS 形式のファイル名向け文字列に変換 */
+function timestampForFilename(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return 'unknown'
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+    + `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
 export function exportProjectJson(data: SessionExportData | SubtitleBlock[]): void {
   const payload: SessionExportData = Array.isArray(data)
     ? { version: 1, savedAt: new Date().toISOString(), blocks: data }
     : data
   const json = JSON.stringify(payload, null, 2)
-  downloadFile(json, 'subtitle-project.json', 'application/json')
+  // セッションIDがあればワークログ(<sessionId>.jsonl)と名前で対応が取れる
+  const suffix = payload.session?.workLog?.header.sessionId
+    ?? timestampForFilename(payload.savedAt)
+  downloadFile(json, `subtitle-project_${suffix}.json`, 'application/json')
 }
 
 export function importProjectJson(file: File): Promise<SubtitleBlock[]> {
