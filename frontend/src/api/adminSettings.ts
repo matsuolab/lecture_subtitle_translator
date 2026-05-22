@@ -61,6 +61,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     textNormalizationRulesJson: DEFAULT_TEXT_NORMALIZATION_RULES_JSON,
     compressPromptOverride: '',
     expandPromptOverride: '',
+    workLogDir: '',
   }
 }
 
@@ -153,6 +154,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     textNormalizationRulesJson: typeof raw.textNormalizationRulesJson === 'string' ? raw.textNormalizationRulesJson : defaults.textNormalizationRulesJson,
     compressPromptOverride: typeof raw.compressPromptOverride === 'string' ? raw.compressPromptOverride : '',
     expandPromptOverride: typeof raw.expandPromptOverride === 'string' ? raw.expandPromptOverride : '',
+    workLogDir: typeof raw.workLogDir === 'string' ? raw.workLogDir : '',
   }
 }
 

@@ -37,6 +37,8 @@ import { useLocale } from '@/context/LocaleContext'
 import { useGlossary, type GlossaryEntry, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
 import { useToast } from '@/context/ToastContext'
 import { applyGlossaryToText } from '@/utils/glossaryApply'
+import { useWorkLog } from '@/hooks/useWorkLog'
+import type { WorkLogBaselineOrigin } from '@/lib/worklog/types'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
@@ -376,6 +378,36 @@ function getPipelineClientDebug(error: unknown): {
   }
 }
 
+type EditHistoryEntry = NonNullable<SubtitleBlock['editHistory']>[number]
+
+/**
+ * editHistory エントリのワークログ重複記録防止キー。
+ * blockId を含めない（結合で blockId が変わっても同一エントリと判定するため）。
+ * split は子ブロックごとに同一エントリが複製されるため at 単位でグループ化する。
+ */
+function workLogDedupeKey(entry: EditHistoryEntry): string {
+  if (entry.type === 'split') return `split:${entry.at}`
+  return `${entry.at}|${entry.type}|${JSON.stringify(entry.before ?? null)}`
+}
+
+function readNum(obj: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = obj?.[key]
+  return typeof value === 'number' ? value : undefined
+}
+
+function readNestedNum(
+  obj: Record<string, unknown> | undefined,
+  outerKey: string,
+  innerKey: string,
+): number | undefined {
+  const nested = obj?.[outerKey]
+  if (nested && typeof nested === 'object') {
+    const value = (nested as Record<string, unknown>)[innerKey]
+    return typeof value === 'number' ? value : undefined
+  }
+  return undefined
+}
+
 export default function App() {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -423,6 +455,14 @@ export default function App() {
   const latestPipelineDebugRef = useRef<PipelineRunDebug | undefined>(
     restoredSession?.session?.pipelineRun?.debug,
   )
+  const workLog = useWorkLog()
+  const {
+    recordEvent: recordWorkLogEvent,
+    getActiveSessionId: getWorkLogSessionId,
+    getExport: getWorkLogExport,
+  } = workLog
+  // 既にワークログへ記録済みの editHistory エントリのキー集合（重複記録防止）
+  const workLogSeenRef = useRef<Set<string>>(new Set())
   const serviceCheckAbortRef = useRef<AbortController | null>(null)
   const [serviceCheck, setServiceCheck] = useState<{ status: 'idle' | 'checking' | 'success' | 'error'; message: string }>({
     status: 'idle',
@@ -863,6 +903,34 @@ export default function App() {
     })
   }, [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
 
+  /** ワークログへ記録済みの editHistory エントリを「既知」として登録（再記録防止） */
+  const seedWorkLogSeen = useCallback((source: SubtitleBlock[]) => {
+    const seen = new Set<string>()
+    for (const block of source) {
+      for (const entry of block.editHistory ?? []) {
+        seen.add(workLogDedupeKey(entry))
+      }
+    }
+    workLogSeenRef.current = seen
+  }, [])
+
+  /** 編集対象（ブロック集合）が確定したのでワークログの新セッションを開始する */
+  const beginWorkLogSession = useCallback((
+    origin: WorkLogBaselineOrigin,
+    initialBlocks: SubtitleBlock[],
+    opts?: { transcriptSegments?: TranscriptSegment[]; video?: VideoSource | null },
+  ) => {
+    seedWorkLogSeen(initialBlocks)
+    const video = opts && 'video' in opts ? opts.video : videoSource
+    void workLog.startSession({
+      origin,
+      video: video ? { name: video.name, path: video.path } : null,
+      settingsSnapshot: sanitizeAdminSettings(adminSettings),
+      initialBlocks: cloneBlocks(initialBlocks),
+      transcriptSegments: opts?.transcriptSegments,
+    }, adminSettings.workLogDir)
+  }, [adminSettings, videoSource, workLog, seedWorkLogSeen])
+
   const buildPipelineStubBlocks = useCallback((videoName: string): SubtitleBlock[] => {
     const rows: Array<{ start: number; end: number; source: string; target: string }> = [
       {
@@ -1096,6 +1164,7 @@ export default function App() {
       }
 
       reset(generated)
+      beginWorkLogSession('transcription', generated, { transcriptSegments, video: source })
 
       const finishedAt = Date.now()
       const metrics = calcPipelineMetrics(generated, startedAt, finishedAt)
@@ -1204,7 +1273,7 @@ export default function App() {
         videoSource: source,
       })
     }
-  }, [adminSettings, blocks, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, glossary, persistSessionSnapshot, pipelineHistory, reset, selfMadeGlossary, sleep])
+  }, [adminSettings, beginWorkLogSession, blocks, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, glossary, persistSessionSnapshot, pipelineHistory, reset, selfMadeGlossary, sleep])
 
   const buildSessionExport = useCallback((): SessionExportData => ({
     version: 2,
@@ -1225,8 +1294,9 @@ export default function App() {
           }
         : pipelineRun,
       pipelineHistory,
+      workLog: getWorkLogExport() ?? undefined,
     },
-  }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
+  }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource, getWorkLogExport])
 
   const handleExportSrt = useCallback(() => {
     exportSrt(blocks, adminSettings)
@@ -1310,6 +1380,7 @@ export default function App() {
       try {
         const imported = await importSrt(file)
         reset(imported)
+        beginWorkLogSession('srt_import', imported)
       } catch {
         alert(t.importSrtError)
       }
@@ -1317,6 +1388,7 @@ export default function App() {
       try {
         const imported = await importProjectJson(file)
         reset(imported)
+        beginWorkLogSession('json_import', imported)
       } catch {
         alert(t.importError)
       }
@@ -1339,7 +1411,7 @@ export default function App() {
     } else {
       alert(`非対応のファイル形式です: ${file.name}\n対応形式: .srt, .txt, .json, .csv, .xlsx`)
     }
-  }, [reset, t.importSrtError, t.importError, importEntries])
+  }, [reset, beginWorkLogSession, t.importSrtError, t.importError, importEntries])
 
   // Tauri: ネイティブDrag&Dropのフォールバック（WindowsビルドでHTML5 D&Dが効かない対策）
   useEffect(() => {
@@ -1362,11 +1434,13 @@ export default function App() {
         if (name.endsWith('.srt') || name.endsWith('.txt')) {
           const imported = await importSrt(await readTextFileAsFile(path))
           reset(imported)
+          beginWorkLogSession('srt_import', imported)
           return
         }
         if (name.endsWith('.json')) {
           const imported = await importProjectJson(await readTextFileAsFile(path))
           reset(imported)
+          beginWorkLogSession('json_import', imported)
           return
         }
         if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
@@ -1396,7 +1470,7 @@ export default function App() {
       cancelled = true
       unlisten?.()
     }
-  }, [reset, importEntries, handleVideoPathInput, readTextFileAsFile, readBinaryFileAsFile])
+  }, [reset, beginWorkLogSession, importEntries, handleVideoPathInput, readTextFileAsFile, readBinaryFileAsFile])
 
   const handleLoadVideo = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -1442,6 +1516,72 @@ export default function App() {
     return () => clearTimeout(timerId)
   }, [blocks])
 
+  // 起動時: 進行中ワークログセッションがあれば継続再開する
+  useEffect(() => {
+    seedWorkLogSeen(blocks)
+    void workLog.resumeFromPersisted(adminSettings.workLogDir)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // blocks の editHistory 差分をワークログへ追記（手動編集・ブロック系譜）
+  useEffect(() => {
+    if (!getWorkLogSessionId()) return
+    const seen = workLogSeenRef.current
+    const splitGroups = new Map<string, { parentId: number; children: number[] }>()
+    for (const block of blocks) {
+      for (const entry of block.editHistory ?? []) {
+        if (entry.type === 'split') {
+          // 同じ at の split は子ブロックごとに複製される → at 単位でまとめる
+          const parentId = readNum(entry.before, 'id') ?? block.id
+          const group = splitGroups.get(entry.at) ?? { parentId, children: [] }
+          if (!group.children.includes(block.id)) group.children.push(block.id)
+          splitGroups.set(entry.at, group)
+          continue
+        }
+        const key = workLogDedupeKey(entry)
+        if (seen.has(key)) continue
+        seen.add(key)
+        if (entry.type === 'merge') {
+          const parents = [
+            readNestedNum(entry.before, 'first', 'id'),
+            readNestedNum(entry.before, 'second', 'id'),
+          ].filter((n): n is number => n !== undefined)
+          recordWorkLogEvent({
+            category: 'lineage',
+            type: 'merge',
+            at: entry.at,
+            blockId: block.id,
+            parentBlockIds: parents,
+            childBlockId: block.id,
+            before: entry.before,
+            after: entry.after,
+          })
+        } else {
+          recordWorkLogEvent({
+            category: 'manual_edit',
+            type: entry.type,
+            at: entry.at,
+            blockId: block.id,
+            before: entry.before,
+            after: entry.after,
+          })
+        }
+      }
+    }
+    for (const [at, group] of splitGroups) {
+      const key = `split:${at}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      recordWorkLogEvent({
+        category: 'lineage',
+        type: 'split',
+        at,
+        parentBlockId: group.parentId,
+        childBlockIds: group.children,
+      })
+    }
+  }, [blocks, recordWorkLogEvent, getWorkLogSessionId])
+
   // 復元メッセージを3秒後に消す
   useEffect(() => {
     if (!restoredMsg) return
@@ -1455,11 +1595,12 @@ export default function App() {
     try {
       const imported = await importProjectJson(file)
       reset(imported)
+      beginWorkLogSession('json_import', imported)
     } catch {
       alert(t.importError)
     }
     e.target.value = ''
-  }, [reset])
+  }, [reset, beginWorkLogSession, t.importError])
 
   const handleImportSrt = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -1467,11 +1608,12 @@ export default function App() {
     try {
       const imported = await importSrt(file)
       reset(imported)
+      beginWorkLogSession('srt_import', imported)
     } catch {
       alert(t.importSrtError)
     }
     e.target.value = ''
-  }, [reset, t.importSrtError])
+  }, [reset, beginWorkLogSession, t.importSrtError])
 
   const handleBlockSelect = useCallback((id: number) => {
     const block = blocks.find(b => b.id === id)

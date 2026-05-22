@@ -58,4 +58,7 @@ export interface AdminSettings {
   // プロンプト上書き（'' = デフォルト使用）
   compressPromptOverride: string
   expandPromptOverride: string
+
+  // ワークログ（作業データ記録）の保管場所（'' = 既定の appLocalDataDir/worklogs）
+  workLogDir: string
 }
