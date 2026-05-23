@@ -4,8 +4,18 @@ import { getCpsLevel } from '@/types/subtitle'
 import { SubtitleBlock } from './SubtitleBlock'
 import { SubtitleSearchBar, type SubtitleSearchState } from './SubtitleSearchBar'
 import { findMatches, buildReplaceAll, buildReplaceOne, type SearchMatch } from '@/lib/search/subtitleSearch'
+import { isTauri } from '@tauri-apps/api/core'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
+
+/** Tauri/ブラウザどちらでも動く確認ダイアログ */
+async function confirmDialog(message: string, title: string): Promise<boolean> {
+  if (isTauri()) {
+    const { confirm } = await import('@tauri-apps/plugin-dialog')
+    return await confirm(message, { title, kind: 'warning' })
+  }
+  return window.confirm(message)
+}
 
 interface SubtitleBlockListProps {
   blocks: SubtitleBlockType[]
@@ -377,7 +387,7 @@ export function SubtitleBlockList({
     // インデックスは据え置き：マッチが1つ減るので、次のマッチが自動的にこの位置に来る
   }, [matches, currentMatchIdx, blocks, searchState.replaceWith, onBulkReplace])
 
-  const handleReplaceAll = useCallback(() => {
+  const handleReplaceAll = useCallback(async () => {
     if (matches.length === 0) return
     const result = buildReplaceAll(blocks, {
       query: searchState.query,
@@ -387,7 +397,10 @@ export function SubtitleBlockList({
       includeApproved: searchState.includeApproved,
     }, searchState.replaceWith)
     if (result.replacedCount === 0) return
-    const ok = window.confirm(`${result.replacedCount} 件を「${searchState.replaceWith}」に置換します。よろしいですか？`)
+    const ok = await confirmDialog(
+      `${result.replacedCount} 件を「${searchState.replaceWith}」に置換します。よろしいですか？`,
+      'すべて置換',
+    )
     if (!ok) return
     onBulkReplace(result.updates)
   }, [blocks, matches.length, searchState, onBulkReplace])
