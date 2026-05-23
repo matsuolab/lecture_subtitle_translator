@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useMemo, useCallback, Fragment } from 'rea
 import type { SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
 import { getCpsLevel } from '@/types/subtitle'
 import { SubtitleBlock } from './SubtitleBlock'
+import { SubtitleSearchBar, type SubtitleSearchState } from './SubtitleSearchBar'
+import { findMatches, buildReplaceAll, buildReplaceOne, type SearchMatch } from '@/lib/search/subtitleSearch'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 
@@ -12,8 +14,6 @@ interface SubtitleBlockListProps {
   onBlockSelect: (id: number) => void
   onApprove: (id: number) => void
   onFlag: (id: number) => void
-  onReSplit: (id: number) => void
-  onReTranslate: (id: number) => void
   onUpdateSource: (id: number, text: string) => void
   onUpdateTarget: (id: number, text: string) => void
   onManualSplit: (id: number, textBefore: string, textAfter: string) => void
@@ -25,6 +25,7 @@ interface SubtitleBlockListProps {
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
+  onBulkReplace: (updates: Array<{ id: number; source?: string; target?: string }>) => void
   maxCps: number
   maxCharsPerLine: number
 }
@@ -163,8 +164,6 @@ export function SubtitleBlockList({
   onBlockSelect,
   onApprove,
   onFlag,
-  onReSplit,
-  onReTranslate,
   onUpdateSource,
   onUpdateTarget,
   onManualSplit,
@@ -176,12 +175,25 @@ export function SubtitleBlockList({
   onUpdateTimes,
   onIgnoreWarning,
   onDraftChange,
+  onBulkReplace,
   maxCps,
   maxCharsPerLine,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
   const minimapRef = useRef<HTMLDivElement>(null)
+  // ─── 検索・置換ステート ───
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchAutoFocus, setSearchAutoFocus] = useState(false)
+  const [searchState, setSearchState] = useState<SubtitleSearchState>({
+    query: '',
+    replaceWith: '',
+    scope: 'all',
+    caseSensitive: false,
+    wholeWord: false,
+    includeApproved: false,
+  })
+  const [currentMatchIdx, setCurrentMatchIdx] = useState(0)
   const [sliderIndex, setSliderIndex] = useState(0)
   const [scrollRatio, setScrollRatio] = useState(0)
   const [viewportRatio, setViewportRatio] = useState(1)
@@ -302,6 +314,120 @@ export function SubtitleBlockList({
     container.scrollTop = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 6)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ─── 検索マッチ計算 ───
+  const matches: SearchMatch[] = useMemo(
+    () => findMatches(blocks, {
+      query: searchOpen ? searchState.query : '',
+      scope: searchState.scope,
+      caseSensitive: searchState.caseSensitive,
+      wholeWord: searchState.wholeWord,
+      includeApproved: searchState.includeApproved,
+    }),
+    [blocks, searchOpen, searchState.query, searchState.scope, searchState.caseSensitive, searchState.wholeWord, searchState.includeApproved],
+  )
+
+  // マッチ数変化に追従してインデックスを範囲内に収める
+  useEffect(() => {
+    if (matches.length === 0) {
+      if (currentMatchIdx !== 0) setCurrentMatchIdx(0)
+      return
+    }
+    if (currentMatchIdx >= matches.length) setCurrentMatchIdx(0)
+  }, [matches.length, currentMatchIdx])
+
+  // 現在マッチのブロックへスクロール
+  const scrollToBlock = useCallback((blockId: number) => {
+    const el = containerRef.current?.querySelector(`[data-block-id="${blockId}"]`)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [])
+
+  useEffect(() => {
+    if (!searchOpen || matches.length === 0) return
+    const m = matches[currentMatchIdx]
+    if (m) scrollToBlock(m.blockId)
+  }, [searchOpen, currentMatchIdx, matches, scrollToBlock])
+
+  const handleToggleSearch = useCallback(() => {
+    setSearchOpen(open => {
+      const next = !open
+      if (next) {
+        setSearchAutoFocus(true)
+        setTimeout(() => setSearchAutoFocus(false), 50)
+      }
+      return next
+    })
+  }, [])
+
+  const gotoNext = useCallback(() => {
+    if (matches.length === 0) return
+    setCurrentMatchIdx(i => (i + 1) % matches.length)
+  }, [matches.length])
+  const gotoPrev = useCallback(() => {
+    if (matches.length === 0) return
+    setCurrentMatchIdx(i => (i - 1 + matches.length) % matches.length)
+  }, [matches.length])
+
+  const handleReplaceCurrent = useCallback(() => {
+    if (matches.length === 0) return
+    const m = matches[currentMatchIdx]
+    const block = blocks.find(b => b.id === m.blockId)
+    if (!block) return
+    const upd = buildReplaceOne(block, m, searchState.replaceWith)
+    onBulkReplace([{ id: block.id, ...upd }])
+    // インデックスは据え置き：マッチが1つ減るので、次のマッチが自動的にこの位置に来る
+  }, [matches, currentMatchIdx, blocks, searchState.replaceWith, onBulkReplace])
+
+  const handleReplaceAll = useCallback(() => {
+    if (matches.length === 0) return
+    const result = buildReplaceAll(blocks, {
+      query: searchState.query,
+      scope: searchState.scope,
+      caseSensitive: searchState.caseSensitive,
+      wholeWord: searchState.wholeWord,
+      includeApproved: searchState.includeApproved,
+    }, searchState.replaceWith)
+    if (result.replacedCount === 0) return
+    const ok = window.confirm(`${result.replacedCount} 件を「${searchState.replaceWith}」に置換します。よろしいですか？`)
+    if (!ok) return
+    onBulkReplace(result.updates)
+  }, [blocks, matches.length, searchState, onBulkReplace])
+
+  // Ctrl+F / Cmd+F で検索バーをトグル
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const isFind = (e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')
+      if (!isFind) return
+      // 字幕タブ内のテキストエリア中でも有効にしたい→デフォルトのブラウザ検索を上書き
+      e.preventDefault()
+      setSearchOpen(true)
+      setSearchAutoFocus(true)
+      // 直後にフラグを下ろす
+      setTimeout(() => setSearchAutoFocus(false), 50)
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  // ブロックごとの searchRanges を事前計算（メモ化）
+  const searchRangesByBlock = useMemo(() => {
+    const map = new Map<number, { target: { start: number; end: number; current?: boolean }[]; source: { start: number; end: number; current?: boolean }[] }>()
+    if (!searchOpen || matches.length === 0) return map
+    const currentMatch = matches[currentMatchIdx]
+    for (const m of matches) {
+      const entry = map.get(m.blockId) ?? { target: [], source: [] }
+      const range = {
+        start: m.start,
+        end: m.end,
+        current: currentMatch && currentMatch.blockId === m.blockId && currentMatch.field === m.field
+          && currentMatch.start === m.start && currentMatch.end === m.end,
+      }
+      if (m.field === 'target') entry.target.push(range)
+      else entry.source.push(range)
+      map.set(m.blockId, entry)
+    }
+    return map
+  }, [matches, currentMatchIdx, searchOpen])
+
   // 境界ドラッグ中のカーソル変更
   useEffect(() => {
     if (boundaryDrag) {
@@ -403,7 +529,25 @@ export function SubtitleBlockList({
     : 0
 
   return (
-    <div className="h-full flex overflow-hidden">
+    <div className="h-full flex flex-col overflow-hidden">
+      {searchOpen && (
+        <SubtitleSearchBar
+          state={searchState}
+          onChange={s => {
+            setSearchState(s)
+            setCurrentMatchIdx(0)
+          }}
+          matchCount={matches.length}
+          currentIndex={matches.length > 0 ? currentMatchIdx : -1}
+          onPrev={gotoPrev}
+          onNext={gotoNext}
+          onReplaceCurrent={handleReplaceCurrent}
+          onReplaceAll={handleReplaceAll}
+          onClose={() => setSearchOpen(false)}
+          autoFocus={searchAutoFocus}
+        />
+      )}
+      <div className="flex-1 flex overflow-hidden min-h-0">
 
       {/* メインスクロール領域 */}
       <div
@@ -430,8 +574,6 @@ export function SubtitleBlockList({
               onSelect={onBlockSelect}
               onApprove={handleApprove}
               onFlag={onFlag}
-              onReSplit={onReSplit}
-              onReTranslate={onReTranslate}
               onUpdateSource={onUpdateSource}
               onUpdateTarget={onUpdateTarget}
               onManualSplit={onManualSplit}
@@ -455,6 +597,10 @@ export function SubtitleBlockList({
               }}
               maxCps={maxCps}
               maxCharsPerLine={maxCharsPerLine}
+              searchRangesTarget={searchRangesByBlock.get(block.id)?.target}
+              searchRangesSource={searchRangesByBlock.get(block.id)?.source}
+              searchOpen={searchOpen}
+              onToggleSearch={handleToggleSearch}
             />
           </div>
           {idx < displayBlocks.length - 1 && (() => {
@@ -610,6 +756,7 @@ export function SubtitleBlockList({
         </div>
       )}
 
+      </div>
     </div>
   )
 }

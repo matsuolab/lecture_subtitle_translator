@@ -3,9 +3,18 @@ import type { ReactNode } from 'react'
 import type { GlossaryTerm } from '@/types/subtitle'
 import { useTheme } from '@/context/ThemeContext'
 
+export interface SearchHighlightRange {
+  start: number
+  end: number
+  /** 「現在の」マッチかどうか。true のときアクセント色で強調 */
+  current?: boolean
+}
+
 interface TermHighlightProps {
   text: string
   terms: GlossaryTerm[]
+  /** 検索ヒット位置（オプション）。用語ハイライトの上に重ねて表示する */
+  searchRanges?: SearchHighlightRange[]
 }
 
 /** テキスト中の \n を ↵ マーカー + <br> に変換して表示する */
@@ -25,11 +34,12 @@ function renderWithBreaks(text: string, markerColor: string): ReactNode {
   return result as ReactNode
 }
 
-export function TermHighlight({ text, terms }: TermHighlightProps) {
+export function TermHighlight({ text, terms, searchRanges }: TermHighlightProps) {
   const { theme } = useTheme()
   const [hoveredWord, setHoveredWord] = useState<string | null>(null)
 
-  if (terms.length === 0) return <span>{renderWithBreaks(text, theme.textMuted)}</span>
+  const hasSearch = !!searchRanges && searchRanges.length > 0
+  if (terms.length === 0 && !hasSearch) return <span>{renderWithBreaks(text, theme.textMuted)}</span>
 
   // テキスト中の用語にマークを付ける
   const markedPositions: boolean[] = new Array(text.length).fill(false)
@@ -51,22 +61,51 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
     }
   }
 
-  // パーツに分割
-  const parts: { text: string; term?: GlossaryTerm }[] = []
+  // 検索マッチ位置を記録（0: なし / 1: マッチ / 2: 現在のマッチ）
+  const searchMark: Uint8Array = new Uint8Array(text.length)
+  if (searchRanges) {
+    for (const r of searchRanges) {
+      const lo = Math.max(0, r.start)
+      const hi = Math.min(text.length, r.end)
+      for (let i = lo; i < hi; i++) {
+        if (r.current) searchMark[i] = 2
+        else if (searchMark[i] === 0) searchMark[i] = 1
+      }
+    }
+  }
+
+  // パーツに分割（用語 + 検索マッチ状態が同じ連続範囲をまとめる）
+  const parts: { text: string; term?: GlossaryTerm; search?: 1 | 2 }[] = []
   let cursor = 0
   while (cursor < text.length) {
-    if (!markedPositions[cursor]) {
-      const start = cursor
-      while (cursor < text.length && !markedPositions[cursor]) cursor++
-      parts.push({ text: text.slice(start, cursor) })
-    } else {
-      const start = cursor
-      while (cursor < text.length && markedPositions[cursor]) cursor++
-      const word = text.slice(start, cursor)
-      // スパン先頭位置の term を使用（長い用語優先で posToTerm に記録済み）
-      const matchedTerm = posToTerm[start]
-      parts.push({ text: word, term: matchedTerm })
-    }
+    const startTerm = markedPositions[cursor] ? posToTerm[cursor] : undefined
+    const startSearch = searchMark[cursor]
+    let end = cursor + 1
+    while (
+      end < text.length &&
+      (markedPositions[end] ? posToTerm[end] : undefined) === startTerm &&
+      searchMark[end] === startSearch
+    ) end++
+    const search: 1 | 2 | undefined = startSearch === 2 ? 2 : startSearch === 1 ? 1 : undefined
+    parts.push({ text: text.slice(cursor, end), term: startTerm, search })
+    cursor = end
+  }
+
+  const searchStyle = (level: 1 | 2): React.CSSProperties => level === 2 ? {
+    background: 'rgba(255,196,0,0.85)',
+    color: '#1a1a1a',
+    borderRadius: 2,
+    outline: '1px solid rgba(255,140,0,0.95)',
+    padding: '0 1px',
+  } : {
+    background: 'rgba(255,236,140,0.55)',
+    borderRadius: 2,
+    padding: '0 1px',
+  }
+
+  const wrapSearch = (node: ReactNode, level: 1 | 2 | undefined, key: string | number): ReactNode => {
+    if (!level) return <span key={key}>{node}</span>
+    return <span key={key} style={searchStyle(level)}>{node}</span>
   }
 
   return (
@@ -75,7 +114,7 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
         part.term ? (
           <span
             key={i}
-            style={{ position: 'relative', display: 'inline-block' }}
+            style={{ position: 'relative', display: 'inline-block', ...(part.search ? searchStyle(part.search) : null) }}
             onMouseEnter={() => setHoveredWord(part.term!.word)}
             onMouseLeave={() => setHoveredWord(null)}
           >
@@ -170,7 +209,7 @@ export function TermHighlight({ text, terms }: TermHighlightProps) {
             )}
           </span>
         ) : (
-          <span key={i}>{renderWithBreaks(part.text, theme.textMuted)}</span>
+          wrapSearch(renderWithBreaks(part.text, theme.textMuted), part.search, i)
         )
       )}
     </span>
