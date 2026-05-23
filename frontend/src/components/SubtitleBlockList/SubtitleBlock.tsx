@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useDeferredValue, memo } from 'react'
 import { getCpsLevel, getLineLengthLevel, formatTime, parseTime, type SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
-import { TermHighlight } from './TermHighlight'
+import { TermHighlight, type SearchHighlightRange } from './TermHighlight'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
@@ -15,8 +15,6 @@ interface SubtitleBlockProps {
   onSelect: (id: number) => void
   onApprove: (id: number) => void
   onFlag: (id: number) => void
-  onReSplit: (id: number) => void
-  onReTranslate: (id: number) => void
   onUpdateSource: (id: number, text: string) => void
   onUpdateTarget: (id: number, text: string) => void
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
@@ -32,6 +30,14 @@ interface SubtitleBlockProps {
   onMergeWithNext: (id: number) => void
   maxCps: number
   maxCharsPerLine: number
+  /** 検索ヒット位置（target用） */
+  searchRangesTarget?: SearchHighlightRange[]
+  /** 検索ヒット位置（source用） */
+  searchRangesSource?: SearchHighlightRange[]
+  /** 検索バーが開いているか（編集ツールバーの🔍ボタン表示用） */
+  searchOpen?: boolean
+  /** 編集ツールバーの🔍ボタンクリック時 */
+  onToggleSearch?: () => void
 }
 
 // ─── 警告バッジ共通コンポーネント ───────────────────────────────────────────
@@ -316,6 +322,19 @@ const splitBtnStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
+const searchToggleBtnStyle = (active: boolean): React.CSSProperties => ({
+  fontSize: 12,
+  padding: '3px 8px',
+  borderRadius: 4,
+  border: `1px solid ${active ? '#f59e0b' : '#94a3b8'}`,
+  background: active ? 'rgba(245,158,11,0.18)' : 'rgba(148,163,184,0.10)',
+  color: active ? '#f59e0b' : '#64748b',
+  cursor: 'pointer',
+  fontWeight: 600,
+  whiteSpace: 'nowrap',
+  lineHeight: 1,
+})
+
 function SubtitleBlockInner({
   block,
   isActive,
@@ -324,8 +343,6 @@ function SubtitleBlockInner({
   onSelect,
   onApprove,
   onFlag,
-  onReSplit,
-  onReTranslate,
   onUpdateSource,
   onUpdateTarget,
   onUpdateTimes,
@@ -341,6 +358,10 @@ function SubtitleBlockInner({
   onMergeWithNext,
   maxCps,
   maxCharsPerLine,
+  searchRangesTarget,
+  searchRangesSource,
+  searchOpen,
+  onToggleSearch,
 }: SubtitleBlockProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -701,6 +722,16 @@ function SubtitleBlockInner({
               title="カーソル位置でブロックを2分割し、文字数比でタイムコードを再割り付けします"
               style={splitBtnStyle}
             >✂ 編集位置で分割</button>
+            {onToggleSearch && (
+              <button
+                type="button"
+                onMouseDown={e => e.preventDefault()}
+                onClick={onToggleSearch}
+                title="検索・置換 (Ctrl+F)"
+                aria-pressed={!!searchOpen}
+                style={searchToggleBtnStyle(!!searchOpen)}
+              >🔍</button>
+            )}
           </div>
           <textarea
             ref={targetTextareaRef}
@@ -758,7 +789,7 @@ function SubtitleBlockInner({
           title={isApproved ? undefined : 'クリックで訳文を編集'}
         >
           {block.target
-            ? <TermHighlight text={block.target} terms={matchedTermsJa} />
+            ? <TermHighlight text={block.target} terms={matchedTermsJa} searchRanges={searchRangesTarget} />
             : <span style={{ color: theme.textDisabled, fontStyle: 'italic' }}>（訳文なし）</span>
           }
         </div>
@@ -783,6 +814,16 @@ function SubtitleBlockInner({
               title="カーソル位置でブロックを2分割し、文字数比でタイムコードを再割り付けします"
               style={splitBtnStyle}
             >✂ 編集位置で分割</button>
+            {onToggleSearch && (
+              <button
+                type="button"
+                onMouseDown={e => e.preventDefault()}
+                onClick={onToggleSearch}
+                title="検索・置換 (Ctrl+F)"
+                aria-pressed={!!searchOpen}
+                style={searchToggleBtnStyle(!!searchOpen)}
+              >🔍</button>
+            )}
           </div>
           <textarea
             ref={textareaRef}
@@ -857,7 +898,7 @@ function SubtitleBlockInner({
             color: theme.inputText,
           }}
         >
-          <TermHighlight text={block.source} terms={sourceTerms} />
+          <TermHighlight text={block.source} terms={sourceTerms} searchRanges={searchRangesSource} />
         </div>
       )}
 
@@ -1230,18 +1271,6 @@ function SubtitleBlockInner({
               }}
             >
               ÷ 均等割り
-            </button>
-            <button
-              onClick={e => { e.stopPropagation(); onReSplit(block.id) }}
-              style={{ border: `1px solid ${theme.btnBorder}`, background: theme.btnBg, color: theme.btnText, borderRadius: 6, padding: '5px 9px', fontSize: 12, cursor: 'pointer' }}
-            >
-              {t.reSplit}
-            </button>
-            <button
-              onClick={e => { e.stopPropagation(); onReTranslate(block.id) }}
-              style={{ border: `1px solid ${theme.btnBorder}`, background: theme.btnBg, color: theme.btnText, borderRadius: 6, padding: '5px 9px', fontSize: 12, cursor: 'pointer' }}
-            >
-              {t.reTranslate}
             </button>
           </>
         )}

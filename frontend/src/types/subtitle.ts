@@ -1,5 +1,13 @@
 export type BlockStatus = 'pending' | 'approved' | 'flagged'
 
+export type SubtitleField = 'source' | 'target'
+
+export const SUBTITLE_FIELD_LABELS: Record<SubtitleField, string> = {
+  source: '字幕',
+  target: '書きおこし',
+}
+
+
 export interface GlossaryTerm {
   word: string
   expectedTranslation: string

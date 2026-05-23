@@ -1647,14 +1647,6 @@ export default function App() {
     }))
   }, [blocks, push])
 
-  const handleReSplit = useCallback((id: number) => {
-    alert(t.reSplitAlert(id))
-  }, [t])
-
-  const handleReTranslate = useCallback((id: number) => {
-    alert(t.reTranslateAlert(id))
-  }, [t])
-
   /** テキストを単語境界（最近接スペース）で2分割するユーティリティ */
   const splitAtWordBoundary = useCallback((text: string, targetIdx: number): [string, string] => {
     let bestIdx = targetIdx
@@ -1945,6 +1937,35 @@ export default function App() {
         { source: text },
       )
     }))
+  }, [blocks, push])
+
+  const handleBulkReplace = useCallback((updates: Array<{ id: number; source?: string; target?: string }>) => {
+    if (updates.length === 0) return
+    const byId = new Map(updates.map(u => [u.id, u]))
+    const next = blocks.map(b => {
+      const u = byId.get(b.id)
+      if (!u) return b
+      let block = b
+      if (u.source !== undefined && u.source !== b.source) {
+        const duration = b.endTime - b.startTime
+        block = withEditHistory(
+          { ...block, source: u.source, cps: Math.round(u.source.length / Math.max(0.1, duration) * 10) / 10, charCount: u.source.length },
+          'source_edit',
+          { source: b.source },
+          { source: u.source },
+        )
+      }
+      if (u.target !== undefined && u.target !== block.target) {
+        block = withEditHistory(
+          { ...block, target: u.target },
+          'target_edit',
+          { target: b.target },
+          { target: u.target },
+        )
+      }
+      return block
+    })
+    push(next)
   }, [blocks, push])
 
   const handleIgnoreWarning = useCallback((id: number, type: 'typo' | 'missing', key: string) => {
@@ -2438,8 +2459,6 @@ export default function App() {
                 onBlockSelect={handleBlockSelect}
                 onApprove={handleApprove}
                 onFlag={handleFlag}
-                onReSplit={handleReSplit}
-                onReTranslate={handleReTranslate}
                 onUpdateSource={handleUpdateSource}
                 onUpdateTarget={handleUpdateTarget}
                 onManualSplit={handleManualSplit}
@@ -2451,6 +2470,7 @@ export default function App() {
                 onUpdateTimes={handleUpdateTimes}
                 onIgnoreWarning={handleIgnoreWarning}
                 onDraftChange={handleDraftChange}
+                onBulkReplace={handleBulkReplace}
                 maxCps={adminSettings.enMaxCps}
                 maxCharsPerLine={adminSettings.enMaxCharsPerLine}
               />
