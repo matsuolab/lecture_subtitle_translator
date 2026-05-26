@@ -102,11 +102,10 @@ function normalizeSnapshotItem(item: unknown): Record<string, unknown> {
   )
 }
 
-function normalizeSnapshotItems(result: unknown): Record<string, unknown>[] {
+export function normalizeSnapshotItems(result: unknown): Record<string, unknown>[] {
   if (Array.isArray(result)) return result.map(normalizeSnapshotItem)
   if (result && typeof result === 'object') {
     const row = result as Record<string, unknown>
-    if (Array.isArray(row.blocks)) return row.blocks.map(normalizeSnapshotItem)
     if (Array.isArray(row.misses)) {
       return row.misses.map((miss, index) => ({ id: index + 1, miss }))
     }
@@ -115,9 +114,11 @@ function normalizeSnapshotItems(result: unknown): Record<string, unknown>[] {
       return [buildSnapshotSummary(row, 'issues'), ...buildSnapshotDetailItems(row.issues, 'issue')]
     }
     // デバッグ計測（correctionDebug など）: summary を1番目に + 各 entry を続けて
+    // agent 系 result は entries と blocks の両方を持つため、blocks より先にここで扱う。
     if (Array.isArray(row.entries)) {
-      return [buildSnapshotSummary(row, 'entries'), ...buildSnapshotDetailItems(row.entries, 'entry')]
+      return [buildSnapshotSummary(row, ['entries', 'blocks']), ...buildSnapshotDetailItems(row.entries, 'entry')]
     }
+    if (Array.isArray(row.blocks)) return row.blocks.map(normalizeSnapshotItem)
     // それ以外の summary 形オブジェクトは単一 item として保存（ノードが走ったことが分かる）
     return [{ _kind: 'summary', ...row }]
   }
@@ -128,10 +129,11 @@ function normalizeSnapshotItems(result: unknown): Record<string, unknown>[] {
  * validator / debug 系の結果オブジェクトから、明細配列を除いたサマリー部分を抽出。
  * 1番目の item として保存され、ノードが何を出力したかを俯瞰できるようにする。
  */
-function buildSnapshotSummary(row: Record<string, unknown>, excludeKey: string): Record<string, unknown> {
+function buildSnapshotSummary(row: Record<string, unknown>, excludeKeys: string | string[]): Record<string, unknown> {
+  const excluded = new Set(Array.isArray(excludeKeys) ? excludeKeys : [excludeKeys])
   const summary: Record<string, unknown> = { _kind: 'summary' }
   for (const [k, v] of Object.entries(row)) {
-    if (k === excludeKey) continue
+    if (excluded.has(k)) continue
     if (v === undefined) continue
     if (typeof v === 'function') continue
     summary[k] = v
@@ -225,6 +227,9 @@ export async function runLocalPostPipeline(
       settings,
       thresholds,
       runNode,
+      (nodeId, message) => {
+        record(nodeId, 'success', 0, message)
+      },
       {
         glossaryTerms: glossary.correctionTerms,
       },

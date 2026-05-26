@@ -24,6 +24,13 @@ export interface JaBlock {
   alignConf: AlignConf
   words?: WordTimestamp[]
   merged?: boolean
+  /**
+   * Phase1 detectIncompleteEnds で判定された「末尾が mid-sentence で次に続く」フラグ。
+   * - mergeContinuation: true なら次ブロックと結合候補
+   * - splitBlock.canApply: true なら split を試みない（前段で結合済 / 結合不能のケース）
+   * 未計算（旧データ・OFF時）の場合は undefined。
+   */
+  endsIncomplete?: boolean
 }
 
 export interface EnBlock extends JaBlock {

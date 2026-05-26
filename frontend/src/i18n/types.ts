@@ -148,6 +148,12 @@ export interface LocaleStrings {
   settingsPipelineMaxExpandPerBlock: string
   settingsPipelineMaxCompressPerBlock: string
   settingsPipelineMaxPhase2Retries: string
+  settingsPipelineMergeContinuationEnabled: string
+  settingsPipelineMergeContinuationMaxGapSec: string
+  settingsPipelineMergeContinuationMaxDurationSec: string
+  settingsPipelineMergeContinuationMaxTranscriptChars: string
+  settingsIncompleteEndDetectionModel: string
+  settingsIncompleteEndDetectionBatchSize: string
   settingsCompressModel: string
   settingsMicroModel: string
   settingsExpandModel: string

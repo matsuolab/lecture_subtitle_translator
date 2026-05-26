@@ -5,9 +5,13 @@ import type { CorrectedSegmentLite } from './correct'
 import { correctSegments } from './correct'
 import { semanticSplitJa } from './semanticSplitJa'
 import { mergeShort } from './mergeShort'
+import { mergeContinuation } from './mergeContinuation'
 import { runCorrectionDebug, isCorrectionDebugEnabled } from './correctionDebug'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
+
+// Phase2 と同じ形式の警告コールバック。Phase1 ノードからの検出失敗等を trace に残す。
+export type Phase1OnWarning = (nodeId: string, message: string) => void
 
 export interface Phase1Options {
   correctionThreshold?: number
@@ -24,6 +28,7 @@ export async function runPhase1(
   settings: AdminSettings,
   thresholds: PipelineThresholds,
   runNode: RunNode,
+  onWarning?: Phase1OnWarning,
   options: Phase1Options = {},
 ): Promise<Phase1Result> {
   const corrected = await runNode('correctJa', () =>
@@ -42,6 +47,12 @@ export async function runPhase1(
   const split = await runNode('semanticSplitJa', () =>
     semanticSplitJa(corrected, settings, thresholds, options.glossaryTerms ?? []),
   )
-  const merged = await runNode('mergeShort', () => mergeShort(split, thresholds))
+  // Phase1: 「末尾 mid-sentence」のブロックを次と結合する（多言語対応 LLM 判定）
+  // semanticSplitJa が継続助詞で切ったブロックを translate 前に統合し、
+  // 後段 translateEn の overflow と CPS 違反を未然に防ぐ。
+  const continuationMerged = await runNode('mergeContinuation', () =>
+    mergeContinuation(split, settings, onWarning),
+  )
+  const merged = await runNode('mergeShort', () => mergeShort(continuationMerged.blocks, thresholds))
   return { blocks: merged, correctedSegments: corrected }
 }

@@ -42,6 +42,18 @@ export interface AdminSettings {
   pipelineMaxCompressPerBlock: number
   pipelineMaxPhase2Retries: number
 
+  // Phase1: 継続助詞（mid-sentence cut）で終わる JA ブロックを次と結合する前処理
+  // semanticSplitJa が「〜が」「〜の」「〜まで」等で切れたブロックを生むと、後段 translateEn が
+  // 隣接ブロック内容を取り込んで EN がオーバーフローし、CPS 違反になる。これを未然に防ぐ。
+  pipelineMergeContinuationEnabled: boolean
+  pipelineMergeContinuationMaxGapSec: number
+  pipelineMergeContinuationMaxDurationSec: number
+  pipelineMergeContinuationMaxTranscriptChars: number
+  // mergeContinuation で使う「未完結末尾」判定モデル（nano クラス推奨）。
+  // 空欄なら splitJaModel にフォールバック。多言語対応のため LLM で判定する。
+  incompleteEndDetectionModel: string
+  incompleteEndDetectionBatchSize: number
+
   // ノード別モデル
   compressModel: string
   microModel: string

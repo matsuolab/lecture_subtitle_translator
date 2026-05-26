@@ -1251,6 +1251,61 @@ export function SettingsTab({
           />
         </FieldCard>
         <FieldCard theme={theme}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={adminSettings.pipelineMergeContinuationEnabled}
+              onChange={(e) => onAdminSettingsChange({ pipelineMergeContinuationEnabled: e.target.checked })}
+            />
+            <span style={{ fontSize: 12, color: theme.textPrimary }}>
+              {t.settingsPipelineMergeContinuationEnabled}
+            </span>
+          </label>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            semanticSplitJa が継続助詞で切ったブロックを nano LLM で検出し、次ブロックと結合してから翻訳する。
+            translateEn のオーバーフローと CPS 違反を未然に防ぐ。多言語対応のため判定は LLM 側で行う。
+          </div>
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineMergeContinuationMaxGapSec}
+            value={adminSettings.pipelineMergeContinuationMaxGapSec}
+            min={0}
+            step={0.1}
+            onChange={(value) => onAdminSettingsChange({ pipelineMergeContinuationMaxGapSec: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineMergeContinuationMaxDurationSec}
+            value={adminSettings.pipelineMergeContinuationMaxDurationSec}
+            min={1}
+            step={0.5}
+            onChange={(value) => onAdminSettingsChange({ pipelineMergeContinuationMaxDurationSec: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsPipelineMergeContinuationMaxTranscriptChars}
+            value={adminSettings.pipelineMergeContinuationMaxTranscriptChars}
+            min={1}
+            onChange={(value) => onAdminSettingsChange({ pipelineMergeContinuationMaxTranscriptChars: value })}
+          />
+          <ComboField
+            theme={theme}
+            label={t.settingsIncompleteEndDetectionModel}
+            value={adminSettings.incompleteEndDetectionModel}
+            placeholder={getChatModelPlaceholder('gpt-5.4-nano')}
+            listId="available-models-list"
+            hint="未完結末尾の判定モデル。バッチ + 並列で高速判定。default: gpt-5.4-nano"
+            onChange={(value) => onAdminSettingsChange({ incompleteEndDetectionModel: value })}
+          />
+          <NumberField
+            theme={theme}
+            label={t.settingsIncompleteEndDetectionBatchSize}
+            value={adminSettings.incompleteEndDetectionBatchSize}
+            min={1}
+            onChange={(value) => onAdminSettingsChange({ incompleteEndDetectionBatchSize: value })}
+          />
+        </FieldCard>
+        <FieldCard theme={theme}>
           <TextareaField
             theme={theme}
             label="書き起こし補正 追加指示"
