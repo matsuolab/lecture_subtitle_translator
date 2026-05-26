@@ -296,13 +296,34 @@ function validateSplitCandidates(
   return { ok: true, blocks: formatted }
 }
 
+// JA テキストを安全に 2 unit 以上に分割できる最小文字数。
+// これ未満は分割しても各 unit が短すぎ意味が成立しない（過去ログで「12文字 + 12文字」のような
+// 短すぎ split が断片を生むケースが頻発したため、コード側でガード）。
+const SPLIT_BLOCK_MIN_TRANSCRIPT_CHARS = 25
+
+function normalizeForLengthCheck(text: string): string {
+  return text.replace(/\s/g, '')
+}
+
 export const splitBlockTool: Tool = {
   name: 'split_block',
   description: 'Split Japanese into 2 semantic sentences. Re-translate each with proportional time.',
 
   canApply(ctx: DecisionContext): boolean {
     const m = buildMetrics(ctx, ctx.thresholds as PipelineThresholds & AgentThresholds)
-    return m.splitViable && !ctx.attemptHistory.some(a => a.strategy === 'split_block')
+    if (!m.splitViable) return false
+    if (ctx.attemptHistory.some(a => a.strategy === 'split_block')) return false
+
+    // Phase1 detectIncompleteEnds で「末尾 mid-sentence」と判定済の場合は分割しない。
+    // この種ブロックは LLM が「2 unit に分けられない」と返すのが既定で、無駄な API コール
+    // を避けつつログのノイズを減らす（Day4 ログでは 305件 / 752件試行で発生）。
+    const block = ctx.block as { endsIncomplete?: boolean; jaText: string }
+    if (block.endsIncomplete === true) return false
+
+    // JA が短すぎる場合も同様。2 分割すると各 unit が 12 文字程度になり成立しない。
+    if (normalizeForLengthCheck(block.jaText).length < SPLIT_BLOCK_MIN_TRANSCRIPT_CHARS) return false
+
+    return true
   },
 
   async execute(
