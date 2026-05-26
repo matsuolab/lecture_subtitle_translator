@@ -6,6 +6,7 @@ import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useToast } from '@/context/ToastContext'
 import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import { createSharedAdminSettingsExport, parseSharedAdminSettingsExport } from '@/api/adminSettings'
 import {
   DEFAULT_GEMINI_CHAT_MODEL,
   DEFAULT_OPENAI_CHAT_MODEL,
@@ -63,6 +64,7 @@ export function SettingsTab({
   const [normalizationPreview, setNormalizationPreview] = React.useState('It’s “machine learning” with\u00A0NBSP.')
   const [normalizationMatchInput, setNormalizationMatchInput] = React.useState('')
   const [normalizationReplacementInput, setNormalizationReplacementInput] = React.useState('')
+  const sharedSettingsImportRef = React.useRef<HTMLInputElement>(null)
   const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
   const normalizationValidation = React.useMemo(
     () => validateTextNormalizationRulesJson(normalizationJsonDraft),
@@ -102,6 +104,7 @@ export function SettingsTab({
           microModel: adminSettings.microModel.trim() || modelId,
           expandModel: adminSettings.expandModel.trim() || modelId,
           contextMergeModel: adminSettings.contextMergeModel.trim() || modelId,
+          splitJaModel: adminSettings.splitJaModel.trim() || modelId,
         })
       }
       setModelRefreshState('idle')
@@ -149,6 +152,7 @@ export function SettingsTab({
         microModel: DEFAULT_GEMINI_CHAT_MODEL,
         expandModel: DEFAULT_GEMINI_CHAT_MODEL,
         contextMergeModel: DEFAULT_GEMINI_CHAT_MODEL,
+        splitJaModel: DEFAULT_GEMINI_CHAT_MODEL,
       })
       return
     }
@@ -163,6 +167,7 @@ export function SettingsTab({
         microModel: '',
         expandModel: '',
         contextMergeModel: '',
+        splitJaModel: '',
       })
       return
     }
@@ -173,9 +178,10 @@ export function SettingsTab({
       correctionModel: DEFAULT_OPENAI_CHAT_MODEL,
       pdfExtractionVisionModel: DEFAULT_OPENAI_CHAT_MODEL,
       compressModel: DEFAULT_OPENAI_CHAT_MODEL,
-      microModel: DEFAULT_OPENAI_CHAT_MODEL,
+      microModel: 'gpt-5.4-nano',
       expandModel: DEFAULT_OPENAI_CHAT_MODEL,
-      contextMergeModel: 'gpt-5.5',
+      contextMergeModel: DEFAULT_OPENAI_CHAT_MODEL,
+      splitJaModel: 'gpt-5.4-nano',
     })
   }
 
@@ -201,6 +207,32 @@ export function SettingsTab({
       await openWorkLogDir(dir)
     } catch (err) {
       alert(err instanceof Error ? err.message : 'フォルダを開けませんでした。')
+    }
+  }
+
+  function exportSharedAdminSettings() {
+    const payload = createSharedAdminSettingsExport(adminSettings)
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'subtitle-admin-settings.shared.json'
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success('exportAdminSettings')
+  }
+
+  async function importSharedAdminSettings(file: File | undefined) {
+    if (!file) return
+    try {
+      const text = await file.text()
+      const patch = parseSharedAdminSettingsExport(text)
+      onAdminSettingsChange(patch)
+      toast.success('importAdminSettings')
+    } catch (error) {
+      toast.error('adminSettingsImportError', { error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      if (sharedSettingsImportRef.current) sharedSettingsImportRef.current.value = ''
     }
   }
 
@@ -397,6 +429,28 @@ export function SettingsTab({
       </Section>
 
       <Section title={t.settingsAdminTitle} theme={theme}>
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>管理者設定の共有</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={exportSharedAdminSettings} style={smallButtonStyle(theme)}>
+              共有用JSONを出力
+            </button>
+            <button type="button" onClick={() => sharedSettingsImportRef.current?.click()} style={smallButtonStyle(theme)}>
+              共有用JSONを読み込む
+            </button>
+            <input
+              ref={sharedSettingsImportRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => void importSharedAdminSettings(event.target.files?.[0])}
+              style={{ display: 'none' }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            プロンプト、例文、モデル、閾値、接続先URLなどを共有します。Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
+            共有先では各種キーだけ個別に入力してください。
+          </div>
+        </FieldCard>
         <FieldCard theme={theme}>
           <ModeSelectField
             theme={theme}
@@ -638,9 +692,9 @@ export function SettingsTab({
             theme={theme}
             label={t.settingsMicroModel}
             value={adminSettings.microModel}
-            placeholder="（圧縮モデルと同じ）"
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
             listId="available-models-list"
-            hint="1単語ずつ削るマイクロ圧縮用。空欄 = 圧縮モデルと同じ。コストを抑えたい場合は小型モデルを指定"
+            hint="1単語ずつ削るマイクロ圧縮用。タスクが極めて単純なので nano で十分（default: gpt-5.4-nano）。空欄 = 圧縮モデルと同じにフォールバック"
             onChange={(value) => onAdminSettingsChange({ microModel: value })}
           />
           <ComboField
@@ -656,10 +710,19 @@ export function SettingsTab({
             theme={theme}
             label="文脈統合モデル (Context Merge)"
             value={adminSettings.contextMergeModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.5')}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-mini')}
             listId="available-models-list"
-            hint="文脈依存の短い断片を前後どちらに統合するか判断する高精度モデル"
+            hint="文脈依存の短い断片を前後どちらに統合するか判断するモデル（前/後の二択なので mini で十分・以前は 5.5 が default だった）"
             onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label="日本語分割モデル (splitJa)"
+            value={adminSettings.splitJaModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
+            listId="available-models-list"
+            hint="日本語を意味単位に分割する用途。翻訳生成は不要なので小型モデル（nano）で十分。空欄 = マイクロ圧縮モデルと同じ"
+            onChange={(value) => onAdminSettingsChange({ splitJaModel: value })}
           />
           <Field
             theme={theme}
@@ -770,13 +833,6 @@ export function SettingsTab({
             step={0.1}
             onChange={(value) => onAdminSettingsChange({ subtitleMaxDurationSec: value })}
           />
-          <NumberField
-            theme={theme}
-            label={t.settingsMergeMinJaChars}
-            value={adminSettings.mergeMinJaChars}
-            min={1}
-            onChange={(value) => onAdminSettingsChange({ mergeMinJaChars: value })}
-          />
         </FieldCard>
 
         <FieldCard theme={theme}>
@@ -787,14 +843,6 @@ export function SettingsTab({
             min={0.01}
             step={0.01}
             onChange={(value) => onAdminSettingsChange({ qualityCorrectionThreshold: value })}
-          />
-          <NumberField
-            theme={theme}
-            label={t.settingsQualityTranslationThreshold}
-            value={adminSettings.qualityTranslationThreshold}
-            min={0.01}
-            step={0.01}
-            onChange={(value) => onAdminSettingsChange({ qualityTranslationThreshold: value })}
           />
         </FieldCard>
 
@@ -822,6 +870,147 @@ export function SettingsTab({
           </label>
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
             {t.settingsSemanticCheckDesc}
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>カバレッジ修復エージェント</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={adminSettings.coverageRepairEnabled}
+              onChange={(e) => onAdminSettingsChange({ coverageRepairEnabled: e.target.checked })}
+            />
+            <span style={{ fontSize: 12, color: theme.textPrimary }}>
+              coverage_repair_agent を有効化
+            </span>
+          </label>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            ON: ルールベース後の coverage 違反（source_text_undercovered）を mini + reasoning で自動修復。
+            1 chunk あたり 1 回・改善しない場合は revert（コスト 0.02 USD 程度／発動）。
+            OFF: coverage 違反は次段 general_repair か manual_review に流れる（API 呼出なし）。
+          </div>
+          <ComboField
+            theme={theme}
+            label="coverage_repair モデル"
+            value={adminSettings.coverageRepairModel}
+            placeholder={getChatModelPlaceholder('gpt-5.4-mini')}
+            listId="available-models-list"
+            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.4-mini"
+            onChange={(value) => onAdminSettingsChange({ coverageRepairModel: value })}
+          />
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>coverage_repair reasoning effort</span>
+            <select
+              value={adminSettings.coverageRepairEffort}
+              onChange={(e) => onAdminSettingsChange({ coverageRepairEffort: e.target.value as 'minimal' | 'low' | 'medium' | 'high' })}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textPrimary,
+                fontSize: 12,
+              }}
+            >
+              <option value="minimal">minimal（最小）</option>
+              <option value="low">low（推奨・default）</option>
+              <option value="medium">medium</option>
+              <option value="high">high（高コスト）</option>
+            </select>
+          </label>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>汎用修復エージェント（最終救済）</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={adminSettings.generalRepairEnabled}
+              onChange={(e) => onAdminSettingsChange({ generalRepairEnabled: e.target.checked })}
+            />
+            <span style={{ fontSize: 12, color: theme.textPrimary }}>
+              general_repair_agent を有効化（エスカレーション）
+            </span>
+          </label>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            ON: ここまでで救えなかった block 違反 + coverage 残存違反を mini + reasoning で段階的エスカレーション修復。
+            各 effort で改善した時点で脱出、全失敗時のみ manual_review に確定（=「PoC でも解けない真の難ケース」のみ）。
+            発動率 ~5%、コスト目安 0.02-0.06 USD/発動。
+            OFF: 残違反は即 manual_review。
+          </div>
+          <ComboField
+            theme={theme}
+            label="general_repair モデル"
+            value={adminSettings.generalRepairModel}
+            placeholder={getChatModelPlaceholder('gpt-5.4-mini')}
+            listId="available-models-list"
+            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.4-mini"
+            onChange={(value) => onAdminSettingsChange({ generalRepairModel: value })}
+          />
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>エスカレーション上限</span>
+            <select
+              value={adminSettings.generalRepairMaxEffort}
+              onChange={(e) => onAdminSettingsChange({ generalRepairMaxEffort: e.target.value as 'low' | 'medium' | 'high' })}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textPrimary,
+                fontSize: 12,
+              }}
+            >
+              <option value="low">low（1 段だけ）</option>
+              <option value="medium">medium（low → medium）</option>
+              <option value="high">high（low → medium → high・default）</option>
+            </select>
+          </label>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>デバッグモード</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={adminSettings.debugModeEnabled}
+              onChange={(e) => onAdminSettingsChange({ debugModeEnabled: e.target.checked })}
+            />
+            <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>デバッグモード ON</span>
+          </label>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            マスタースイッチ。OFF の間はサブ機能を ON にしても全部スルーされる（コスト 0）。
+            実運用では OFF、調査時のみ ON にする。
+          </div>
+
+          <div style={{
+            marginTop: 8,
+            paddingLeft: 12,
+            borderLeft: `2px solid ${theme.panelBorder}`,
+            opacity: adminSettings.debugModeEnabled ? 1 : 0.5,
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: theme.textSecondary, marginBottom: 6 }}>
+              サブ機能
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={adminSettings.correctionDebugEmbedding}
+                disabled={!adminSettings.debugModeEnabled}
+                onChange={(e) => onAdminSettingsChange({ correctionDebugEmbedding: e.target.checked })}
+              />
+              <span style={{ fontSize: 12, color: theme.textPrimary }}>
+                correctJa 効果計測（Embedding 類似度）
+              </span>
+            </label>
+            <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6, marginTop: 4 }}>
+              correctJa の前後で書き起こしを Embedding 比較し、補正の意味変動を pipeline trace に記録。
+              専門用語や数式の補正があった箇所は類似度が下がる（0.85-0.95 程度）。
+              <br />※ デバッグモード OFF の間は機能しない。
+            </div>
           </div>
         </FieldCard>
 
@@ -1062,6 +1251,34 @@ export function SettingsTab({
           />
         </FieldCard>
         <FieldCard theme={theme}>
+          <TextareaField
+            theme={theme}
+            label="書き起こし補正 追加指示"
+            value={adminSettings.correctionAdditionalInstructions}
+            placeholder="空欄にすると追加指示なし"
+            onChange={(value) => onAdminSettingsChange({ correctionAdditionalInstructions: value })}
+          />
+          <TextareaField
+            theme={theme}
+            label="書き起こし補正 例文JSON"
+            value={adminSettings.correctionFewShotJson}
+            placeholder='{"segments":[{"id":1,"text":"..."}],"corrections":[{"id":1,"text":"..."}]}'
+            onChange={(value) => onAdminSettingsChange({ correctionFewShotJson: value })}
+          />
+          <TextareaField
+            theme={theme}
+            label="翻訳 追加指示"
+            value={adminSettings.translationAdditionalInstructions}
+            placeholder="空欄にすると追加指示なし"
+            onChange={(value) => onAdminSettingsChange({ translationAdditionalInstructions: value })}
+          />
+          <TextareaField
+            theme={theme}
+            label="翻訳 例文JSON"
+            value={adminSettings.translationFewShotJson}
+            placeholder='{"segments":["..."],"translations":["..."]}'
+            onChange={(value) => onAdminSettingsChange({ translationFewShotJson: value })}
+          />
           <TextareaField
             theme={theme}
             label={t.settingsCompressPromptOverride}

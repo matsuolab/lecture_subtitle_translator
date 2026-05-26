@@ -6,11 +6,53 @@ import { buildContext } from './contextBuilder'
 import { getFeasibleStrategies } from './feasibility'
 import { applyPatch, meetsConstraints, normalizeAndValidate } from './patchUtils'
 import { toolRegistry } from './tools/index'
+import { isFailedAttempt } from './metrics'
 import {
   classifySemanticResult,
   computeSimilarity,
   isSemanticCheckAvailable,
 } from '../semanticCheck'
+
+/**
+ * 早期終了の判定理由（ログに残るので後で集計可能）。
+ */
+type EarlyTerminationReason =
+  | 'consecutive_failed_attempts'  // 直近2試行が isFailedAttempt
+  | 'no_meaningful_reduction'       // 直近3試行で char retention >= 95%
+  | 'patch_regressed'               // 適用後の char 数が増加（悪化）
+
+/**
+ * 早期終了が必要かを判定する。
+ * 既存の maxCorrectionRounds (=4) チェックの前段で呼ぶ。
+ *
+ * 条件:
+ * - 直近2試行が isFailedAttempt（変化なし / 削減不十分）→ 諦め
+ * - 直近3試行で削減率 < 5%（95%以上残ってる）→ 局所修正で詰む形 → 諦め
+ *
+ * 諦めた block は後段の coverage_repair_agent / general_repair_agent にハンドオフ。
+ */
+function shouldEarlyTerminate(
+  history: CorrectionAttempt[],
+  thresholds: Pick<AgentThresholds, 'minReductionDeltaChars' | 'minReductionDeltaRatio'>,
+): EarlyTerminationReason | null {
+  if (history.length >= 2) {
+    const last2 = history.slice(-2)
+    if (last2.every((a) => isFailedAttempt(a, thresholds))) {
+      return 'consecutive_failed_attempts'
+    }
+  }
+  if (history.length >= 3) {
+    const last3 = history.slice(-3)
+    const allStagnant = last3.every((a) => {
+      if (!a.changed) return true
+      if (a.beforeChars <= 0) return true
+      const retention = a.afterChars / a.beforeChars
+      return retention >= 0.95
+    })
+    if (allStagnant) return 'no_meaningful_reduction'
+  }
+  return null
+}
 
 export interface CorrectionEngineOptions {
   // ツール実行で警告・エラーが発生した場合に呼ばれるコールバック
@@ -115,6 +157,15 @@ export async function correctionEngine(
 
     if (history.length >= thresholds.maxCorrectionRounds) continue
 
+    // 早期終了: ラウンド上限に達する前でも、進展がない場合は break
+    // → 後段の coverage_repair_agent / general_repair_agent に救済を委ねる方が経済的
+    const terminationReason = shouldEarlyTerminate(history, thresholds)
+    if (terminationReason !== null) {
+      const lastAttempt = history[history.length - 1]
+      onToolWarning?.(blockIdStr, lastAttempt.strategy, `early_termination: ${terminationReason} (rounds=${history.length})`)
+      continue
+    }
+
     const ctx = buildContext(block, blockIdx, currentTimeline, history, thresholds, settings)
 
     if (ctx.physicalMaxChars < thresholds.minMeaningfulChars) continue
@@ -199,6 +250,20 @@ export async function correctionEngine(
       acceptPatch = false
       const baseRationale = attempt.rationale ? `${attempt.rationale}; ` : ''
       attempt.rationale = `${baseRationale}rejected by semantic check (similarity=${attempt.semanticSimilarity?.toFixed(3)})`
+      attempt.changed = false
+      onToolWarning?.(blockIdStr, strategy, attempt.rationale)
+    }
+
+    // patch_regressed 検出: 圧縮戦略のはずなのに文字数が増えていたら受け付けない
+    // （tier 悪化や LLM の暴走を防止する）
+    if (
+      acceptPatch &&
+      strategy.startsWith('compress_') &&
+      afterChars > beforeChars + 2  // 2 文字までの揺れは許容（句読点等）
+    ) {
+      acceptPatch = false
+      const baseRationale = attempt.rationale ? `${attempt.rationale}; ` : ''
+      attempt.rationale = `${baseRationale}rejected: patch_regressed (${beforeChars} -> ${afterChars} chars, expected reduction)`
       attempt.changed = false
       onToolWarning?.(blockIdStr, strategy, attempt.rationale)
     }

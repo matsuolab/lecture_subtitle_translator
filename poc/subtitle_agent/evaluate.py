@@ -33,6 +33,11 @@ class EvalResult:
     compliant: bool
     rejected: bool
     reason: str
+    # スコア損失の要因別内訳 (自己進化のメタLLM観測用)。rejected 時は 0.0。
+    cps_penalty: float = 0.0
+    line_penalty: float = 0.0
+    segment_penalty: float = 0.0
+    short_penalty: float = 0.0
 
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
@@ -186,4 +191,8 @@ def evaluate_subtitle(
         compliant=cps_ok and line_ok and segment_ok,
         rejected=False,
         reason="",
+        cps_penalty=cps_penalty,
+        line_penalty=line_penalty,
+        segment_penalty=segment_penalty,
+        short_penalty=short_penalty,
     )

@@ -10,11 +10,14 @@ export interface LocaleStrings {
     saveProjectJson: ToastMessage
     exportCsv: ToastMessage
     exportJson: ToastMessage
+    exportAdminSettings: ToastMessage
     importGlossary: ToastMessage
+    importAdminSettings: ToastMessage
     saveSettings: ToastMessage
     invalidNormalizationRules: ToastMessage
     unsupportedGlossaryFile: ToastMessage
     glossaryImportError: ToastMessage
+    adminSettingsImportError: ToastMessage
   }
 
   videoPlayer: string
@@ -133,9 +136,7 @@ export interface LocaleStrings {
   settingsEnMaxCps: string
   settingsSubtitleMinDuration: string
   settingsSubtitleMaxDuration: string
-  settingsMergeMinJaChars: string
   settingsQualityCorrectionThreshold: string
-  settingsQualityTranslationThreshold: string
   settingsPipelineThresholdsTitle: string
   settingsPipelineShortDurationSec: string
   settingsPipelineLongDurationSec: string

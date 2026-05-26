@@ -106,7 +106,10 @@ export interface AgentThresholds {
 }
 
 export const DEFAULT_AGENT_THRESHOLDS: AgentThresholds = {
-  maxCorrectionRounds: 7,
+  // ハイブリッド設計（hybrid_pipeline_design.md タスク10）で 7→4 に削減。
+  // 4 ラウンドで救えない block は後続の coverage_repair_agent / general_repair_agent に
+  // ハンドオフする方が経済的（reasoning 入りエージェントの方が安く解く可能性が高い）。
+  maxCorrectionRounds: 4,
   minMeaningfulChars: 20,
   minInterSubtitleGapMs: 80,
   minUsefulBorrowMs: 250,

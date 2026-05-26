@@ -64,12 +64,15 @@ function compactBoolean(value: unknown): boolean | undefined {
 function normalizeSnapshotItem(item: unknown): Record<string, unknown> {
   if (!item || typeof item !== 'object') return { value: item }
   const row = item as Record<string, unknown>
+  // correctJa の出力（CorrectedSegmentLite）は correctedText を持つ。
+  // splitJa 後の JaBlock では jaText が「補正後」になる。両方を残せるよう transcriptText の優先順を整理。
   const snapshot: Record<string, unknown> = {
     id: row.id,
     start: compactNumber(row.start) ?? compactNumber(row.startTime),
     end: compactNumber(row.end) ?? compactNumber(row.endTime),
-    transcriptText: compactText(row.jaText) ?? compactText(row.ja_corrected) ?? compactText(row.target) ?? compactText(row.text),
+    transcriptText: compactText(row.jaText) ?? compactText(row.correctedText) ?? compactText(row.ja_corrected) ?? compactText(row.target) ?? compactText(row.text),
     rawTranscriptText: compactText(row.text),
+    correctedText: compactText(row.correctedText),
     subtitleText: compactText(row.enText) ?? compactText(row.source),
     rawSubtitleText: compactText(row.enRaw),
     jaChars: compactNumber(row.jaChars),
@@ -82,11 +85,16 @@ function normalizeSnapshotItem(item: unknown): Record<string, unknown> {
     merged: compactBoolean(row.merged),
     reviewPriority: compactText(row.reviewPriority),
     reviewDisposition: compactText(row.reviewDisposition),
-    correctionDistance: compactNumber(row.correction_distance),
-    correctionFlagged: compactBoolean(row.correction_flagged),
+    correctionDistance: compactNumber(row.correctionDistance) ?? compactNumber(row.correction_distance),
+    correctionFlagged: compactBoolean(row.correctionFlagged) ?? compactBoolean(row.correction_flagged),
     translationFlagged: compactBoolean(row.translation_flagged),
     translationProvider: compactText(row.translation_provider),
     correctionAttempts: Array.isArray(row.correctionAttempts) ? row.correctionAttempts : undefined,
+    correctionFailureReason: compactText(row.correctionFailureReason),
+    correctionRetryAttempts: compactNumber(row.correctionRetryAttempts),
+    translationFailureReason: compactText(row.translationFailureReason),
+    translationRetryAttempts: compactNumber(row.translationRetryAttempts),
+    expansionFailureReason: compactText(row.expansionFailureReason),
   }
 
   return Object.fromEntries(
@@ -102,8 +110,46 @@ function normalizeSnapshotItems(result: unknown): Record<string, unknown>[] {
     if (Array.isArray(row.misses)) {
       return row.misses.map((miss, index) => ({ id: index + 1, miss }))
     }
+    // Validator 系（coverageValidator）: summary を1番目に + 各 issue を続けて記録
+    if (Array.isArray(row.issues)) {
+      return [buildSnapshotSummary(row, 'issues'), ...buildSnapshotDetailItems(row.issues, 'issue')]
+    }
+    // デバッグ計測（correctionDebug など）: summary を1番目に + 各 entry を続けて
+    if (Array.isArray(row.entries)) {
+      return [buildSnapshotSummary(row, 'entries'), ...buildSnapshotDetailItems(row.entries, 'entry')]
+    }
+    // それ以外の summary 形オブジェクトは単一 item として保存（ノードが走ったことが分かる）
+    return [{ _kind: 'summary', ...row }]
   }
   return []
+}
+
+/**
+ * validator / debug 系の結果オブジェクトから、明細配列を除いたサマリー部分を抽出。
+ * 1番目の item として保存され、ノードが何を出力したかを俯瞰できるようにする。
+ */
+function buildSnapshotSummary(row: Record<string, unknown>, excludeKey: string): Record<string, unknown> {
+  const summary: Record<string, unknown> = { _kind: 'summary' }
+  for (const [k, v] of Object.entries(row)) {
+    if (k === excludeKey) continue
+    if (v === undefined) continue
+    if (typeof v === 'function') continue
+    summary[k] = v
+  }
+  return summary
+}
+
+/**
+ * 明細配列の各要素を、そのまま (スナップショット用に項目種別タグだけ付けて) 返す。
+ * Block 用の normalizeSnapshotItem は明細用フィールドを潰してしまうので使わない。
+ */
+function buildSnapshotDetailItems(items: unknown[], kind: string): Record<string, unknown>[] {
+  return items.map((item) => {
+    if (item && typeof item === 'object') {
+      return { _kind: kind, ...(item as Record<string, unknown>) }
+    }
+    return { _kind: kind, value: item }
+  })
 }
 
 function buildPipelineThresholds(settings: AdminSettings): PipelineThresholds {
@@ -174,7 +220,7 @@ export async function runLocalPostPipeline(
   recordStageSnapshot('transcribe', transcriptSegments)
 
   try {
-    const jaBlocks = await runPhase1(
+    const phase1Result = await runPhase1(
       transcriptSegments,
       settings,
       thresholds,
@@ -183,9 +229,17 @@ export async function runLocalPostPipeline(
         glossaryTerms: glossary.correctionTerms,
       },
     )
-    const enBlocks = await runPhase2(jaBlocks, settings, thresholds, runNode, (nodeId, message) => {
-      record(nodeId, 'success', 0, message)
-    }, glossary.translationTerms)
+    const enBlocks = await runPhase2(
+      phase1Result.blocks,
+      settings,
+      thresholds,
+      runNode,
+      (nodeId, message) => {
+        record(nodeId, 'success', 0, message)
+      },
+      glossary.translationTerms,
+      { correctedSegments: phase1Result.correctedSegments },
+    )
     const phase3 = await runPhase3(enBlocks, settings, glossary.translationTerms, thresholds, runNode)
 
     const terminologyMustCount = phase3.reviewItems

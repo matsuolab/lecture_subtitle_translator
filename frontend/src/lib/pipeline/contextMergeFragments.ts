@@ -4,9 +4,9 @@ import type { EnBlock, PipelineThresholds } from './blockTypes'
 import { classifyViolation, computeMetrics } from './metrics'
 import { formatLines } from './formatLines'
 import { normalizeSpaces } from './textUtils'
-import { requireAiConnection, resolveAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from './aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
+import { resolveAiConnection, requireChatModelForProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
+import { llmCallWithMeta } from './llmCallWithMeta'
 import {
   hasContinuationEnd,
   hasFragmentStart,
@@ -186,59 +186,52 @@ function validateConfiguredRoles(subtitleText: string, transcriptText: string, c
   return null
 }
 
+interface DecideContextMergeOutcome {
+  decision?: MergeDecision
+  errorMessage?: string
+}
+
 async function decideContextMerge(
   prev: EnBlock | undefined,
   current: EnBlock,
   next: EnBlock | undefined,
   settings: AdminSettings,
-): Promise<MergeDecision> {
-  const connection = requireAiConnection(settings, 'context merge')
+): Promise<DecideContextMergeOutcome> {
   const model = requireChatModelForProvider(settings, settings.contextMergeModel.trim() || settings.correctionModel, 'context merge')
   const config = loadLanguageProfileConfig(settings)
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  const callResult = await llmCallWithMeta(
+    {
       model,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        {
-          role: 'system',
-          content:
-            `You are an expert subtitle editor for academic lectures. The displayed subtitle language is ${config.subtitle.label}. ` +
-            `The reference transcript language is ${config.transcript.label}. ` +
-            'The CURRENT subtitle may be a context-dependent fragment. Decide whether it should be merged into the previous subtitle, merged into the next subtitle, or kept separate. ' +
-            'Choose keep when neither merge is semantically appropriate. Preserve technical terms, formulas, negations, conditions, and lecture flow. ' +
-            'If merging, return a complete natural subtitle_text for viewers and the corresponding transcript_text for reference. ' +
-            'Use subtitle_text for the displayed subtitle, and transcript_text for the reference transcript. ' +
-            'Do not use source/target keys because they are ambiguous in this app. ' +
-            'Do not include line breaks in subtitle_text. Keep the merged subtitle_text compact enough for two subtitle lines. ' +
-            'Respond only with JSON: {"decision":"merge_prev|merge_next|keep","subtitle_text":"...","transcript_text":"...","rationale":"..."}',
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            previous: prev ? blockForPrompt(prev) : null,
-            current: blockForPrompt(current),
-            next: next ? blockForPrompt(next) : null,
-          }, null, 2),
-        },
-      ],
-    }),
-  })
+      systemPrompt:
+        `You are an expert subtitle editor for academic lectures. The displayed subtitle language is ${config.subtitle.label}. ` +
+        `The reference transcript language is ${config.transcript.label}. ` +
+        'The CURRENT subtitle may be a context-dependent fragment. Decide whether it should be merged into the previous subtitle, merged into the next subtitle, or kept separate. ' +
+        'Choose keep when neither merge is semantically appropriate. Preserve technical terms, formulas, negations, conditions, and lecture flow. ' +
+        'If merging, return a complete natural subtitle_text for viewers and the corresponding transcript_text for reference. ' +
+        'Use subtitle_text for the displayed subtitle, and transcript_text for the reference transcript. ' +
+        'Do not use source/target keys because they are ambiguous in this app. ' +
+        'Do not include line breaks in subtitle_text. Keep the merged subtitle_text compact enough for two subtitle lines. ' +
+        'Respond only with JSON: {"decision":"merge_prev|merge_next|keep","subtitle_text":"...","transcript_text":"...","rationale":"..."}',
+      userContent: JSON.stringify({
+        previous: prev ? blockForPrompt(prev) : null,
+        current: blockForPrompt(current),
+        next: next ? blockForPrompt(next) : null,
+      }, null, 2),
+      nodeName: 'context_merge',
+    },
+    settings,
+  )
 
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`context merge API returned HTTP ${response.status}: ${detail}`)
+  if (callResult.errorMessage) {
+    return { errorMessage: callResult.errorMessage }
   }
 
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  return parseDecisionWithSettings(content, settings)
+  try {
+    return { decision: parseDecisionWithSettings(callResult.content, settings) }
+  } catch (error) {
+    return { errorMessage: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 function blockForPrompt(block: EnBlock) {
@@ -418,11 +411,9 @@ export async function mergeContextFragments(
     if (!prev && !next) continue
 
     attempts += 1
-    let decision: MergeDecision
-    try {
-      decision = await decideContextMerge(prev, current, next, settings)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+    const outcome = await decideContextMerge(prev, current, next, settings)
+    if (outcome.errorMessage || !outcome.decision) {
+      const message = outcome.errorMessage ?? 'context merge: no decision'
       onWarning?.(String(current.id), message)
       result[i] = appendAttempt(current, {
         strategy: 'merge_window',
@@ -435,6 +426,7 @@ export async function mergeContextFragments(
       })
       continue
     }
+    const decision = outcome.decision
 
     if (decision.decision === 'keep') {
       result[i] = appendAttempt(current, {

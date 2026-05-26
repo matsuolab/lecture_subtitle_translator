@@ -27,6 +27,12 @@ from poc.subtitle_agent.report import write_evolution_report, write_report
 # poc/.env から OPENAI_API_KEY 等を読み込む (cwd に依存しないよう絶対パス指定)。
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+# Windows コンソール (cp932) で日本語・記号が UnicodeEncodeError にならないよう
+# 標準出力・標準エラーを UTF-8 に再設定する。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _load_segments(video: str | None, cache: str | None, force: bool) -> tuple[list[dict], str]:
     """動画 or キャッシュからASRセグメントをロードする。"""

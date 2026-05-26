@@ -45,6 +45,9 @@ class OpenAICompatibleBackend:
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key)
         self._model = model
         self._retries = retries
+        # 一部の新しいモデル (例: gpt-5.5系) は非既定 temperature を受け付けない。
+        # 400 エラーを検出したら以降は temperature を送らないよう切り替える。
+        self._supports_temperature = True
         # トークン利用量の累積 (実 API 呼び出しのみ計上)
         self._calls = 0
         self._prompt_tokens = 0
@@ -82,23 +85,29 @@ class OpenAICompatibleBackend:
         last_err = ""
         for attempt in range(self._retries):
             try:
-                response = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
+                kwargs: dict = {
+                    "model": self._model,
+                    "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
                     ],
-                    temperature=temperature,
-                )
+                }
+                if self._supports_temperature:
+                    kwargs["temperature"] = temperature
+                response = self._client.chat.completions.create(**kwargs)
                 self._record_usage(response)
                 return (response.choices[0].message.content or "").strip()
             except Exception as e:  # noqa: BLE001 - 種別を問わずリトライ対象
                 last_err = str(e)
+                # 非既定 temperature 非対応モデルは temperature を外して即再試行。
+                if self._supports_temperature and "temperature" in last_err.lower():
+                    self._supports_temperature = False
+                    continue
                 if attempt < self._retries - 1:
                     time.sleep(2 * (attempt + 1))
         raise RuntimeError(
             f"OpenAI互換API ({self._model}) が {self._retries} 回失敗しました "
-            f"— {last_err}"
+            f"- {last_err}"
         )
 
 
@@ -156,7 +165,7 @@ class ClaudeCliBackend:
             if attempt < self._retries - 1:
                 time.sleep(2 * (attempt + 1))
         raise RuntimeError(
-            f"claude -p が {self._retries} 回失敗しました — {last_err}"
+            f"claude -p が {self._retries} 回失敗しました - {last_err}"
         )
 
 

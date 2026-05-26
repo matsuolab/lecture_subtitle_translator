@@ -47,5 +47,5 @@ lambda_package_path = "../../../dist/lambda/backend.zip"
 
 # コスト管理
 budget_alert_email = "AIE-DXproject_3@weblab.t.u-tokyo.ac.jp"
-monthly_budget_usd = 10
+monthly_budget_usd = 100
 
