@@ -1,13 +1,11 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
-import { normalizeSpaces } from '../../textUtils'
 import { resolveMicroModelId } from '../../prompts'
 import { computeMetrics, classifyViolation } from '../../metrics'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../../aiProvider'
+import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
-import { tauriFetch } from '@/lib/tauriFetch'
-import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
+import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
 
 const MICRO_MAX_RETRIES = 5
 
@@ -39,8 +37,7 @@ async function microCompressOnce(
   jaText: string,
   removedWordsSoFar: string[],
   settings: AdminSettings,
-): Promise<string> {
-  const connection = requireAiConnection(settings)
+): Promise<SubtitleLlmCallResult> {
   const model = requireChatModelForProvider(settings, resolveMicroModelId(settings), 'compress micro')
   const systemPrompt = buildMicroSystemPrompt()
 
@@ -48,36 +45,16 @@ async function microCompressOnce(
     ? `\n\nWords already removed in earlier iterations (do not remove these again): ${removedWordsSoFar.join(', ')}`
     : ''
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  return callSubtitleLlm(
+    {
       model,
+      systemPrompt,
+      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${currentEn}${removedHint}`,
       temperature: 0.0,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        { role: 'system', content: systemPrompt },
-        {
-          role: 'user',
-          content: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${currentEn}${removedHint}`,
-        },
-      ],
-    }),
-  })
-
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`compress_micro API returned HTTP ${response.status}: ${detail}`)
-  }
-
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = parseJsonObjectFromLlmContent(content, 'compress_micro')
-  const text = typeof parsed.text === 'string' ? parsed.text : ''
-  return normalizeSpaces(text.trim())
+      nodeName: 'compress_micro',
+    },
+    settings,
+  )
 }
 
 // 削除された単語を推定（簡易版: 差分で消えた単語のうち最初のものを返す）
@@ -96,7 +73,9 @@ interface MicroResult {
   finalText: string
   changed: boolean
   iterations: number
-  reason: 'success' | 'no_progress' | 'duplicate' | 'max_retries' | 'no_change'
+  reason: 'success' | 'no_progress' | 'duplicate' | 'max_retries' | 'no_change' | 'api_error'
+  /** API 失敗時の詳細メッセージ（reason='api_error' の時のみ）*/
+  errorMessage?: string
 }
 
 async function runMicroLoop(
@@ -130,18 +109,18 @@ async function runMicroLoop(
     }
 
     // 1単語削減を試行
-    let candidate: string
-    try {
-      candidate = await microCompressOnce(current, block.jaText, removedWords, settings)
-    } catch {
-      // API 失敗 → ループ打ち切り（最後に持っていた current を返す）
+    const callResult = await microCompressOnce(current, block.jaText, removedWords, settings)
+    if (callResult.errorMessage) {
+      // API 失敗 → ループ打ち切り（最後に持っていた current を返す）。エラー詳細も伝える。
       return {
         finalText: current,
         changed: current !== originalEnText,
         iterations: i,
-        reason: 'max_retries',
+        reason: 'api_error',
+        errorMessage: callResult.errorMessage,
       }
     }
+    const candidate = callResult.text
 
     // ガード: 空応答 or 単語数が減っていない → 進捗なし
     if (!candidate) {
@@ -231,7 +210,9 @@ export const compressMicroTool: Tool = {
     updatedBlock.cps = metrics.cps
 
     const warning = result.reason !== 'success'
-      ? `compress_micro: ${result.reason} after ${result.iterations} iteration(s)`
+      ? (result.reason === 'api_error'
+          ? `compress_micro: api_error after ${result.iterations} iteration(s): ${result.errorMessage ?? 'unknown'}`
+          : `compress_micro: ${result.reason} after ${result.iterations} iteration(s)`)
       : undefined
 
     return {

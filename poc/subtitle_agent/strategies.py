@@ -62,13 +62,14 @@ def condense_text(
         f"Original English subtitle:\n{en_text}\n\n"
         f"Rewrite it to be {severity} while keeping the same meaning."
     )
+    # temperature=0: 凝縮を決定論化する (自己進化のスコア比較をノイズから守る)。
     response = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.2,
+        temperature=0.0,
     )
     return clean_llm_output(response.choices[0].message.content)
 

@@ -33,7 +33,7 @@ export function classifyViolation(
 ): ViolationCode {
   const metrics = computeMetrics(block)
 
-  if (block.alignConf === 'proportional') return 'proportional_ts'
+  if (block.alignConf === 'proportional' || block.alignConf === 'no_words') return 'proportional_ts'
   if (metrics.duration < thresholds.shortDurationSec) return 'short_duration'
   if (block.merged && metrics.duration > thresholds.mergedLongDurationSec) return 'merged_long'
   if (metrics.duration > thresholds.longDurationSec) return 'long_segment'

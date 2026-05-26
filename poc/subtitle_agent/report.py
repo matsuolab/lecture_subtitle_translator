@@ -92,7 +92,7 @@ def write_evolution_report(history: list, video_name: str) -> Path:
         "",
         f"> 生成日時: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"> 対象: {video_name}",
-        "> メタLLM: Claude (claude -p / サブスクリプション認証)",
+        "> 最適化目標: avg_score (全キュー平均スコア) の最大化",
         "",
         "## 定量メトリクス推移 (全キュー対象)",
         "",

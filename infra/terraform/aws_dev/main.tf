@@ -520,9 +520,26 @@ resource "aws_budgets_budget" "monthly" {
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
 
+  # 実支出アラート: 予算額に対する 10 / 25 / 50 / 100%
   notification {
     comparison_operator        = "GREATER_THAN"
-    threshold                  = 80
+    threshold                  = 10
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 25
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 50
     threshold_type             = "PERCENTAGE"
     notification_type          = "ACTUAL"
     subscriber_email_addresses = [var.budget_alert_email]
@@ -534,6 +551,46 @@ resource "aws_budgets_budget" "monthly" {
     threshold_type             = "PERCENTAGE"
     notification_type          = "ACTUAL"
     subscriber_email_addresses = [var.budget_alert_email]
+  }
+
+  # 予測アラート: 月末予測が予算を超える見込みで発火（急騰の早期警告）
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+}
+
+# ── コスト異常検知 (Cost Anomaly Detection) ──────────────────
+# CE API エンドポイントは us-east-1 固定だが、グローバルサービスのため
+# ap-northeast-1 プロバイダーのまま作成・管理できる。
+# 名前は CLI で先行作成した実リソースに合わせ、project_name のみを接頭辞に使う。
+
+resource "aws_ce_anomaly_monitor" "services" {
+  name              = "${var.project_name}-services-monitor"
+  monitor_type      = "DIMENSIONAL"
+  monitor_dimension = "SERVICE"
+}
+
+resource "aws_ce_anomaly_subscription" "cost" {
+  name             = "${var.project_name}-anomaly-alerts"
+  frequency        = "WEEKLY"
+  monitor_arn_list = [aws_ce_anomaly_monitor.services.arn]
+
+  subscriber {
+    type    = "EMAIL"
+    address = var.budget_alert_email
+  }
+
+  # 異常の影響額が $5 以上で通知
+  threshold_expression {
+    dimension {
+      key           = "ANOMALY_TOTAL_IMPACT_ABSOLUTE"
+      match_options = ["GREATER_THAN_OR_EQUAL"]
+      values        = ["5"]
+    }
   }
 }
 

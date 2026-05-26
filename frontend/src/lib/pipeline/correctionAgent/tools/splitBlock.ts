@@ -4,11 +4,12 @@ import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
 import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../../aiProvider'
+import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
-import { tauriFetch } from '@/lib/tauriFetch'
 import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
+import { llmCallWithMeta } from '../../llmCallWithMeta'
+import { callSubtitleLlm } from './callSubtitleLlm'
 
 interface SplitResult {
   units: SplitUnit[]
@@ -149,59 +150,49 @@ async function splitJaText(
   jaText: string,
   settings: AdminSettings,
 ): Promise<SplitResult> {  // warning フィールドが設定される場合がある
-  const connection = requireAiConnection(settings)
   const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'split block')
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  const callResult = await llmCallWithMeta(
+    {
       model,
+      systemPrompt:
+        'Resegment this Japanese academic lecture subtitle into 1 to 3 subtitle units. ' +
+        'Use 1 unit if splitting would be unnatural. Use 2 or 3 units only at clear semantic boundaries. ' +
+        'Each unit must make sense independently and must not end with a particle, conjunction, or unfinished clause. ' +
+        'Preserve technical terms, numbers, formulas, definitions, negations, conditions, and causal relations. ' +
+        'You may remove filler, repeated setup phrases, and redundant lecture asides if no information is lost. ' +
+        'If the text cannot be split safely, return {"cannot_split": true, "units": [], "warnings": ["reason"]}. ' +
+        'Respond only with JSON: {"units":[{"text":"...","reason":"...","confidence":0.0}],"warnings":[]}',
+      userContent: jaText,
       temperature: 0.0,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Resegment this Japanese academic lecture subtitle into 1 to 3 subtitle units. ' +
-            'Use 1 unit if splitting would be unnatural. Use 2 or 3 units only at clear semantic boundaries. ' +
-            'Each unit must make sense independently and must not end with a particle, conjunction, or unfinished clause. ' +
-            'Preserve technical terms, numbers, formulas, definitions, negations, conditions, and causal relations. ' +
-            'You may remove filler, repeated setup phrases, and redundant lecture asides if no information is lost. ' +
-            'If the text cannot be split safely, return {"cannot_split": true, "units": [], "warnings": ["reason"]}. ' +
-            'Respond only with JSON: {"units":[{"text":"...","reason":"...","confidence":0.0}],"warnings":[]}',
-        },
-        { role: 'user', content: jaText },
-      ],
-    }),
-  })
+      nodeName: 'split_block',
+    },
+    settings,
+  )
 
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`split_block (JA split) API returned HTTP ${response.status}: ${detail}`)
+  // API 失敗 → throw せず、句点ベースのフォールバックへ
+  if (callResult.errorMessage) {
+    const llmActual = `LLM call failed: ${callResult.errorMessage}`
+    const warning = `split_block: could not use LLM units, fell back to sentence-boundary split. ${llmActual}`
+    const fallback = fallbackSplitJa(jaText)
+    if (fallback) return { ...fallback, warning }
+    return { units: [], warning: `split_block: could not split (no sentence boundary). ${llmActual}` }
   }
 
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-
-  const parsed = parseSplitUnits(content)
+  const parsed = parseSplitUnits(callResult.content)
   if (parsed.units.length > 0) return parsed
 
   // LLM が期待形式を返さなかった → 実レスポンスを記録して句点ベースのフォールバックへ
-  const llmActual = parsed.warning ?? (content.length > 0
-    ? `LLM returned: ${content.slice(0, 400)}`
+  const llmActual = parsed.warning ?? (callResult.content.length > 0
+    ? `LLM returned: ${callResult.content.slice(0, 400)}`
     : 'LLM returned empty content')
   const warning = `split_block: could not use LLM units, fell back to sentence-boundary split. ${llmActual}`
 
   const fallback = fallbackSplitJa(jaText)
-  if (fallback) {
-    return { ...fallback, warning }
-  }
+  if (fallback) return { ...fallback, warning }
 
-  throw new Error(`split_block: could not split (no sentence boundary). ${llmActual}`)
+  // フォールバックもダメ → throw せず、warning だけ返す（呼出元が cleanUnits.length<2 で拒否する）
+  return { units: [], warning: `split_block: could not split (no sentence boundary). ${llmActual}` }
 }
 
 const SINGLE_TRANSLATE_SYSTEM =
@@ -215,37 +206,19 @@ const SINGLE_TRANSLATE_SYSTEM =
 async function translateSingle(
   jaText: string,
   settings: AdminSettings,
-): Promise<string> {
-  const connection = requireAiConnection(settings)
+): Promise<{ text: string; errorMessage?: string }> {
   const model = requireChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel), 'split block translation')
-
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  const result = await callSubtitleLlm(
+    {
       model,
+      systemPrompt: SINGLE_TRANSLATE_SYSTEM,
+      userContent: jaText,
       temperature: 0.0,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        { role: 'system', content: SINGLE_TRANSLATE_SYSTEM },
-        { role: 'user', content: jaText },
-      ],
-    }),
-  })
-
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`split_block (translate) API returned HTTP ${response.status}: ${detail}`)
-  }
-
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = parseJsonObjectFromLlmContent(content, 'split_block translation')
-  const text = typeof parsed.text === 'string' ? parsed.text : ''
-  return normalizeSpaces(text.trim())
+      nodeName: 'split_block_translation',
+    },
+    settings,
+  )
+  return { text: result.text, errorMessage: result.errorMessage }
 }
 
 function clampMs(ms: number, minMs: number): number {
@@ -355,7 +328,12 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, `split_block: rejected incomplete or too-short Japanese unit: ${badJa.text}`)
     }
 
-    const translated = await Promise.all(cleanUnits.map(unit => translateSingle(unit.text, settings)))
+    const translatedResults = await Promise.all(cleanUnits.map(unit => translateSingle(unit.text, settings)))
+    const failedTranslation = translatedResults.find(r => r.errorMessage)
+    if (failedTranslation) {
+      return buildFailurePatch(block, `split_block: translation API failed: ${failedTranslation.errorMessage}`)
+    }
+    const translated = translatedResults.map(r => r.text)
     const badEn = translated.find(en => isBadEnglishUnit(en))
     if (badEn) {
       return buildFailurePatch(block, `split_block: rejected fragment-like English unit: ${badEn}`)

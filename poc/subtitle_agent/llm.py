@@ -46,12 +46,14 @@ def translate_ja_to_en(
             "clear, and direct. Output ONLY the raw English translation. "
             "Do not write any notes, markdown, explanation, or quotes."
         )
+    # temperature=0: 翻訳を決定論化する。確率的だと同一 PromptSet でも世代ごとに
+    # スコアがブレ、自己進化が「ノイズを信号として」読んでしまうため。
     response = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": ja_text},
         ],
-        temperature=0.1,
+        temperature=0.0,
     )
     return clean_llm_output(response.choices[0].message.content)

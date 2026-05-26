@@ -138,7 +138,7 @@ variable "budget_alert_email" {
 
 variable "monthly_budget_usd" {
   type        = number
-  default     = 10
+  default     = 100
   description = "月次予算の上限 (USD)"
 }
 

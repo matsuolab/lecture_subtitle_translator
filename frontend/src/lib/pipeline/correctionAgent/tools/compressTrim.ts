@@ -1,11 +1,10 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
-import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId } from '../../prompts'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../../aiProvider'
+import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
-import { tauriFetch } from '@/lib/tauriFetch'
-import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
+import { buildBudgetHint } from './budgetHint'
+import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
 
 function buildTrimSystemPrompt(settings: { enMaxCharsPerLine: number; enMaxLines: number }): string {
   return (
@@ -22,42 +21,21 @@ function buildTrimSystemPrompt(settings: { enMaxCharsPerLine: number; enMaxLines
 async function callTrim(
   enText: string,
   jaText: string,
+  budgetHint: string,
   settings: AdminSettings,
-): Promise<string> {
-  const connection = requireAiConnection(settings)
+): Promise<SubtitleLlmCallResult> {
   const model = requireChatModelForProvider(settings, resolveCompressModelId(settings), 'compress trim')
   const systemPrompt = buildTrimSystemPrompt(settings)
-
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  return callSubtitleLlm(
+    {
       model,
+      systemPrompt,
+      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}\n\n${budgetHint}`,
       temperature: 0.0,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        { role: 'system', content: systemPrompt },
-        {
-          role: 'user',
-          content: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}`,
-        },
-      ],
-    }),
-  })
-
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`compress_trim API returned HTTP ${response.status}: ${detail}`)
-  }
-
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = parseJsonObjectFromLlmContent(content, 'compress_trim')
-  const text = typeof parsed.text === 'string' ? parsed.text : ''
-  return normalizeSpaces(text.trim())
+      nodeName: 'compress_trim',
+    },
+    settings,
+  )
 }
 
 export const compressTrimTool: Tool = {
@@ -76,10 +54,21 @@ export const compressTrimTool: Tool = {
     block: EnBlock,
     _ctx: DecisionContext,
     settings: AdminSettings,
-    _thresholds: PipelineThresholds & AgentThresholds,
+    thresholds: PipelineThresholds & AgentThresholds,
   ): Promise<TimelinePatch> {
-    const trimmed = await callTrim(block.enText, block.jaText, settings)
+    const budgetHint = buildBudgetHint(block, thresholds)
+    const result = await callTrim(block.enText, block.jaText, budgetHint, settings)
 
+    if (result.errorMessage) {
+      return {
+        replaceBlocks: [block],
+        dirtyBlockIds: [String(block.id)],
+        changed: false,
+        warning: `compress_trim: ${result.errorMessage}`,
+      }
+    }
+
+    const trimmed = result.text
     const changed = trimmed.length > 0 && trimmed !== block.enText.replace(/\n/g, ' ')
     const newEnText = changed ? trimmed : block.enText
 

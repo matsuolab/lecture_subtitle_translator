@@ -1,21 +1,16 @@
 import type { TranscriptSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
-import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
+import { requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
+import { llmCallWithMeta, isAbortableFailure } from './llmCallWithMeta'
+import { DEFAULT_CORRECTION_FEW_SHOT_JSON } from './prompts'
 
 const MAX_SEGMENTS_PER_REQUEST = 20
-const COUNT_MISMATCH_RE = /correction API returned (\d+) items for (\d+) inputs/
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
-
-class CorrectionRetryableError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'CorrectionRetryableError'
-  }
-}
+/** 単一セグメントまで分割しても失敗した時、ここで指定回数までリトライ。それでも駄目なら原文を返す。*/
+const PER_LEAF_RETRY_MAX_ATTEMPTS = 2
 
 const SYSTEM_PROMPT =
   'あなたは日本語書き起こしテキストの校正専門家です。\n' +
@@ -38,6 +33,55 @@ const SYSTEM_PROMPT =
   '\n' +
   'CRITICAL: Output EXACTLY one correction per input segment. Array length MUST equal input array length.\n' +
   '意味を大きく変える修正は絶対にしないこと。'
+
+const FEW_SHOT_USER_CONTENT = JSON.stringify({
+  segments: [
+    {
+      id: 1,
+      text: 'えーっと機械学習というのはですね、データから自動的に学習するアルゴリズムのことです。',
+    },
+    {
+      id: 2,
+      text: '現時点で出見中7件完了しています。',
+    },
+    {
+      id: 3,
+      text: 'こちらはよやく機能のせっけいを進めています。',
+    },
+  ],
+})
+
+const FEW_SHOT_ASSISTANT_CONTENT = JSON.stringify({
+  corrections: [
+    { id: 1, text: '機械学習とは、データから自動的に学習するアルゴリズムのことです。' },
+    { id: 2, text: '現時点で未提出7件を完了しています。' },
+    { id: 3, text: 'こちらは予約機能の設計を進めています。' },
+  ],
+})
+
+function buildCorrectionSystemPrompt(settings: AdminSettings): string {
+  const additional = settings.correctionAdditionalInstructions.trim()
+  return additional ? `${SYSTEM_PROMPT}\n\n${additional}` : SYSTEM_PROMPT
+}
+
+function resolveCorrectionFewShotMessages(settings: AdminSettings): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const raw = settings.correctionFewShotJson.trim() || DEFAULT_CORRECTION_FEW_SHOT_JSON
+  try {
+    const parsed = JSON.parse(raw) as { segments?: unknown; corrections?: unknown }
+    if (Array.isArray(parsed.segments) && Array.isArray(parsed.corrections)) {
+      return [
+        { role: 'user', content: JSON.stringify({ segments: parsed.segments }) },
+        { role: 'assistant', content: JSON.stringify({ corrections: parsed.corrections }) },
+      ]
+    }
+  } catch {
+    // Fall back to the stable built-in example below.
+  }
+  return [
+    { role: 'user', content: FEW_SHOT_USER_CONTENT },
+    { role: 'assistant', content: FEW_SHOT_ASSISTANT_CONTENT },
+  ]
+}
 
 function levenshteinRatio(a: string, b: string): number {
   if (a === b) return 1.0
@@ -67,173 +111,181 @@ export interface CorrectedSegmentLite extends TranscriptSegment {
   correctedText: string
   correctionDistance: number
   correctionFlagged: boolean
+  /** 補正失敗時の理由（成功時は undefined）。失敗時は correctedText に原文を返す。*/
+  correctionFailureReason?: string
+  /** 補正に要した試行回数（1=初回成功、>1=リトライあり、PER_LEAF_RETRY_MAX_ATTEMPTS=最終的に諦め）。
+   *  注: EnBlock 側の `correctionAttempts`（配列）と区別するためにリネーム済み。*/
+  correctionRetryAttempts?: number
+}
+
+/**
+ * 1 バッチ分を Chat Completions API へ送信した結果。
+ * - errorMessage / abortable は呼び出し側がリトライ・分割・諦めを判断するための情報。
+ * - 失敗時 texts は「原文を normalize したもの」が入る（呼び出し側が fall-back として使える）。
+ */
+interface CorrectionApiResult {
+  texts: string[]
+  errorMessage?: string
+  abortable: boolean
 }
 
 async function callCorrectionApi(
   segments: Array<{ id: number; text: string }>,
   glossaryTerms: string[],
-  apiKey: string,
-  baseUrl: string,
   model: string,
-): Promise<string[]> {
+  settings: AdminSettings,
+): Promise<CorrectionApiResult> {
   const glossaryNote =
     glossaryTerms.length > 0
       ? `【専門用語リスト】\n${glossaryTerms.slice(0, 100).join('、')}\n\n`
       : ''
 
-  const response = await tauriFetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  const fallbackTexts = segments.map((s) => normalizeSpaces(s.text))
+
+  const result = await llmCallWithMeta(
+    {
       model,
+      systemPrompt: buildCorrectionSystemPrompt(settings),
+      userContent: glossaryNote + JSON.stringify({ segments }),
+      fewShotMessages: resolveCorrectionFewShotMessages(settings),
       temperature: 0.1,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            segments: [
-              {
-                id: 1,
-                text: 'えーっと機械学習というのはですね、データから自動的に学習するアルゴリズムのことです。',
-              },
-              {
-                id: 2,
-                text: '現時点で出見中7件完了しています。',
-              },
-              {
-                id: 3,
-                text: 'こちらはよやく機能のせっけいを進めています。',
-              },
-            ],
-          }),
-        },
-        {
-          role: 'assistant',
-          content: JSON.stringify({
-            corrections: [
-              { id: 1, text: '機械学習とは、データから自動的に学習するアルゴリズムのことです。' },
-              { id: 2, text: '現時点で未提出7件を完了しています。' },
-              { id: 3, text: 'こちらは予約機能の設計を進めています。' },
-            ],
-          }),
-        },
-        {
-          role: 'user',
-          content: glossaryNote + JSON.stringify({ segments }),
-        },
-      ],
-    }),
-  })
+      // response_format は付けない（OpenAI 既定 text のまま、既存挙動を保つ）
+      responseFormat: 'omit',
+      nodeName: 'correctJa',
+    },
+    settings,
+  )
 
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`correction API returned HTTP ${response.status}: ${detail}`)
-  }
-
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  if (!content.trim()) {
-    throw new CorrectionRetryableError(
-      `correction API response did not include message content. payload=${summarizeCorrectionPayload(payload)}`,
-    )
+  if (result.errorMessage) {
+    return {
+      texts: fallbackTexts,
+      errorMessage: result.errorMessage,
+      abortable: isAbortableFailure(result),
+    }
   }
 
   let parsed: Record<string, unknown>
   try {
-    parsed = parseJsonObjectFromLlmContent(content, 'correction')
+    parsed = parseJsonObjectFromLlmContent(result.content, 'correction')
   } catch (error) {
-    throw new CorrectionRetryableError(
-      `${error instanceof Error ? error.message : String(error)}. content=${content.slice(0, 500)}`,
-    )
+    return {
+      texts: fallbackTexts,
+      errorMessage: `parse_failed: ${error instanceof Error ? error.message : String(error)}. content=${result.content.slice(0, 300)}`,
+      abortable: false,
+    }
   }
 
   const corrections = parsed.corrections
   if (!Array.isArray(corrections)) {
-    throw new CorrectionRetryableError(
-      `correction response did not contain corrections array. content=${content.slice(0, 500)}`,
-    )
+    return {
+      texts: fallbackTexts,
+      errorMessage: `no_corrections_array. content=${result.content.slice(0, 300)}`,
+      abortable: false,
+    }
   }
   if (corrections.length !== segments.length) {
-    throw new CorrectionRetryableError(
-      `correction API returned ${corrections.length} items for ${segments.length} inputs`,
-    )
+    return {
+      texts: fallbackTexts,
+      errorMessage: `count_mismatch: returned ${corrections.length} items for ${segments.length} inputs`,
+      abortable: false,
+    }
   }
 
   const byId = new Map<number, string>()
   for (const c of corrections) {
     if (c && typeof c === 'object' && 'id' in c && 'text' in c) {
-      byId.set(Number(c.id), normalizeSpaces(String(c.text)))
+      byId.set(Number((c as { id: unknown }).id), normalizeSpaces(String((c as { text: unknown }).text)))
     }
   }
-  return segments.map((seg) => byId.get(seg.id) ?? normalizeSpaces(seg.text))
-}
-
-function summarizeCorrectionPayload(payload: unknown): string {
-  if (!payload || typeof payload !== 'object') return String(payload)
-  const row = payload as Record<string, unknown>
-  const choices = Array.isArray(row.choices) ? row.choices : []
-  const firstChoice = choices[0] as Record<string, unknown> | undefined
-  const message = firstChoice?.message as Record<string, unknown> | undefined
-  const summary = {
-    object: row.object,
-    model: row.model,
-    choices: choices.length,
-    finishReason: firstChoice?.finish_reason,
-    messageKeys: message ? Object.keys(message) : [],
-    hasReasoningContent: typeof message?.reasoning_content === 'string',
-    reasoningPreview: typeof message?.reasoning_content === 'string'
-      ? String(message.reasoning_content).slice(0, 300)
-      : undefined,
-    usage: row.usage,
+  return {
+    texts: segments.map((seg) => byId.get(seg.id) ?? normalizeSpaces(seg.text)),
+    abortable: false,
   }
-  return JSON.stringify(summary)
 }
 
-function isRetryableCorrectionError(error: unknown): boolean {
-  if (error instanceof CorrectionRetryableError) return true
-  const message = error instanceof Error ? error.message : String(error ?? '')
-  return COUNT_MISMATCH_RE.test(message)
+interface BatchOutcome {
+  texts: string[]
+  /** 各セグメントが失敗した時の理由（成功時は undefined） */
+  failureReasons: Array<string | undefined>
+  /** 各セグメントが要した試行回数 */
+  attempts: number[]
 }
 
-function formatSegmentFailure(
-  segment: { id: number; text: string },
-  error: unknown,
-): Error {
-  const message = error instanceof Error ? error.message : String(error ?? '')
-  return new Error(
-    `correction failed for segment id=${segment.id}: ${message}. source=${segment.text.slice(0, 500)}`,
-  )
+function makeFailureOutcome(
+  segments: Array<{ id: number; text: string }>,
+  errorMessage: string,
+  attempts: number,
+): BatchOutcome {
+  return {
+    texts: segments.map((s) => normalizeSpaces(s.text)),
+    failureReasons: segments.map(() => errorMessage),
+    attempts: segments.map(() => attempts),
+  }
 }
 
+/**
+ * バッチ単位で API を叩く。失敗時はバッチを半分に分割して再試行（既存挙動）。
+ * 単一セグメントまで分割しても失敗した場合は throw せず、原文 + failureReason を返す。
+ */
 async function correctBatchWithFallback(
   segments: Array<{ id: number; text: string }>,
   glossaryTerms: string[],
-  apiKey: string,
-  baseUrl: string,
   model: string,
-): Promise<string[]> {
-  if (segments.length === 0) return []
-  try {
-    return await callCorrectionApi(segments, glossaryTerms, apiKey, baseUrl, model)
-  } catch (error) {
-    if (!isRetryableCorrectionError(error)) throw error
-    if (segments.length === 1) throw formatSegmentFailure(segments[0], error)
+  settings: AdminSettings,
+): Promise<BatchOutcome> {
+  if (segments.length === 0) return { texts: [], failureReasons: [], attempts: [] }
+
+  const result = await callCorrectionApi(segments, glossaryTerms, model, settings)
+  if (!result.errorMessage) {
+    return {
+      texts: result.texts,
+      failureReasons: segments.map(() => undefined),
+      attempts: segments.map(() => 1),
+    }
   }
+
+  // content_filter / refusal はリトライ・分割しても無駄なので、即諦めて原文を返す
+  if (result.abortable) {
+    return makeFailureOutcome(segments, result.errorMessage, 1)
+  }
+
+  // 単一セグメントまで分割済み → 最大 PER_LEAF_RETRY_MAX_ATTEMPTS 回までリトライ、それでも駄目なら諦める
+  if (segments.length === 1) {
+    let lastError = result.errorMessage
+    for (let attempt = 2; attempt <= PER_LEAF_RETRY_MAX_ATTEMPTS; attempt++) {
+      const retry = await callCorrectionApi(segments, glossaryTerms, model, settings)
+      if (!retry.errorMessage) {
+        return {
+          texts: retry.texts,
+          failureReasons: [undefined],
+          attempts: [attempt],
+        }
+      }
+      if (retry.abortable) {
+        return makeFailureOutcome(segments, retry.errorMessage, attempt)
+      }
+      lastError = retry.errorMessage
+    }
+    return makeFailureOutcome(segments, lastError, PER_LEAF_RETRY_MAX_ATTEMPTS)
+  }
+
+  // 複数セグメント → 半分に分割して再帰
   const splitAt = Math.ceil(segments.length / 2)
-  const left = await correctBatchWithFallback(segments.slice(0, splitAt), glossaryTerms, apiKey, baseUrl, model)
-  const right = await correctBatchWithFallback(segments.slice(splitAt), glossaryTerms, apiKey, baseUrl, model)
-  return [...left, ...right]
+  const [left, right] = await Promise.all([
+    correctBatchWithFallback(segments.slice(0, splitAt), glossaryTerms, model, settings),
+    correctBatchWithFallback(segments.slice(splitAt), glossaryTerms, model, settings),
+  ])
+  return {
+    texts: [...left.texts, ...right.texts],
+    failureReasons: [...left.failureReasons, ...right.failureReasons],
+    attempts: [...left.attempts, ...right.attempts],
+  }
 }
 
 async function correctWithLlm(
   segments: TranscriptSegment[],
-  apiKey: string,
-  baseUrl: string,
   model: string,
+  settings: AdminSettings,
   glossaryTerms: string[],
   threshold: number,
   maxSegmentsPerRequest: number,
@@ -248,20 +300,34 @@ async function correctWithLlm(
   const batchResults = await mapWithConcurrency(
     batches.length,
     requestConcurrency,
-    (index) => correctBatchWithFallback(batches[index], glossaryTerms, apiKey, baseUrl, model),
+    (index) => correctBatchWithFallback(batches[index], glossaryTerms, model, settings),
   )
-  const correctedTexts = batchResults.flat()
+
+  const correctedTexts: string[] = []
+  const failureReasons: Array<string | undefined> = []
+  const attemptCounts: number[] = []
+  for (const r of batchResults) {
+    correctedTexts.push(...r.texts)
+    failureReasons.push(...r.failureReasons)
+    attemptCounts.push(...r.attempts)
+  }
 
   return segments.map((seg, idx) => {
     const source = seg.text ?? ''
     const corrected = correctedTexts[idx] ?? normalizeSpaces(source)
     const distance = Math.round((1.0 - levenshteinRatio(source, corrected)) * 10000) / 10000
-    return {
+    const failureReason = failureReasons[idx]
+    const out: CorrectedSegmentLite = {
       ...seg,
       correctedText: corrected,
       correctionDistance: distance,
       correctionFlagged: distance > threshold,
+      correctionRetryAttempts: attemptCounts[idx] ?? 1,
     }
+    if (failureReason) {
+      out.correctionFailureReason = failureReason
+    }
+    return out
   })
 }
 
@@ -272,8 +338,13 @@ export async function correctSegments(
   glossaryTerms: string[] = [],
 ): Promise<CorrectedSegmentLite[]> {
   if (!settings) throw new Error('AI provider settings are required before running the pipeline')
-  const connection = requireAiConnection(settings)
-  const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'correction')
+  // 接続情報は llmCallWithMeta が個別呼び出しで取得・検証する（throw しない）。
+  // ここでは「モデルが解決できるか」だけ事前チェック（解決不能なら全件失敗するのが明らかなので throw）。
+  const model = requireChatModelForProvider(
+    settings,
+    settings.correctionModel || settings.translationModel,
+    'correction',
+  )
   const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
     ? LOCAL_MAX_SEGMENTS_PER_REQUEST
     : MAX_SEGMENTS_PER_REQUEST
@@ -282,9 +353,8 @@ export async function correctSegments(
   const requestConcurrency = normalizeConcurrency(settings.apiRequestConcurrency, 1)
   return correctWithLlm(
     segments,
-    connection.apiKey,
-    connection.baseUrl,
     model,
+    settings,
     glossaryTerms,
     threshold,
     maxSegmentsPerRequest,

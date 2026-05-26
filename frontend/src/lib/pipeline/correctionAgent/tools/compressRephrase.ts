@@ -1,52 +1,30 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
-import { normalizeSpaces } from '../../textUtils'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from '../../prompts'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../../aiProvider'
+import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
-import { tauriFetch } from '@/lib/tauriFetch'
-import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
+import { buildBudgetHint } from './budgetHint'
+import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
 
 async function callCompress(
   enText: string,
   jaText: string,
+  budgetHint: string,
   systemPrompt: string,
   settings: AdminSettings,
   model: string,
-): Promise<string> {
-  const connection = requireAiConnection(settings)
+): Promise<SubtitleLlmCallResult> {
   const resolvedModel = requireChatModelForProvider(settings, model, 'compress rephrase')
-
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  return callSubtitleLlm(
+    {
       model: resolvedModel,
+      systemPrompt,
+      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}\n\n${budgetHint}`,
       temperature: 0.0,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        { role: 'system', content: systemPrompt },
-        {
-          role: 'user',
-          content: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}`,
-        },
-      ],
-    }),
-  })
-
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`compress_rephrase API returned HTTP ${response.status}: ${detail}`)
-  }
-
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = parseJsonObjectFromLlmContent(content, 'compress_rephrase')
-  const text = typeof parsed.text === 'string' ? parsed.text : ''
-  return normalizeSpaces(text.trim())
+      nodeName: 'compress_rephrase',
+    },
+    settings,
+  )
 }
 
 export const compressRephraseTool: Tool = {
@@ -65,12 +43,24 @@ export const compressRephraseTool: Tool = {
     block: EnBlock,
     _ctx: DecisionContext,
     settings: AdminSettings,
-    _thresholds: PipelineThresholds & AgentThresholds,
+    thresholds: PipelineThresholds & AgentThresholds,
   ): Promise<TimelinePatch> {
     const systemPrompt = resolveCompressSystemPrompt(settings, settings.compressPromptOverride)
     const model = resolveCompressModelId(settings)
-    const compressed = await callCompress(block.enText, block.jaText, systemPrompt, settings, model)
+    const budgetHint = buildBudgetHint(block, thresholds)
+    const result = await callCompress(block.enText, block.jaText, budgetHint, systemPrompt, settings, model)
 
+    if (result.errorMessage) {
+      // throw せず warning として correctionEngine ループへ伝搬。元のブロックを維持。
+      return {
+        replaceBlocks: [block],
+        dirtyBlockIds: [String(block.id)],
+        changed: false,
+        warning: `compress_rephrase: ${result.errorMessage}`,
+      }
+    }
+
+    const compressed = result.text
     const changed = compressed.length > 0 && compressed !== block.enText.replace(/\n/g, ' ')
     const newEnText = changed ? compressed : block.enText
 

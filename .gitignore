@@ -18,6 +18,9 @@ poc/data/
 poc/.env
 poc/results/
 poc/cache/
+poc/**/node_modules/
+poc/**/dist/
+poc/**/results/
 results/
 poc/step2_pipeline/output/
 poc/step2_pipeline/.env

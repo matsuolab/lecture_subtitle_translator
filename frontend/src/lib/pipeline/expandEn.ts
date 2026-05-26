@@ -3,47 +3,26 @@ import type { EnBlock, PipelineThresholds } from './blockTypes'
 import { computeMetrics, classifyViolation } from './metrics'
 import { formatLines } from './formatLines'
 import { resolveExpandModelId, resolveExpandSystemPrompt } from './prompts'
-import { normalizeSpaces } from './textUtils'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from './aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
-import { parseJsonObjectFromLlmContent } from './jsonResponse'
+import { requireChatModelForProvider } from './aiProvider'
+import { callSubtitleLlm, type SubtitleLlmCallResult } from './correctionAgent/tools/callSubtitleLlm'
 
 async function callExpand(
   enText: string,
   jaText: string,
   settings: AdminSettings,
-): Promise<string> {
-  const connection = requireAiConnection(settings)
+): Promise<SubtitleLlmCallResult> {
   const model = requireChatModelForProvider(settings, resolveExpandModelId(settings), 'expansion')
   const systemPrompt = resolveExpandSystemPrompt(settings, settings.expandPromptOverride)
-
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
+  return callSubtitleLlm(
+    {
       model,
+      systemPrompt,
+      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}`,
       temperature: 0.0,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}` },
-      ],
-    }),
-  })
-
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`expand API returned HTTP ${response.status}: ${detail}`)
-  }
-
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = parseJsonObjectFromLlmContent(content, 'expand')
-  const text = typeof parsed.text === 'string' ? parsed.text : ''
-  return normalizeSpaces(text.trim())
+      nodeName: 'expand_en',
+    },
+    settings,
+  )
 }
 
 export async function expandEn(
@@ -64,8 +43,15 @@ export async function expandEn(
     }
 
     let current = block
+    let lastFailure: string | undefined
     for (let attempt = 0; attempt < thresholds.maxExpandPerBlock - block.expandCount; attempt++) {
-      const expanded = await callExpand(current.enText, current.jaText, settings)
+      const callResult = await callExpand(current.enText, current.jaText, settings)
+      if (callResult.errorMessage) {
+        // throw せず、失敗理由を保持してループ脱出。元のブロックを使う。
+        lastFailure = callResult.errorMessage
+        break
+      }
+      const expanded = callResult.text
       if (!expanded || expanded.length <= current.enText.length) break
 
       const formatted = formatLines([{ ...current, enRaw: expanded, enText: expanded }], thresholds)[0]
@@ -87,7 +73,7 @@ export async function expandEn(
       if (violation !== 'over_compressed') break
     }
 
-    results.push(current)
+    results.push(lastFailure ? { ...current, expansionFailureReason: `expand_en: ${lastFailure}` } : current)
   }
 
   return results

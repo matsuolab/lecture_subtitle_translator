@@ -1,6 +1,12 @@
-import type { AdminSettings, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
+import {
+  DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,
+  DEFAULT_CORRECTION_FEW_SHOT_JSON,
+  DEFAULT_TRANSLATION_ADDITIONAL_INSTRUCTIONS,
+  DEFAULT_TRANSLATION_FEW_SHOT_JSON,
+} from '@/lib/pipeline/prompts'
 import { normalizeConcurrency } from '@/lib/concurrency'
 
 const STORAGE_KEY = 'subtitle-editor.admin-settings.v4'
@@ -10,6 +16,22 @@ const DEFAULT_LOCAL_TRANSCRIPT_API_BASE = 'http://127.0.0.1:8000'
 
 const DEFAULT_SERVICE_MODE: ServiceMode = 'legacy_pipeline'
 const DEFAULT_TRANSLATION_PROVIDER: TranslationProvider = 'openai'
+const SHARED_SETTINGS_VERSION = 1
+const SHARED_SETTINGS_EXCLUDED_FIELDS = [
+  'serviceAuthToken',
+  'hfToken',
+  'openaiApiKey',
+  'geminiApiKey',
+  'workLogDir',
+] satisfies Array<keyof AdminSettings>
+
+export interface SharedAdminSettingsExport {
+  version: number
+  exportedAt: string
+  kind: 'subtitle-editor-admin-settings'
+  excludedFields: string[]
+  settings: Partial<AdminSettings>
+}
 
 export function getDefaultAdminSettings(): AdminSettings {
   return {
@@ -30,16 +52,13 @@ export function getDefaultAdminSettings(): AdminSettings {
     apiRequestConcurrency: 7,
     embeddingModel: 'text-embedding-3-small',
     semanticCheckMode: 'log_only',
-    logRetentionCount: null,
     enMaxCharsPerLine: 80,
     enMaxLines: 2,
     enMaxTotalChars: 160,
     enMaxCps: 16.9,
     subtitleMinDurationSec: 0.833,
     subtitleMaxDurationSec: 7.0,
-    mergeMinJaChars: 8,
     qualityCorrectionThreshold: 0.15,
-    qualityTranslationThreshold: 0.25,
     pipelineShortDurationSec: 1.5,
     pipelineLongDurationSec: 10.0,
     pipelineMergedLongDurationSec: 7.0,
@@ -51,16 +70,29 @@ export function getDefaultAdminSettings(): AdminSettings {
     pipelineMaxCompressPerBlock: 5,
     pipelineMaxPhase2Retries: 3,
     compressModel: 'gpt-5.4-mini',
-    microModel: 'gpt-5.4-mini',
+    microModel: 'gpt-5.4-nano',
     expandModel: 'gpt-5.4-mini',
-    contextMergeModel: 'gpt-5.5',
+    contextMergeModel: 'gpt-5.4-mini',
+    splitJaModel: 'gpt-5.4-nano',
     subtitleLanguageLabel: 'English',
     transcriptLanguageLabel: 'Japanese',
     languageProfileConfigJson: DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON,
     textNormalizationEnabled: true,
     textNormalizationRulesJson: DEFAULT_TEXT_NORMALIZATION_RULES_JSON,
+    correctionAdditionalInstructions: DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,
+    correctionFewShotJson: DEFAULT_CORRECTION_FEW_SHOT_JSON,
+    translationAdditionalInstructions: DEFAULT_TRANSLATION_ADDITIONAL_INSTRUCTIONS,
+    translationFewShotJson: DEFAULT_TRANSLATION_FEW_SHOT_JSON,
     compressPromptOverride: '',
     expandPromptOverride: '',
+    coverageRepairEnabled: true,
+    coverageRepairModel: 'gpt-5.4-mini',
+    coverageRepairEffort: 'low',
+    generalRepairEnabled: true,
+    generalRepairModel: 'gpt-5.4-mini',
+    generalRepairMaxEffort: 'high',
+    debugModeEnabled: false,
+    correctionDebugEmbedding: false,
     workLogDir: '',
   }
 }
@@ -96,6 +128,16 @@ function normalizeSemanticCheckMode(value: unknown): SemanticCheckMode {
   return 'log_only'
 }
 
+function normalizeReasoningEffort(value: unknown, fallback: ReasoningEffort): ReasoningEffort {
+  if (value === 'minimal' || value === 'low' || value === 'medium' || value === 'high') return value
+  return fallback
+}
+
+function normalizeMaxEffort(value: unknown, fallback: 'low' | 'medium' | 'high'): 'low' | 'medium' | 'high' {
+  if (value === 'low' || value === 'medium' || value === 'high') return value
+  return fallback
+}
+
 export function normalizeAdminSettings(value: unknown): AdminSettings {
   const raw = typeof value === 'object' && value !== null ? value as Partial<AdminSettings> & { pipelineApiUrl?: string } : {}
   const defaults = getDefaultAdminSettings()
@@ -123,16 +165,13 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     apiRequestConcurrency: normalizeConcurrency(raw.apiRequestConcurrency, defaults.apiRequestConcurrency),
     embeddingModel: typeof raw.embeddingModel === 'string' && raw.embeddingModel ? raw.embeddingModel : defaults.embeddingModel,
     semanticCheckMode: normalizeSemanticCheckMode(raw.semanticCheckMode),
-    logRetentionCount: typeof raw.logRetentionCount === 'number' ? raw.logRetentionCount : null,
     enMaxCharsPerLine: normalizePositiveNumber(raw.enMaxCharsPerLine, defaults.enMaxCharsPerLine),
     enMaxLines: normalizePositiveNumber(raw.enMaxLines, defaults.enMaxLines),
     enMaxTotalChars: normalizePositiveNumber(raw.enMaxTotalChars, defaults.enMaxTotalChars),
     enMaxCps: normalizePositiveNumber(raw.enMaxCps, defaults.enMaxCps),
     subtitleMinDurationSec: normalizePositiveNumber(raw.subtitleMinDurationSec, defaults.subtitleMinDurationSec),
     subtitleMaxDurationSec: normalizePositiveNumber(raw.subtitleMaxDurationSec, defaults.subtitleMaxDurationSec),
-    mergeMinJaChars: normalizePositiveNumber(raw.mergeMinJaChars, defaults.mergeMinJaChars),
     qualityCorrectionThreshold: normalizePositiveNumber(raw.qualityCorrectionThreshold, defaults.qualityCorrectionThreshold),
-    qualityTranslationThreshold: normalizePositiveNumber(raw.qualityTranslationThreshold, defaults.qualityTranslationThreshold),
     pipelineShortDurationSec: normalizePositiveNumber(raw.pipelineShortDurationSec, defaults.pipelineShortDurationSec),
     pipelineLongDurationSec: normalizePositiveNumber(raw.pipelineLongDurationSec, defaults.pipelineLongDurationSec),
     pipelineMergedLongDurationSec: normalizePositiveNumber(raw.pipelineMergedLongDurationSec, defaults.pipelineMergedLongDurationSec),
@@ -147,13 +186,26 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     microModel: typeof raw.microModel === 'string' && raw.microModel ? raw.microModel : defaults.microModel,
     expandModel: typeof raw.expandModel === 'string' && raw.expandModel ? raw.expandModel : defaults.expandModel,
     contextMergeModel: typeof raw.contextMergeModel === 'string' && raw.contextMergeModel ? raw.contextMergeModel : defaults.contextMergeModel,
+    splitJaModel: typeof raw.splitJaModel === 'string' && raw.splitJaModel ? raw.splitJaModel : defaults.splitJaModel,
     subtitleLanguageLabel: typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel ? raw.subtitleLanguageLabel : defaults.subtitleLanguageLabel,
     transcriptLanguageLabel: typeof raw.transcriptLanguageLabel === 'string' && raw.transcriptLanguageLabel ? raw.transcriptLanguageLabel : defaults.transcriptLanguageLabel,
     languageProfileConfigJson: typeof raw.languageProfileConfigJson === 'string' && raw.languageProfileConfigJson ? raw.languageProfileConfigJson : defaults.languageProfileConfigJson,
     textNormalizationEnabled: typeof raw.textNormalizationEnabled === 'boolean' ? raw.textNormalizationEnabled : defaults.textNormalizationEnabled,
     textNormalizationRulesJson: typeof raw.textNormalizationRulesJson === 'string' ? raw.textNormalizationRulesJson : defaults.textNormalizationRulesJson,
+    correctionAdditionalInstructions: typeof raw.correctionAdditionalInstructions === 'string' ? raw.correctionAdditionalInstructions : defaults.correctionAdditionalInstructions,
+    correctionFewShotJson: typeof raw.correctionFewShotJson === 'string' ? raw.correctionFewShotJson : defaults.correctionFewShotJson,
+    translationAdditionalInstructions: typeof raw.translationAdditionalInstructions === 'string' ? raw.translationAdditionalInstructions : defaults.translationAdditionalInstructions,
+    translationFewShotJson: typeof raw.translationFewShotJson === 'string' ? raw.translationFewShotJson : defaults.translationFewShotJson,
     compressPromptOverride: typeof raw.compressPromptOverride === 'string' ? raw.compressPromptOverride : '',
     expandPromptOverride: typeof raw.expandPromptOverride === 'string' ? raw.expandPromptOverride : '',
+    coverageRepairEnabled: typeof raw.coverageRepairEnabled === 'boolean' ? raw.coverageRepairEnabled : defaults.coverageRepairEnabled,
+    coverageRepairModel: typeof raw.coverageRepairModel === 'string' ? raw.coverageRepairModel : defaults.coverageRepairModel,
+    coverageRepairEffort: normalizeReasoningEffort(raw.coverageRepairEffort, defaults.coverageRepairEffort),
+    generalRepairEnabled: typeof raw.generalRepairEnabled === 'boolean' ? raw.generalRepairEnabled : defaults.generalRepairEnabled,
+    generalRepairModel: typeof raw.generalRepairModel === 'string' ? raw.generalRepairModel : defaults.generalRepairModel,
+    generalRepairMaxEffort: normalizeMaxEffort(raw.generalRepairMaxEffort, defaults.generalRepairMaxEffort),
+    debugModeEnabled: typeof raw.debugModeEnabled === 'boolean' ? raw.debugModeEnabled : defaults.debugModeEnabled,
+    correctionDebugEmbedding: typeof raw.correctionDebugEmbedding === 'boolean' ? raw.correctionDebugEmbedding : defaults.correctionDebugEmbedding,
     workLogDir: typeof raw.workLogDir === 'string' ? raw.workLogDir : '',
   }
 }
@@ -171,4 +223,38 @@ export function loadAdminSettings(): AdminSettings {
 
 export function saveAdminSettings(settings: AdminSettings): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeAdminSettings(settings)))
+}
+
+function stripUnshareableAdminSettings(settings: AdminSettings): Partial<AdminSettings> {
+  const shared: Partial<AdminSettings> = { ...settings }
+  for (const field of SHARED_SETTINGS_EXCLUDED_FIELDS) {
+    delete shared[field]
+  }
+  return shared
+}
+
+export function createSharedAdminSettingsExport(settings: AdminSettings): SharedAdminSettingsExport {
+  return {
+    version: SHARED_SETTINGS_VERSION,
+    exportedAt: new Date().toISOString(),
+    kind: 'subtitle-editor-admin-settings',
+    excludedFields: [...SHARED_SETTINGS_EXCLUDED_FIELDS],
+    settings: stripUnshareableAdminSettings(normalizeAdminSettings(settings)),
+  }
+}
+
+export function parseSharedAdminSettingsExport(text: string): Partial<AdminSettings> {
+  const parsed = JSON.parse(text) as unknown
+  const rawSettings = (
+    typeof parsed === 'object'
+    && parsed !== null
+    && 'settings' in parsed
+    && typeof (parsed as { settings?: unknown }).settings === 'object'
+    && (parsed as { settings?: unknown }).settings !== null
+  )
+    ? (parsed as { settings: unknown }).settings
+    : parsed
+
+  const normalized = normalizeAdminSettings(rawSettings)
+  return stripUnshareableAdminSettings(normalized)
 }
