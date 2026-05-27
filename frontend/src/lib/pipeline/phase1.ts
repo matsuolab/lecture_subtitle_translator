@@ -5,7 +5,7 @@ import type { CorrectedSegmentLite } from './correct'
 import { correctSegments } from './correct'
 import { semanticSplitJa } from './semanticSplitJa'
 import { mergeShort } from './mergeShort'
-import { mergeContinuation } from './mergeContinuation'
+import { contextGroupCueBlocks, reindexContextGroups } from './contextGrouping'
 import { runCorrectionDebug, isCorrectionDebugEnabled } from './correctionDebug'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
@@ -47,12 +47,12 @@ export async function runPhase1(
   const split = await runNode('semanticSplitJa', () =>
     semanticSplitJa(corrected, settings, thresholds, options.glossaryTerms ?? []),
   )
-  // Phase1: 「末尾 mid-sentence」のブロックを次と結合する（多言語対応 LLM 判定）
-  // semanticSplitJa が継続助詞で切ったブロックを translate 前に統合し、
-  // 後段 translateEn の overflow と CPS 違反を未然に防ぐ。
-  const continuationMerged = await runNode('mergeContinuation', () =>
-    mergeContinuation(split, settings, onWarning),
+  // Phase1: 「文脈上は一体で扱うべき cue」を context group としてタグ付けする。
+  // 表示 cue はここでは結合しない。翻訳・後段修正に group 文脈を渡しつつ、
+  // subtitle cue は duration / CPS / 行長制約に従って 1〜N cue として維持する。
+  const contextGrouped = await runNode('contextGroupCueBlocks', () =>
+    contextGroupCueBlocks(split, settings, onWarning),
   )
-  const merged = await runNode('mergeShort', () => mergeShort(continuationMerged.blocks, thresholds))
+  const merged = await runNode('mergeShort', () => reindexContextGroups(mergeShort(contextGrouped.blocks, thresholds)))
   return { blocks: merged, correctedSegments: corrected }
 }

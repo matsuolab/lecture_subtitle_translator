@@ -27,6 +27,13 @@ export function toSubtitleBlocks(
         reviewAction: review.action,
         reviewPriority: review.priority,
         reviewDisposition: review.disposition,
+        contextGroupId: block.contextGroupId,
+        contextGroupIndex: block.contextGroupIndex,
+        contextGroupSize: block.contextGroupSize,
+        contextGroupRole: block.contextGroupRole,
+        contextGroupReason: block.contextGroupReason,
+        contextGroupText: block.contextGroupText,
+        contextGroupSourceIds: block.contextGroupSourceIds,
         correctionAttempts: block.correctionAttempts,
       }
     })(),

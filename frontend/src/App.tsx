@@ -39,6 +39,7 @@ import { useToast } from '@/context/ToastContext'
 import { applyGlossaryToText } from '@/utils/glossaryApply'
 import { useWorkLog } from '@/hooks/useWorkLog'
 import type { WorkLogBaselineOrigin } from '@/lib/worklog/types'
+import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
@@ -88,6 +89,7 @@ function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
     glossaryTerms: block.glossaryTerms.map((term) => ({ ...term })),
     ignoredTypos: block.ignoredTypos ? [...block.ignoredTypos] : undefined,
     ignoredMissing: block.ignoredMissing ? [...block.ignoredMissing] : undefined,
+    contextGroupSourceIds: block.contextGroupSourceIds ? [...block.contextGroupSourceIds] : undefined,
     correctionAttempts: block.correctionAttempts ? block.correctionAttempts.map((attempt) => ({ ...attempt })) : undefined,
     editHistory: block.editHistory ? block.editHistory.map((entry) => ({ ...entry })) : undefined,
   }))
@@ -329,6 +331,12 @@ function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> 
     compressModel: settings.compressModel,
     expandModel: settings.expandModel,
     contextMergeModel: settings.contextMergeModel,
+    coverageRepairEnabled: settings.coverageRepairEnabled,
+    coverageRepairModel: settings.coverageRepairModel,
+    coverageRepairEffort: settings.coverageRepairEffort,
+    generalRepairEnabled: settings.generalRepairEnabled,
+    generalRepairModel: settings.generalRepairModel,
+    generalRepairMaxEffort: settings.generalRepairMaxEffort,
     subtitleLanguageLabel: settings.subtitleLanguageLabel,
     transcriptLanguageLabel: settings.transcriptLanguageLabel,
     languageProfileConfigJson: settings.languageProfileConfigJson,
@@ -794,15 +802,9 @@ export default function App() {
     const overLengthCount = generated.filter(b => b.source.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)).length
     const flaggedCount = generated.filter(b => b.status === 'flagged').length
 
-    const sourceChars = generated.reduce((sum, b) => sum + b.source.length, 0)
-    const targetChars = generated.reduce((sum, b) => sum + b.target.length, 0)
-    const inputTokens = Math.max(1, Math.round(sourceChars / 4))
-    const outputTokens = Math.max(1, Math.round(targetChars / 4))
-
-    const estimatedUsd =
-      (inputTokens / 1_000_000) * 0.30 +
-      (outputTokens / 1_000_000) * 2.50
-
+    // NOTE: トークン数・コスト推定は誤った文字数ベース計算を停止中（2026-05-27）。
+    // 実際のトークン捕捉は llmCallWithMeta / llmUsageSink で部分実装済み。
+    // 続き: docs/research/20260527_cost_display_continuation.md 参照
     return {
       quality: {
         totalBlocks,
@@ -811,9 +813,9 @@ export default function App() {
         flaggedCount,
       },
       cost: {
-        inputTokens,
-        outputTokens,
-        estimatedUsd,
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedUsd: 0,
         durationMs: Math.max(0, finishedAt - startedAt),
       },
     }
@@ -954,7 +956,7 @@ export default function App() {
     ]
 
     return rows.map((row, idx) => {
-      const charCount = row.target.length
+      const charCount = countCpsChars(row.target)
       const durationSec = Math.max(0.1, row.end - row.start)
       return {
         id: idx + 1,
@@ -962,7 +964,7 @@ export default function App() {
         endTime: row.end,
         source: row.source,
         target: row.target,
-        cps: Math.round((charCount / durationSec) * 10) / 10,
+        cps: calculateRoundedCps(row.target, durationSec),
         charCount,
         status: 'pending',
         glossaryTerms: [],
@@ -1678,16 +1680,16 @@ export default function App() {
       ...block,
       endTime: splitTime,
       source: textBefore,
-      cps: Math.round(textBefore.length / dur1 * 10) / 10,
-      charCount: textBefore.length,
+      cps: calculateRoundedCps(textBefore, dur1),
+      charCount: countCpsChars(textBefore),
     }
     const b2: SubtitleBlock = {
       ...block,
       id: newId,
       startTime: splitTime,
       source: textAfter,
-      cps: Math.round(textAfter.length / dur2 * 10) / 10,
-      charCount: textAfter.length,
+      cps: calculateRoundedCps(textAfter, dur2),
+      charCount: countCpsChars(textAfter),
       status: 'pending' as const,
       glossaryTerms: [],
     }
@@ -1698,7 +1700,7 @@ export default function App() {
     const idx = blocks.findIndex(b => b.id === id)
     if (idx === -1) return
     const block = blocks[idx]
-    const ratio = textBefore.length / Math.max(1, textBefore.length + textAfter.length)
+    const ratio = countCpsChars(textBefore) / Math.max(1, countCpsChars(textBefore) + countCpsChars(textAfter))
     const splitTime = block.startTime + (block.endTime - block.startTime) * ratio
     const [rawB1, rawB2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
     const before = { id: block.id, source: block.source, startTime: block.startTime, endTime: block.endTime }
@@ -1753,8 +1755,8 @@ export default function App() {
     const secondIdx = Math.max(dragIdx, dropIdx)
     const first = blocks[firstIdx]
     const second = blocks[secondIdx]
-    const mergedText = joinTextParts([first.source, second.source])
-    const mergedTarget = joinTextParts([first.target, second.target])
+    const mergedText = joinTextParts([first.source, second.source], '\n')
+    const mergedTarget = joinTextParts([first.target, second.target], '\n')
     const duration = second.endTime - first.startTime
     const merged: SubtitleBlock = withEditHistory(
       {
@@ -1762,8 +1764,8 @@ export default function App() {
         endTime: second.endTime,
         target: mergedTarget,
         source: mergedText,
-        cps: duration > 0 ? Math.round(mergedText.length / duration * 10) / 10 : 0,
-        charCount: mergedText.length,
+        cps: duration > 0 ? calculateRoundedCps(mergedText, duration) : 0,
+        charCount: countCpsChars(mergedText),
         status: 'pending',
         glossaryTerms: [...first.glossaryTerms, ...second.glossaryTerms],
         correctionAttempts: [
@@ -1900,7 +1902,7 @@ export default function App() {
         endTime: splitTime,
         target: targetBefore,
         // source はそのままコピー（言語が違うため比率分割しない）
-        cps: Math.round(block.source.length / dur1 * 10) / 10,
+        cps: calculateRoundedCps(block.source, dur1),
       },
       'split',
       before,
@@ -1913,7 +1915,7 @@ export default function App() {
         startTime: splitTime,
         target: targetAfter,
         // source はそのままコピー
-        cps: Math.round(block.source.length / dur2 * 10) / 10,
+        cps: calculateRoundedCps(block.source, dur2),
         status: 'pending' as const,
         glossaryTerms: [],
       },
@@ -1931,7 +1933,7 @@ export default function App() {
       if (b.id !== id) return b
       const duration = b.endTime - b.startTime
       return withEditHistory(
-        { ...b, source: text, cps: Math.round(text.length / Math.max(0.1, duration) * 10) / 10, charCount: text.length },
+        { ...b, source: text, cps: calculateRoundedCps(text, Math.max(0.1, duration)), charCount: countCpsChars(text) },
         'source_edit',
         { source: b.source },
         { source: text },
@@ -1949,7 +1951,7 @@ export default function App() {
       if (u.source !== undefined && u.source !== b.source) {
         const duration = b.endTime - b.startTime
         block = withEditHistory(
-          { ...block, source: u.source, cps: Math.round(u.source.length / Math.max(0.1, duration) * 10) / 10, charCount: u.source.length },
+          { ...block, source: u.source, cps: calculateRoundedCps(u.source, Math.max(0.1, duration)), charCount: countCpsChars(u.source) },
           'source_edit',
           { source: b.source },
           { source: u.source },
@@ -2007,8 +2009,8 @@ export default function App() {
       return {
         ...block,
         source: result.text,
-        cps: Math.round(result.text.length / Math.max(0.1, duration) * 10) / 10,
-        charCount: result.text.length,
+        cps: calculateRoundedCps(result.text, Math.max(0.1, duration)),
+        charCount: countCpsChars(result.text),
       }
     })
     if (blocksUpdated > 0) push(updated)
@@ -2419,11 +2421,8 @@ export default function App() {
                   <span>
                     要確認: {pipelineRun.metrics.quality.flaggedCount}件
                   </span>
-                  <span>
-                    Tokens(in/out): {pipelineRun.metrics.cost.inputTokens} / {pipelineRun.metrics.cost.outputTokens}
-                  </span>
-                  <span>
-                    推定コスト: ${pipelineRun.metrics.cost.estimatedUsd.toFixed(6)}
+                  <span style={{ color: theme.textMuted, fontStyle: 'italic' }}>
+                    トークン数・コスト: 改修中（モデル別表示＆ユーザー単価入力に置き換え予定）
                   </span>
                   <span>
                     処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s
@@ -2436,7 +2435,7 @@ export default function App() {
                   {pipelineHistory.slice(0, 3).map((run, idx) => (
                     <div key={`${run.startedAt ?? 0}-${idx}`} style={{ marginTop: 2 }}>
                       - {run.sourceName ?? 'unknown'} / {run.status === 'success' ? '完了' : run.status === 'error' ? '失敗' : run.status}
-                      {run.metrics ? ` / $${run.metrics.cost.estimatedUsd.toFixed(6)} / ${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : ''}
+                      {run.metrics ? ` / ${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : ''}
                     </div>
                   ))}
                 </div>

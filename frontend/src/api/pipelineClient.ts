@@ -6,6 +6,7 @@ import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } fr
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
 import { getLocalPipelineDebugFailure, runLocalPostPipeline, type LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
+import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
 
 interface BackendTranslatedSegment {
   id?: number
@@ -262,14 +263,15 @@ function toSubtitleBlocks(result: LegacyPipelineResult): SubtitleBlock[] {
     const endTime = Number(sub?.end ?? row.end ?? startTime + 2)
     const source = String(row.en ?? row.translated_text ?? '')
     const duration = Math.max(0.1, endTime - startTime)
+    const charCount = countCpsChars(source)
     return {
       id: Number(row.id ?? idx + 1),
       startTime,
       endTime,
       source,
       target: String(row.ja_corrected ?? row.text ?? ''),
-      cps: Math.round((source.length / duration) * 10) / 10,
-      charCount: source.length,
+      cps: calculateRoundedCps(source, duration),
+      charCount,
       status: row.translation_flagged ? 'flagged' : 'pending',
       glossaryTerms: [],
     } as SubtitleBlock

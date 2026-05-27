@@ -9,15 +9,34 @@ import type { JaBlock, PipelineThresholds } from './blockTypes'
 const SHORT_MERGE_MAX_GAP_SEC = 0.8
 
 function mergePair(left: JaBlock, right: JaBlock): JaBlock {
+  const sameContextGroup = left.contextGroupId !== undefined && left.contextGroupId === right.contextGroupId
+  const contextGroupSourceIds = [
+    ...new Set([
+      ...(left.contextGroupSourceIds ?? [left.id]),
+      ...(right.contextGroupSourceIds ?? [right.id]),
+    ]),
+  ]
+  const jaText = `${left.jaText} ${right.jaText}`.trim()
   return {
     id: left.id,
     start: left.start,
     end: right.end,
-    jaText: `${left.jaText} ${right.jaText}`.trim(),
+    jaText,
     jaChars: left.jaChars + right.jaChars,
     alignConf: 'merged',
     words: [...(left.words ?? []), ...(right.words ?? [])],
     merged: true,
+    contextGroupId: sameContextGroup
+      ? left.contextGroupId
+      : `cg-short-${contextGroupSourceIds.join('-')}`,
+    contextGroupReason: sameContextGroup
+      ? left.contextGroupReason
+      : 'short_duration_merge_cross_context_group',
+    contextGroupText: sameContextGroup
+      ? left.contextGroupText
+      : jaText,
+    contextGroupSourceIds,
+    endsIncomplete: left.endsIncomplete || right.endsIncomplete,
   }
 }
 

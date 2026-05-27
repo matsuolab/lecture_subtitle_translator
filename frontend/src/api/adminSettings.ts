@@ -96,7 +96,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     coverageRepairEffort: 'low',
     generalRepairEnabled: true,
     generalRepairModel: 'gpt-5.4-mini',
-    generalRepairMaxEffort: 'high',
+    generalRepairMaxEffort: 'medium',
     debugModeEnabled: false,
     correctionDebugEmbedding: false,
     workLogDir: '',

@@ -7,9 +7,35 @@ import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } f
 import { tauriFetch } from '@/lib/tauriFetch'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
+import { safePush, getCurrentLlmUsageSink } from './llmUsageSink'
+
+/**
+ * OpenAI Chat Completions レスポンスから usage を抽出し、現在の usage sink に push する共通ヘルパ。
+ * 失敗時（usage 未取得）は safePush 側でスキップされる。
+ */
+function pushUsageFromResponse(nodeId: string, model: string, payload: unknown, durationMs: number): void {
+  const usage = (payload as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined
+  if (!usage) return
+  const promptTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0
+  const completionTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0
+  const completionDetails = usage.completion_tokens_details as Record<string, unknown> | undefined
+  const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
+  const promptDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined
+  const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
+  safePush(getCurrentLlmUsageSink(), {
+    nodeId,
+    model,
+    promptTokens,
+    completionTokens,
+    reasoningTokens,
+    cachedInputTokens,
+    durationMs,
+  })
+}
 
 const MAX_SEGMENTS_PER_REQUEST = 40
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
+const MAX_CONTEXT_GROUPS_PER_REQUEST = 8
 const JA_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/g
 const COUNT_MISMATCH_RE = /translation API returned (\d+) segments for (\d+) inputs/
 
@@ -20,6 +46,30 @@ const COUNT_MISMATCH_RE = /translation API returned (\d+) segments for (\d+) inp
  * 改善見込みが薄く、コストだけ増えるため。
  */
 const PER_BLOCK_RETRY_MAX_ATTEMPTS = 2
+
+interface TranslationInput {
+  text: string
+  start: number
+  end: number
+  contextGroupId?: string
+  contextGroupText?: string
+  contextGroupRole?: string
+  contextGroupIndex?: number
+  contextGroupSize?: number
+  contextGroupReason?: string
+}
+
+interface ContextGroupTranslationDraft {
+  id: string
+  text: string
+  itemIndices: number[]
+  items: Array<{
+    index: number
+    text: string
+    role?: string
+    durationSec: number
+  }>
+}
 
 class TranslationRetryableError extends Error {
   constructor(message: string) {
@@ -101,14 +151,110 @@ function resolveTranslationFewShot(rawJson: string): { fewShotSegments: string[]
   return fallback
 }
 
+function buildContextGroupsForPrompt(inputs: TranslationInput[]): Array<Record<string, unknown>> {
+  const byId = new Map<string, { text: string; itemIndices: number[]; roles: string[]; size: number }>()
+  inputs.forEach((input, index) => {
+    if (!input.contextGroupId || !input.contextGroupText) return
+    const current = byId.get(input.contextGroupId) ?? { text: input.contextGroupText, itemIndices: [], roles: [], size: input.contextGroupSize ?? 1 }
+    current.itemIndices.push(index)
+    if (input.contextGroupRole) current.roles.push(input.contextGroupRole)
+    byId.set(input.contextGroupId, current)
+  })
+  return [...byId.entries()]
+    .filter(([, group]) => group.itemIndices.length > 1 || group.size > 1)
+    .map(([id, group]) => ({
+      id,
+      text: group.text,
+      item_indices: group.itemIndices,
+      roles: group.roles,
+    }))
+}
+
+function buildContextGroupTranslationDrafts(inputs: TranslationInput[]): ContextGroupTranslationDraft[] {
+  const byId = new Map<string, ContextGroupTranslationDraft>()
+  inputs.forEach((input, index) => {
+    if (!input.contextGroupId || !input.contextGroupText) return
+    if ((input.contextGroupSize ?? 1) <= 1) return
+    if (input.contextGroupReason !== 'incomplete_end_context_group') return
+
+    const current = byId.get(input.contextGroupId) ?? {
+      id: input.contextGroupId,
+      text: input.contextGroupText,
+      itemIndices: [],
+      items: [],
+    }
+    current.itemIndices.push(index)
+    current.items.push({
+      index,
+      text: input.text,
+      role: input.contextGroupRole,
+      durationSec: Math.round(Math.max(0.001, input.end - input.start) * 1000) / 1000,
+    })
+    byId.set(input.contextGroupId, current)
+  })
+
+  return [...byId.values()]
+    .filter(group => group.itemIndices.length > 1)
+    .map(group => ({
+      ...group,
+      itemIndices: [...group.itemIndices].sort((a, b) => a - b),
+      items: [...group.items].sort((a, b) => a.index - b.index),
+    }))
+    .sort((a, b) => a.itemIndices[0] - b.itemIndices[0])
+}
+
+function buildContextGroupTranslationPayload(groups: ContextGroupTranslationDraft[]): Record<string, unknown> {
+  return {
+    context_groups: groups.map(group => ({
+      id: group.id,
+      text: group.text,
+      items: group.items.map(item => ({
+        index: item.index,
+        text: item.text,
+        role: item.role,
+        duration_sec: item.durationSec,
+      })),
+    })),
+  }
+}
+
+function buildTranslationUserPayload(inputs: TranslationInput[]): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    segments: inputs.map(input => input.text),
+  }
+  const contextGroups = buildContextGroupsForPrompt(inputs)
+  if (contextGroups.length > 0) {
+    payload.context_groups = contextGroups
+  }
+  return payload
+}
+
+function withContextInstruction(systemPrompt: string): string {
+  return systemPrompt +
+    '\n\nIf context_groups are provided, use them only as surrounding meaning for translation consistency. ' +
+    'Return exactly one translation for each item in segments, in the same order. ' +
+    'Do not merge multiple segments into one output, and do not add context that is outside the current segment.'
+}
+
+function withContextGroupAllocationInstruction(systemPrompt: string): string {
+  return systemPrompt +
+    '\n\nYou will receive incomplete Japanese context_groups. Translate each whole group first, then allocate that meaning across its items. ' +
+    'Return exactly one English subtitle per item, preserving item order and item count for every group. ' +
+    'Do not repeat the full group meaning in multiple items. Each item must carry only its share of the group meaning. ' +
+    'Continuation items may be grammatical continuations, but they must be readable subtitle lines. ' +
+    'Prefer concise wording that fits each item duration; avoid copying the same subject, definition, or referent into every item. ' +
+    'Respond only with JSON: {"groups":[{"id":"<group id>","translations":["item0 translation","item1 translation"]}]}'
+}
+
 async function callOpenAICompatible(
-  texts: string[],
+  inputs: TranslationInput[],
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
 ): Promise<string[]> {
   const glossaryInstruction = glossaryTerms.length > 0
     ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
     : ''
+  const callStartedAt = Date.now()
   const response = await tauriFetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -119,7 +265,7 @@ async function callOpenAICompatible(
       model: config.model,
       temperature: 0.0,
       messages: [
-        { role: 'system', content: config.systemPrompt + glossaryInstruction },
+        { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
         {
           role: 'user',
           content: JSON.stringify({
@@ -134,7 +280,7 @@ async function callOpenAICompatible(
         },
         {
           role: 'user',
-          content: JSON.stringify({ segments: texts }),
+          content: JSON.stringify(buildTranslationUserPayload(inputs)),
         },
       ],
     }),
@@ -146,6 +292,7 @@ async function callOpenAICompatible(
   }
 
   const payload = await response.json()
+  pushUsageFromResponse('translateEn[batch]', config.model, payload, Date.now() - callStartedAt)
   const content: string = payload?.choices?.[0]?.message?.content ?? ''
   const finishReason = payload?.choices?.[0]?.finish_reason
   if (finishReason === 'length') {
@@ -170,11 +317,161 @@ async function callOpenAICompatible(
       `translation response was not valid JSON with a translations array. content=${content.slice(0, 500)}`,
     )
   }
-  if (translations.length !== texts.length) {
-    throw new TranslationRetryableError(`translation API returned ${translations.length} segments for ${texts.length} inputs`)
+  if (translations.length !== inputs.length) {
+    throw new TranslationRetryableError(`translation API returned ${translations.length} segments for ${inputs.length} inputs`)
   }
 
   return translations.map((item) => normalizeSpaces(String(item)))
+}
+
+async function callContextGroupAllocation(
+  groups: ContextGroupTranslationDraft[],
+  config: ReturnType<typeof resolveApiConfig>,
+  glossaryTerms: string[],
+): Promise<Map<number, string>> {
+  if (groups.length === 0) return new Map()
+  const glossaryInstruction = glossaryTerms.length > 0
+    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
+    : ''
+  const callStartedAt = Date.now()
+  const response = await tauriFetch(`${config.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+    },
+    body: JSON.stringify({
+      model: config.model,
+      temperature: 0.0,
+      messages: [
+        { role: 'system', content: withContextGroupAllocationInstruction(config.systemPrompt) + glossaryInstruction },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            context_groups: [
+              {
+                id: 'example-1',
+                text: 'それを防ぐために、 ペナルティがかかるような目的関数を設計してやるというのがL2正則化になります。',
+                items: [
+                  { index: 0, role: 'lead', duration_sec: 3.6, text: 'それを防ぐために、' },
+                  { index: 1, role: 'middle', duration_sec: 3.9, text: 'ペナルティがかかるような目的関数を設' },
+                  { index: 2, role: 'tail', duration_sec: 3.2, text: '計してやるというのがL2正則化になります。' },
+                ],
+              },
+            ],
+          }),
+        },
+        {
+          role: 'assistant',
+          content: JSON.stringify({
+            groups: [
+              {
+                id: 'example-1',
+                translations: [
+                  'To prevent that,',
+                  'we design an objective function with a penalty.',
+                  'That is L2 regularization.',
+                ],
+              },
+            ],
+          }),
+        },
+        {
+          role: 'user',
+          content: JSON.stringify(buildContextGroupTranslationPayload(groups)),
+        },
+      ],
+    }),
+  })
+
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new TranslationRetryableError(`context group translation API returned HTTP ${response.status}: ${detail.slice(0, 500)}`)
+  }
+
+  const payload = await response.json()
+  pushUsageFromResponse('translateEn[contextGroupAllocation]', config.model, payload, Date.now() - callStartedAt)
+  const content: string = payload?.choices?.[0]?.message?.content ?? ''
+  const finishReason = payload?.choices?.[0]?.finish_reason
+  if (finishReason === 'length') {
+    throw new TranslationRetryableError(`context group translation stopped because output length was reached. content=${content.slice(0, 500)}`)
+  }
+  if (!content.trim()) {
+    throw new TranslationRetryableError(`context group translation response did not include message content. payload=${summarizeTranslationPayload(payload)}`)
+  }
+
+  let parsed: Record<string, unknown>
+  try {
+    parsed = parseJsonObjectFromLlmContent(content, 'context group translation')
+  } catch (error) {
+    throw new TranslationRetryableError(
+      `${error instanceof Error ? error.message : String(error)}. content=${content.slice(0, 500)}`,
+    )
+  }
+
+  if (!Array.isArray(parsed.groups)) {
+    throw new TranslationRetryableError(`context group translation response did not include groups array. content=${content.slice(0, 500)}`)
+  }
+
+  const expected = new Map(groups.map(group => [group.id, group]))
+  const translated = new Map<number, string>()
+  for (const item of parsed.groups) {
+    if (!item || typeof item !== 'object') continue
+    const row = item as Record<string, unknown>
+    const id = typeof row.id === 'string' ? row.id : ''
+    const group = expected.get(id)
+    if (!group || !Array.isArray(row.translations) || row.translations.length !== group.itemIndices.length) {
+      throw new TranslationRetryableError(`context group translation count mismatch for ${id || '<missing id>'}`)
+    }
+    row.translations.forEach((translation, offset) => {
+      if (typeof translation !== 'string') {
+        throw new TranslationRetryableError(`context group translation item was not a string for ${id}`)
+      }
+      translated.set(group.itemIndices[offset], normalizeSpaces(translation))
+    })
+  }
+
+  for (const group of groups) {
+    if (!group.itemIndices.every(index => translated.has(index))) {
+      throw new TranslationRetryableError(`context group translation missing group ${group.id}`)
+    }
+  }
+
+  return translated
+}
+
+async function translateContextGroups(
+  inputs: TranslationInput[],
+  config: ReturnType<typeof resolveApiConfig>,
+  glossaryTerms: string[],
+): Promise<Map<number, string>> {
+  const groups = buildContextGroupTranslationDrafts(inputs)
+  if (groups.length === 0) return new Map()
+
+  const batches: ContextGroupTranslationDraft[][] = []
+  for (let start = 0; start < groups.length; start += MAX_CONTEXT_GROUPS_PER_REQUEST) {
+    batches.push(groups.slice(start, start + MAX_CONTEXT_GROUPS_PER_REQUEST))
+  }
+
+  const results = await mapWithConcurrency(
+    batches.length,
+    config.requestConcurrency,
+    async (index) => {
+      try {
+        return await callContextGroupAllocation(batches[index], config, glossaryTerms)
+      } catch {
+        return new Map<number, string>()
+      }
+    },
+  )
+
+  const merged = new Map<number, string>()
+  for (const result of results) {
+    for (const [index, text] of result.entries()) {
+      merged.set(index, text)
+    }
+  }
+  return merged
 }
 
 /**
@@ -194,13 +491,14 @@ interface SingleCallResult {
 }
 
 async function callTranslationOnce(
-  text: string,
+  input: TranslationInput,
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
 ): Promise<SingleCallResult> {
   const glossaryInstruction = glossaryTerms.length > 0
     ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
     : ''
+  const callStartedAt = Date.now()
   let response: Awaited<ReturnType<typeof tauriFetch>>
   try {
     response = await tauriFetch(`${config.baseUrl}/chat/completions`, {
@@ -213,7 +511,7 @@ async function callTranslationOnce(
         model: config.model,
         temperature: 0.0,
         messages: [
-          { role: 'system', content: config.systemPrompt + glossaryInstruction },
+          { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
           {
             role: 'user',
             content: JSON.stringify({
@@ -228,7 +526,7 @@ async function callTranslationOnce(
           },
           {
             role: 'user',
-            content: JSON.stringify({ segments: [text] }),
+            content: JSON.stringify(buildTranslationUserPayload([input])),
           },
         ],
       }),
@@ -248,6 +546,7 @@ async function callTranslationOnce(
   } catch (err) {
     return { translation: '', errorMessage: `json_response_parse_failed: ${err instanceof Error ? err.message : String(err)}` }
   }
+  pushUsageFromResponse('translateEn[single]', config.model, payload, Date.now() - callStartedAt)
 
   const choices = Array.isArray(payload.choices) ? payload.choices : []
   const firstChoice = choices[0] as Record<string, unknown> | undefined
@@ -309,14 +608,14 @@ interface RetranslationResult {
 }
 
 async function retranslateBlockIndividually(
-  sourceText: string,
+  input: TranslationInput,
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
   maxAttempts = PER_BLOCK_RETRY_MAX_ATTEMPTS,
 ): Promise<RetranslationResult> {
   let lastReason = 'unknown_failure'
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const result = await callTranslationOnce(sourceText, config, glossaryTerms)
+    const result = await callTranslationOnce(input, config, glossaryTerms)
 
     // 即諦めパターン: 同じ入力をもう一度送っても結果が変わらない
     if (result.finishReason === 'content_filter') {
@@ -343,7 +642,7 @@ async function retranslateBlockIndividually(
     }
 
     // 翻訳成功
-    if (!looksUntranslated(sourceText, result.translation)) {
+    if (!looksUntranslated(input.text, result.translation)) {
       return {
         translation: result.translation,
         attempts: attempt,
@@ -393,32 +692,32 @@ function formatTranslationFailure(text: string, error: unknown): Error {
 }
 
 async function translateBatchWithFallback(
-  texts: string[],
+  inputs: TranslationInput[],
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
 ): Promise<string[]> {
-  if (texts.length === 0) return []
+  if (inputs.length === 0) return []
   try {
-    return await callOpenAICompatible(texts, config, glossaryTerms)
+    return await callOpenAICompatible(inputs, config, glossaryTerms)
   } catch (error) {
     if (!isRetryableTranslationError(error)) throw error
-    if (texts.length === 1) throw formatTranslationFailure(texts[0], error)
+    if (inputs.length === 1) throw formatTranslationFailure(inputs[0].text, error)
   }
 
-  const splitAt = Math.ceil(texts.length / 2)
-  const left = await translateBatchWithFallback(texts.slice(0, splitAt), config, glossaryTerms)
-  const right = await translateBatchWithFallback(texts.slice(splitAt), config, glossaryTerms)
+  const splitAt = Math.ceil(inputs.length / 2)
+  const left = await translateBatchWithFallback(inputs.slice(0, splitAt), config, glossaryTerms)
+  const right = await translateBatchWithFallback(inputs.slice(splitAt), config, glossaryTerms)
   return [...left, ...right]
 }
 
 async function translateInBatches(
-  texts: string[],
+  inputs: TranslationInput[],
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
 ): Promise<string[]> {
-  const batches: string[][] = []
-  for (let start = 0; start < texts.length; start += config.maxSegmentsPerRequest) {
-    batches.push(texts.slice(start, start + config.maxSegmentsPerRequest))
+  const batches: TranslationInput[][] = []
+  for (let start = 0; start < inputs.length; start += config.maxSegmentsPerRequest) {
+    batches.push(inputs.slice(start, start + config.maxSegmentsPerRequest))
   }
   const results = await mapWithConcurrency(
     batches.length,
@@ -432,8 +731,32 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
   if (blocks.length === 0) return []
 
   const config = resolveApiConfig(settings)
-  const sourceTexts = blocks.map((block) => block.jaText)
-  const translatedTexts = await translateInBatches(sourceTexts, config, glossaryTerms)
+  const inputs: TranslationInput[] = blocks.map((block) => ({
+    text: block.jaText,
+    start: block.start,
+    end: block.end,
+    contextGroupId: block.contextGroupId,
+    contextGroupText: block.contextGroupText,
+    contextGroupRole: block.contextGroupRole,
+    contextGroupIndex: block.contextGroupIndex,
+    contextGroupSize: block.contextGroupSize,
+    contextGroupReason: block.contextGroupReason,
+  }))
+  const translatedTexts = new Array<string>(inputs.length)
+  const groupTranslations = await translateContextGroups(inputs, config, glossaryTerms)
+  for (const [index, text] of groupTranslations.entries()) {
+    translatedTexts[index] = text
+  }
+
+  const fallbackIndices = inputs
+    .map((_, index) => index)
+    .filter(index => translatedTexts[index] === undefined)
+  if (fallbackIndices.length > 0) {
+    const fallbackTexts = await translateInBatches(fallbackIndices.map(index => inputs[index]), config, glossaryTerms)
+    fallbackIndices.forEach((blockIndex, fallbackIndex) => {
+      translatedTexts[blockIndex] = fallbackTexts[fallbackIndex] ?? ''
+    })
+  }
 
   // 未翻訳判定された block を集めて個別リトライ
   const untranslatedIndices: number[] = []
@@ -452,8 +775,7 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
       config.requestConcurrency,
       async (idx: number) => {
         const blockIdx = untranslatedIndices[idx]
-        const sourceText = blocks[blockIdx].jaText
-        const result = await retranslateBlockIndividually(sourceText, config, glossaryTerms)
+        const result = await retranslateBlockIndividually(inputs[blockIdx], config, glossaryTerms)
         return { blockIdx, result }
       },
     )
@@ -508,4 +830,11 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
 }
 
 // summarizeTranslationPayload は将来のデバッグ用途で残す（現状は callOpenAICompatible 内で使用）
-export const __testing = { summarizeTranslationPayload, looksUntranslated, computeJaRatio }
+export const __testing = {
+  summarizeTranslationPayload,
+  looksUntranslated,
+  computeJaRatio,
+  buildTranslationUserPayload,
+  buildContextGroupTranslationDrafts,
+  buildContextGroupTranslationPayload,
+}

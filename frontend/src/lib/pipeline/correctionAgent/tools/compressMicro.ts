@@ -6,6 +6,7 @@ import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
 import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
+import { countCpsChars } from '@/lib/subtitleMetrics'
 
 const MICRO_MAX_RETRIES = 5
 
@@ -94,9 +95,9 @@ async function runMicroLoop(
       ...block,
       enText: current,
       enRaw: current,
-      enChars: current.length,
+      enChars: countCpsChars(current),
       maxLineLen: current.length,
-      cps: current.length / Math.max(0.001, block.end - block.start),
+      cps: countCpsChars(current) / Math.max(0.001, block.end - block.start),
     }
     const candidateViolation = classifyViolation(candidateBlock, thresholds)
     if (candidateViolation === 'ok') {
@@ -160,9 +161,9 @@ async function runMicroLoop(
     ...block,
     enText: current,
     enRaw: current,
-    enChars: current.length,
+    enChars: countCpsChars(current),
     maxLineLen: current.length,
-    cps: current.length / Math.max(0.001, block.end - block.start),
+    cps: countCpsChars(current) / Math.max(0.001, block.end - block.start),
   }
   const finalViolation = classifyViolation(finalCandidate, thresholds)
   return {

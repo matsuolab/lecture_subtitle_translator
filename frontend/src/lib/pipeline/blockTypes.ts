@@ -3,6 +3,8 @@ import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
 
 export type AlignConf = 'exact' | 'proportional' | 'no_words' | 'merged'
 
+export type ContextGroupRole = 'single' | 'lead' | 'middle' | 'tail'
+
 export type ViolationCode =
   | 'ok'
   | 'short_duration'
@@ -24,6 +26,18 @@ export interface JaBlock {
   alignConf: AlignConf
   words?: WordTimestamp[]
   merged?: boolean
+  /**
+   * 意味・翻訳の文脈単位。表示 cue と同一視しない。
+   * 同じ contextGroupId を持つ cue は翻訳時にまとめて文脈参照し、
+   * 表示上は duration / CPS / 行長制約に従って 1〜N cue として扱う。
+   */
+  contextGroupId?: string
+  contextGroupIndex?: number
+  contextGroupSize?: number
+  contextGroupRole?: ContextGroupRole
+  contextGroupReason?: string
+  contextGroupText?: string
+  contextGroupSourceIds?: number[]
   /**
    * Phase1 detectIncompleteEnds で判定された「末尾が mid-sentence で次に続く」フラグ。
    * - mergeContinuation: true なら次ブロックと結合候補

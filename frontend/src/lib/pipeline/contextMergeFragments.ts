@@ -292,6 +292,27 @@ function buildMergeWindow(
   return { ok: true, start, end, gap }
 }
 
+function contextGroupConflict(left: EnBlock | undefined, right: EnBlock | undefined): boolean {
+  if (!left || !right) return false
+  return Boolean(left.contextGroupId && right.contextGroupId && left.contextGroupId !== right.contextGroupId)
+}
+
+function mergePrecheck(
+  host: EnBlock | undefined,
+  fragment: EnBlock,
+  direction: 'prev' | 'next',
+): { ok: true } | { ok: false; warning: string } {
+  if (!host) return { ok: false, warning: `context merge skipped missing ${direction} neighbor` }
+  if (contextGroupConflict(direction === 'prev' ? host : fragment, direction === 'prev' ? fragment : host)) {
+    return {
+      ok: false,
+      warning: `context merge skipped cross-context-group merge: ${host.contextGroupId} -> ${fragment.contextGroupId}`,
+    }
+  }
+  const window = buildMergeWindow(host, fragment, direction)
+  return window.ok ? { ok: true } : { ok: false, warning: window.warning }
+}
+
 function buildMergedBlock(
   host: EnBlock,
   fragment: EnBlock,
@@ -355,6 +376,12 @@ function buildMergedBlock(
       warning: `context merge rejected long line: ${metrics.maxLineLen} > ${thresholds.maxLineLen}`,
     }
   }
+  if (metrics.duration > thresholds.mergedLongDurationSec) {
+    return {
+      ok: false,
+      warning: `context merge rejected merged_long regression: ${metrics.duration.toFixed(2)}s > ${thresholds.mergedLongDurationSec.toFixed(2)}s`,
+    }
+  }
 
   const attempt: PipelineCorrectionAttemptSummary = {
     strategy: 'merge_window',
@@ -410,8 +437,30 @@ export async function mergeContextFragments(
     const next = result[i + 1]
     if (!prev && !next) continue
 
+    const prevPrecheck = mergePrecheck(prev, current, 'prev')
+    const nextPrecheck = mergePrecheck(next, current, 'next')
+    if (!prevPrecheck.ok && !nextPrecheck.ok) {
+      const warning = `context merge skipped before LLM: prev=${prevPrecheck.warning}; next=${nextPrecheck.warning}`
+      onWarning?.(String(current.id), warning)
+      result[i] = appendAttempt(current, {
+        strategy: 'merge_window',
+        changed: false,
+        beforeChars: current.enChars,
+        afterChars: current.enChars,
+        beforeViolation: current.violation,
+        afterViolation: current.violation,
+        rationale: warning,
+      })
+      continue
+    }
+
     attempts += 1
-    const outcome = await decideContextMerge(prev, current, next, settings)
+    const outcome = await decideContextMerge(
+      prevPrecheck.ok ? prev : undefined,
+      current,
+      nextPrecheck.ok ? next : undefined,
+      settings,
+    )
     if (outcome.errorMessage || !outcome.decision) {
       const message = outcome.errorMessage ?? 'context merge: no decision'
       onWarning?.(String(current.id), message)
@@ -442,6 +491,20 @@ export async function mergeContextFragments(
     }
 
     if (decision.decision === 'merge_prev' && prev) {
+      if (contextGroupConflict(prev, current)) {
+        const warning = `context merge rejected cross-context-group merge: ${prev.contextGroupId} -> ${current.contextGroupId}`
+        onWarning?.(String(current.id), warning)
+        result[i] = appendAttempt(current, {
+          strategy: 'merge_window',
+          changed: false,
+          beforeChars: current.enChars,
+          afterChars: current.enChars,
+          beforeViolation: current.violation,
+          afterViolation: current.violation,
+          rationale: warning,
+        })
+        continue
+      }
       const window = buildMergeWindow(prev, current, 'prev')
       if (!window.ok) {
         onWarning?.(String(current.id), window.warning)
@@ -488,6 +551,20 @@ export async function mergeContextFragments(
     }
 
     if (decision.decision === 'merge_next' && next) {
+      if (contextGroupConflict(current, next)) {
+        const warning = `context merge rejected cross-context-group merge: ${current.contextGroupId} -> ${next.contextGroupId}`
+        onWarning?.(String(current.id), warning)
+        result[i] = appendAttempt(current, {
+          strategy: 'merge_window',
+          changed: false,
+          beforeChars: current.enChars,
+          afterChars: current.enChars,
+          beforeViolation: current.violation,
+          afterViolation: current.violation,
+          rationale: warning,
+        })
+        continue
+      }
       const window = buildMergeWindow(next, current, 'next')
       if (!window.ok) {
         onWarning?.(String(current.id), window.warning)

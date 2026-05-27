@@ -86,7 +86,7 @@ export interface AdminSettings {
   generalRepairEnabled: boolean
   // general_repair_agent 用モデル（空欄なら compressModel にフォールバック）
   generalRepairModel: string
-  // general_repair_agent エスカレーション上限。'low' なら 1段で打切、'medium' で 2段、'high' で 3段
+  // general_repair_agent エスカレーション上限。リリース前のコスト抑制中は high も medium 相当に丸める。
   generalRepairMaxEffort: 'low' | 'medium' | 'high'
 
   // デバッグ機能

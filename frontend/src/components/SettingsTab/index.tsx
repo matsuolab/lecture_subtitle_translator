@@ -966,7 +966,7 @@ export function SettingsTab({
             >
               <option value="low">low（1 段だけ）</option>
               <option value="medium">medium（low → medium）</option>
-              <option value="high">high（low → medium → high・default）</option>
+              <option value="high">high（現在は medium 相当に制限）</option>
             </select>
           </label>
         </FieldCard>
