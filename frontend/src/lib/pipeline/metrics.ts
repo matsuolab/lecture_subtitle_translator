@@ -1,4 +1,5 @@
 import type { BlockMetrics, EnBlock, JaBlock, PipelineThresholds, ViolationCode } from './blockTypes'
+import { countCpsChars } from '../subtitleMetrics'
 
 export function computeMetrics(
   block: Pick<JaBlock, 'start' | 'end' | 'jaChars' | 'alignConf' | 'merged'> &
@@ -9,7 +10,7 @@ export function computeMetrics(
   const lines = renderedText.split('\n').filter((line) => line.length > 0)
   const hasRenderedText = renderedText.length > 0
   const enChars = hasRenderedText
-    ? renderedText.replace(/\n/g, '').length
+    ? countCpsChars(renderedText)
     : block.enChars ?? 0
   const maxLineLen = hasRenderedText
     ? Math.max(0, ...lines.map((line) => line.length))

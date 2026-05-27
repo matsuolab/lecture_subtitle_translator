@@ -79,9 +79,8 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
 
   const totalRuns = runs.length
   const successRate = totalRuns > 0 ? successRuns.length / totalRuns : 0
-  const avgCost = measuredRuns.length > 0
-    ? measuredRuns.reduce((sum, r) => sum + (r.metrics?.cost.estimatedUsd ?? 0), 0) / measuredRuns.length
-    : 0
+  // NOTE: avgCost はコスト改修中のため未使用。
+  // 続き: docs/research/20260527_cost_display_continuation.md 参照
   const avgDurationSec = measuredRuns.length > 0
     ? measuredRuns.reduce((sum, r) => sum + (r.metrics?.cost.durationMs ?? 0), 0) / measuredRuns.length / 1000
     : 0
@@ -178,7 +177,7 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
               <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 10, color: theme.textSecondary }}>
                 <span>CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%</span>
                 <span>{maxCharsPerLine}文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%</span>
-                <span>推定コスト: ${pipelineRun.metrics.cost.estimatedUsd.toFixed(6)}</span>
+                <span style={{ fontStyle: 'italic', color: theme.textMuted }}>推定コスト: 改修中</span>
                 <span>処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s</span>
               </div>
             )}
@@ -309,7 +308,7 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: theme.textSecondary }}>
           <span>{t.reportTotalRuns}: {totalRuns}</span>
           <span>{t.reportSuccessRate}: {(successRate * 100).toFixed(1)}%</span>
-          <span>{t.reportAvgCost}: ${avgCost.toFixed(6)}</span>
+          <span style={{ fontStyle: 'italic', color: theme.textMuted }}>{t.reportAvgCost}: 改修中</span>
           <span>{t.reportAvgDuration}: {avgDurationSec.toFixed(2)}s</span>
         </div>
       </div>
@@ -471,8 +470,8 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                     <td style={{ padding: '6px 4px', color: theme.textPrimary }}>{run.sourceName ?? '-'}</td>
                     <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{statusLabel(run.status)}</td>
                     <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{formatFinishedAt(run.finishedAt)}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
-                      {run.metrics ? `$${run.metrics.cost.estimatedUsd.toFixed(6)}` : '-'}
+                    <td style={{ padding: '6px 4px', color: theme.textMuted, fontStyle: 'italic' }}>
+                      改修中
                     </td>
                     <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
                       {run.metrics ? `${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : '-'}

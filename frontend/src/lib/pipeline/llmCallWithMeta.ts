@@ -1,6 +1,7 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection, resolveJsonResponseFormatForProvider } from './aiProvider'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { type LlmUsageSink, safePush, getCurrentLlmUsageSink } from './llmUsageSink'
 
 /**
  * Chat Completions API へ 1 リクエスト送り、構造化された結果を返す共通ヘルパー。
@@ -39,6 +40,10 @@ export interface LlmCallResult {
   completionTokens?: number
   /** reasoning tokens (usage.completion_tokens_details.reasoning_tokens) — 推論モデル時のみ */
   reasoningTokens?: number
+  /** cached input tokens (usage.prompt_tokens_details.cached_tokens) — OpenAI prompt caching */
+  cachedInputTokens?: number
+  /** API 呼出にかかった時間 (ms) */
+  durationMs?: number
 }
 
 /**
@@ -66,6 +71,11 @@ export interface LlmCallOptions {
   responseFormat?: 'json_object' | 'text' | 'omit'
   /** ノード名（エラーメッセージ用識別子）*/
   nodeName: string
+  /**
+   * usage 収集 sink。指定すれば本 API 呼出の usage が 1 件 push される。
+   * pipeline 全体のコスト・トークン集計に使う。未指定なら no-op（テストや単体実行から呼べる）。
+   */
+  usageSink?: LlmUsageSink
 }
 
 /**
@@ -119,6 +129,7 @@ export async function llmCallWithMeta(
     }
   }
 
+  const callStartedAt = Date.now()
   let response: Awaited<ReturnType<typeof tauriFetch>>
   try {
     response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
@@ -168,6 +179,21 @@ export async function llmCallWithMeta(
   const completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : undefined
   const completionDetails = usage?.completion_tokens_details as Record<string, unknown> | undefined
   const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
+  const promptDetails = usage?.prompt_tokens_details as Record<string, unknown> | undefined
+  const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
+  const durationMs = Date.now() - callStartedAt
+
+  // sink への push（API 失敗時は 0/0 で safePush 側がスキップする）。
+  // options.usageSink 明示指定が優先、未指定なら module-level の current sink を使う。
+  safePush(options.usageSink ?? getCurrentLlmUsageSink(), {
+    nodeId: options.nodeName,
+    model: options.model,
+    promptTokens: promptTokens ?? 0,
+    completionTokens: completionTokens ?? 0,
+    reasoningTokens,
+    cachedInputTokens,
+    durationMs,
+  })
 
   // 即諦め分岐: content_filter / refusal
   if (finishReason === 'content_filter') {
@@ -179,6 +205,8 @@ export async function llmCallWithMeta(
       promptTokens,
       completionTokens,
       reasoningTokens,
+      cachedInputTokens,
+      durationMs,
     }
   }
   if (refusal) {
@@ -190,6 +218,8 @@ export async function llmCallWithMeta(
       promptTokens,
       completionTokens,
       reasoningTokens,
+      cachedInputTokens,
+      durationMs,
     }
   }
   // リトライ可能エラー: length / empty
@@ -201,6 +231,8 @@ export async function llmCallWithMeta(
       promptTokens,
       completionTokens,
       reasoningTokens,
+      cachedInputTokens,
+      durationMs,
     }
   }
   if (!content.trim()) {
@@ -211,6 +243,8 @@ export async function llmCallWithMeta(
       promptTokens,
       completionTokens,
       reasoningTokens,
+      cachedInputTokens,
+      durationMs,
     }
   }
 
@@ -222,6 +256,8 @@ export async function llmCallWithMeta(
     promptTokens,
     completionTokens,
     reasoningTokens,
+    cachedInputTokens,
+    durationMs,
   }
 }
 

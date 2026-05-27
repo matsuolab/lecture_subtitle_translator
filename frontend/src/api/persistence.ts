@@ -3,6 +3,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineRunResult } from '@/types/pipeline'
 import type { WorkLogExport } from '@/lib/worklog/types'
 import { normalizeSubtitleText, parseTextNormalizationConfig } from '@/lib/pipeline/textNormalization'
+import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
 
 const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
 
@@ -210,14 +211,15 @@ function parseSrt(text: string): SubtitleBlock[] {
     const target = textLines.length >= 2 ? textLines.slice(1).join('\n') : ''
 
     const duration = Math.max(0.01, endTime - startTime)
+    const charCount = countCpsChars(source)
     blocks.push({
       id: idCounter++,
       startTime,
       endTime,
       source,
       target,
-      cps: Math.round(source.length / duration * 10) / 10,
-      charCount: source.length,
+      cps: calculateRoundedCps(source, duration),
+      charCount,
       status: 'pending',
       glossaryTerms: [],
     })

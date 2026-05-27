@@ -127,6 +127,29 @@ export interface PipelineStageSnapshot {
   items: Record<string, unknown>[]
 }
 
+/**
+ * 1 回の LLM API 呼び出しに対応する usage 記録。
+ * pipeline 実行中に各 LLM 呼出点が `pushLlmUsage` で 1 件ずつ push する。
+ * PipelineRunDebug.llmUsage に集約され、後段で model 別に集計してコスト換算する。
+ *
+ * - cachedInputTokens は OpenAI prompt caching の cached portion（input の内数）
+ * - reasoningTokens は推論モデルの reasoning tokens（output の内数として課金される）
+ */
+export interface PipelineLlmUsageRecord {
+  /** 呼出元ノード識別子（例: 'translateEn', 'generalRepairAgent[attempt=1]'）*/
+  nodeId: string
+  /** 実際に API に投げられた model ID */
+  model: string
+  promptTokens: number
+  completionTokens: number
+  reasoningTokens?: number
+  cachedInputTokens?: number
+  /** API 呼出にかかった時間 (ms) */
+  durationMs?: number
+  /** unix epoch ms */
+  at?: number
+}
+
 export interface PipelineRunDebug {
   sourceMedia?: {
     name: string
@@ -140,6 +163,12 @@ export interface PipelineRunDebug {
   progressEvents: PipelineProgressEvent[]
   transcriptSegments?: TranscriptSegment[]
   transcriptMetadata?: Record<string, unknown>
+  /**
+   * 各 LLM API 呼出の usage 記録。コスト・トークン集計の単一情報源。
+   * 既存の per-node trace / agent entry の usage と重複しても問題ない（こちらは集計用、
+   * trace 側は per-attempt 詳細用に保持）。
+   */
+  llmUsage?: PipelineLlmUsageRecord[]
 }
 
 export interface PipelineRunResult {

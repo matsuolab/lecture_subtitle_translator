@@ -8,12 +8,15 @@ import { correctionEngine } from './correctionAgent/loop'
 import { createDecisionNode } from './correctionAgent/decisionNode'
 import { buildAgentThresholds } from './correctionAgent/types'
 import { mergeContextFragments } from './contextMergeFragments'
+import { finalSafeMerge } from './finalSafeMerge'
+import { cpsReliefRebalance } from './cpsReliefRebalance'
 import { semanticValidation } from './semanticValidation'
 import { validateCoverage } from './coverageValidator'
 import { runCoverageRepairAgent } from './coverageRepairAgent'
 import { runGeneralRepairAgent } from './generalRepairAgent'
 import { redistributeJaSpan } from './redistributeJaSpan'
 import { tightenTiming } from './tightenTiming'
+import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -34,6 +37,17 @@ export async function runPhase2(
   options: Phase2Options = {},
 ): Promise<EnBlock[]> {
   let blocks = await runNode('translateEn', () => translateEn(jaBlocks, settings, glossaryTerms))
+  if (settings.textNormalizationEnabled) {
+    try {
+      const config = parseTextNormalizationConfig(settings.textNormalizationRulesJson)
+      blocks = await runNode('normalizeSubtitleTextPrecheck', () => normalizeEnBlocks(blocks, config, thresholds))
+    } catch (error) {
+      onWarning?.(
+        'normalizeSubtitleTextPrecheck',
+        `text normalization skipped before repair: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
   blocks = await runNode('formatLines', () => formatLines(blocks, thresholds))
   blocks = await runNode('checkCpsViolations', () => checkCpsViolations(blocks, thresholds))
 
@@ -57,7 +71,18 @@ export async function runPhase2(
     )
   }
 
-  // 最終 semantic check ノード（log_only / enforce 時のみ動作）
+  blocks = await runNode('mergeContextFragments', () =>
+    mergeContextFragments(blocks, settings, thresholds, (blockId, message) => {
+      onWarning?.(`mergeContextFragments[block=${blockId}]`, message)
+    }),
+  )
+  {
+    const mergeResult = await runNode('finalSafeMerge', () => finalSafeMerge(blocks, thresholds))
+    blocks = mergeResult.blocks
+  }
+
+  // 最終 semantic check ノード（log_only / enforce 時のみ動作）。
+  // context merge / rescue 後の文面を検証するため、mergeContextFragments の後に置く。
   if (settings.semanticCheckMode !== 'off') {
     blocks = await runNode('semanticValidation', () =>
       semanticValidation(blocks, settings, (blockId, message) => {
@@ -65,12 +90,6 @@ export async function runPhase2(
       }),
     )
   }
-
-  blocks = await runNode('mergeContextFragments', () =>
-    mergeContextFragments(blocks, settings, thresholds, (blockId, message) => {
-      onWarning?.(`mergeContextFragments[block=${blockId}]`, message)
-    }),
-  )
 
   // Stage 2: tighten_timing — 隣接 cue 間の gap_too_short を決定的に解消（LLM不要）
   // タイムスタンプドリフトを防ぐため:
@@ -89,6 +108,15 @@ export async function runPhase2(
       ),
     )
     blocks = tightenResult.blocks
+  }
+  blocks = await runNode('checkCpsAfterTighten', () => checkCpsViolations(blocks, thresholds))
+
+  // cps_relief_rebalance: 隣接ペアの時刻不均衡で生じた CPS 違反を決定的に再配分する。
+  // LLM 不要。proportional_ts 由来の CPS 違反など、generalRepairAgent では本質的に直せない
+  // ケースを前段で解消し、後段 LLM repair の負荷と revert ループを減らす。
+  {
+    const reliefResult = await runNode('cpsReliefRebalance', () => cpsReliefRebalance(blocks, thresholds))
+    blocks = reliefResult.blocks
   }
 
   // coverage_validator: 最終 plan が source JA を十分カバーしているか検証（決定的・LCSベース）

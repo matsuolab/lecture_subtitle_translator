@@ -39,6 +39,13 @@ export interface SubtitleBlock {
   reviewAction?: string
   reviewPriority?: 'must_review' | 'should_review' | 'auto_pass'
   reviewDisposition?: 'auto_pass' | 'auto_applied' | 'proposed' | 'manual_review'
+  contextGroupId?: string
+  contextGroupIndex?: number
+  contextGroupSize?: number
+  contextGroupRole?: 'single' | 'lead' | 'middle' | 'tail'
+  contextGroupReason?: string
+  contextGroupText?: string
+  contextGroupSourceIds?: number[]
   correctionAttempts?: Array<{
     strategy: string
     changed: boolean

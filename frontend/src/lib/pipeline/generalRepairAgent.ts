@@ -10,6 +10,7 @@ import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFo
 import { resolveCompressModelId } from './prompts'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
+import { safePush, getCurrentLlmUsageSink } from './llmUsageSink'
 
 /**
  * 段階的 escalation のエフォート値。PoC の検証で low が大半、medium で残り、high で最後の救済の構造を確認済み。
@@ -22,8 +23,9 @@ export type RepairEffort = 'low' | 'medium' | 'high'
  */
 export function buildEffortsFromMax(maxEffort: 'low' | 'medium' | 'high'): RepairEffort[] {
   if (maxEffort === 'low') return ['low']
-  if (maxEffort === 'medium') return ['low', 'medium']
-  return ['low', 'medium', 'high']
+  // Release cost guard: keep the final high-effort pass opt-in for later validation.
+  // Existing saved settings may still contain "high", so cap both medium/high here.
+  return ['low', 'medium']
 }
 
 /**
@@ -48,13 +50,18 @@ export interface GeneralRepairLogEntry {
   violationsAfter: number
   coverageFailedBefore: number
   coverageFailedAfter: number
-  status: 'improved' | 'no_change' | 'reverted' | 'llm_error' | 'parse_error'
+  status: 'improved' | 'improved_partial' | 'no_change' | 'reverted' | 'llm_error' | 'parse_error'
   rationale?: string
   errorMessage?: string
   promptTokens?: number
   completionTokens?: number
   reasoningTokens?: number
   model: string
+  /**
+   * 部分採用で除外された rewrite。LLM の提案数のうち、自分の block で hard regression を
+   * 起こすため採用しなかったものを記録する。0 件なら全採用、>=1 件なら partial。
+   */
+  droppedRewrites?: DroppedRewrite[]
 }
 
 /**
@@ -151,6 +158,11 @@ function buildRepairUserPrompt(input: RepairPromptInput): string {
     max_line_len: b.maxLineLen,
     current_violation: b.violation,
     align_conf: b.alignConf,
+    context_group_id: b.contextGroupId,
+    context_group_role: b.contextGroupRole,
+    context_group_index: b.contextGroupIndex,
+    context_group_size: b.contextGroupSize,
+    context_group_text: b.contextGroupText,
     compress_count: b.compressCount,
     expand_count: b.expandCount,
     is_target: isAffected(b.id),
@@ -220,6 +232,7 @@ async function callRepairLlm(
   const connection = requireAiConnection(settings, 'general repair')
   const resolvedModel = requireChatModelForProvider(settings, model, 'general repair')
 
+  const callStartedAt = Date.now()
   try {
     const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -254,6 +267,17 @@ async function callRepairLlm(
     const completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : undefined
     const completionDetails = usage?.completion_tokens_details as Record<string, unknown> | undefined
     const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
+    const promptDetails = usage?.prompt_tokens_details as Record<string, unknown> | undefined
+    const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
+    safePush(getCurrentLlmUsageSink(), {
+      nodeId: `generalRepairAgent[effort=${effort}]`,
+      model: resolvedModel,
+      promptTokens: promptTokens ?? 0,
+      completionTokens: completionTokens ?? 0,
+      reasoningTokens,
+      cachedInputTokens,
+      durationMs: Date.now() - callStartedAt,
+    })
 
     if (!content.trim()) {
       return { parsed: null, errorMessage: 'general_repair response empty', promptTokens, completionTokens, reasoningTokens }
@@ -310,6 +334,79 @@ function snapshotAffected(blocks: EnBlock[], affectedIds: Set<number>): Array<{ 
 
 function countViolatingBlocks(blocks: EnBlock[]): number {
   return blocks.filter((b) => !meetsConstraints(b)).length
+}
+
+export function hasHardMetricRegression(
+  beforeBlocks: EnBlock[],
+  afterBlocks: EnBlock[],
+  changedIds: number[],
+  thresholds: PipelineThresholds,
+): boolean {
+  for (const id of changedIds) {
+    const before = beforeBlocks.find((b) => b.id === id)
+    const after = afterBlocks.find((b) => b.id === id)
+    if (!before || !after) continue
+
+    const beforeWasWithinCps = before.cps <= thresholds.verboseCps
+    if (beforeWasWithinCps && after.cps > thresholds.verboseCps) return true
+
+    const maxSegmentChars = thresholds.maxLineLen * 2
+    const beforeWasWithinSegmentChars = before.enChars <= maxSegmentChars
+    if (beforeWasWithinSegmentChars && after.enChars > maxSegmentChars) return true
+  }
+
+  return false
+}
+
+export interface DroppedRewrite {
+  blockId: number
+  reason: string
+}
+
+/**
+ * rewrite を block 単位で safety judge する。
+ * 元設計は「attempt 単位の all-or-nothing accept/reject」だったが、
+ * 動画全体一括投入では 1 件の hard regression で数十件の improvement を捨てるため
+ * 部分採用へ移行する。各 rewrite を独立評価し、自分の block で hard regression を
+ * 起こさないものだけ採用する。
+ */
+export function partitionRewritesBySafety(
+  beforeBlocks: EnBlock[],
+  proposedBlocks: EnBlock[],
+  rewrites: Array<{ blockId: number; jaSpan: string; en: string }>,
+  thresholds: PipelineThresholds,
+): { safe: Array<{ blockId: number; jaSpan: string; en: string }>; dropped: DroppedRewrite[] } {
+  const safe: Array<{ blockId: number; jaSpan: string; en: string }> = []
+  const dropped: DroppedRewrite[] = []
+  const maxSegmentChars = thresholds.maxLineLen * 2
+
+  for (const r of rewrites) {
+    const before = beforeBlocks.find((b) => b.id === r.blockId)
+    const after = proposedBlocks.find((b) => b.id === r.blockId)
+    if (!before || !after) {
+      dropped.push({ blockId: r.blockId, reason: 'block not found in before/after snapshot' })
+      continue
+    }
+    const beforeWasWithinCps = before.cps <= thresholds.verboseCps
+    if (beforeWasWithinCps && after.cps > thresholds.verboseCps) {
+      dropped.push({
+        blockId: r.blockId,
+        reason: `cps regression: ${before.cps.toFixed(1)} -> ${after.cps.toFixed(1)} (limit ${thresholds.verboseCps})`,
+      })
+      continue
+    }
+    const beforeWasWithinSegmentChars = before.enChars <= maxSegmentChars
+    if (beforeWasWithinSegmentChars && after.enChars > maxSegmentChars) {
+      dropped.push({
+        blockId: r.blockId,
+        reason: `total chars regression: ${before.enChars} -> ${after.enChars} (limit ${maxSegmentChars})`,
+      })
+      continue
+    }
+    safe.push(r)
+  }
+
+  return { safe, dropped }
 }
 
 /**
@@ -434,15 +531,41 @@ export async function runGeneralRepairAgent(
       continue
     }
 
-    // 仮適用 → violation 再計算 → coverage 再計算
-    const rewrittenBlocks = applyRewrites(currentBlocks, rewrites)
-    const proposedBlocks = checkCpsViolations(rewrittenBlocks, thresholds)
+    // 仮適用 → 部分採用フィルタ → 残ったものだけ再適用して global validate
+    // 部分採用化: 1 件の hard regression で全件 revert していた旧設計を改める。
+    // 自分の block で hard regression を起こす rewrite だけを除外し、残りは採用する。
+    const rewrittenBlocksAll = applyRewrites(currentBlocks, rewrites)
+    const proposedBlocksAll = checkCpsViolations(rewrittenBlocksAll, thresholds)
+    const { safe: safeRewrites, dropped: droppedRewrites } = partitionRewritesBySafety(
+      currentBlocks,
+      proposedBlocksAll,
+      rewrites,
+      thresholds,
+    )
+
+    if (safeRewrites.length === 0) {
+      // すべて hard regression → revert
+      entries.push({
+        ...baseEntry,
+        status: 'reverted',
+        blocksAfter: snapshotAffected(proposedBlocksAll, affectedBlockIds),
+        changedBlockIds: [],
+        violationsAfter: beforeViolations,
+        coverageFailedAfter: beforeCoverageFailed,
+        rationale: `${llmResult.parsed.rationale}; reverted: all ${droppedRewrites.length} rewrites caused hard regression`,
+        droppedRewrites,
+      })
+      continue
+    }
+
+    const safeApplied = applyRewrites(currentBlocks, safeRewrites)
+    const proposedBlocks = checkCpsViolations(safeApplied, thresholds)
     const proposedCoverage = validateCoverage(proposedBlocks, correctedSegments)
     const afterViolations = countViolatingBlocks(proposedBlocks)
     const afterCoverageFailed = proposedCoverage.failedSegments
 
     const afterSnapshot = snapshotAffected(proposedBlocks, affectedBlockIds)
-    const changedIds = rewrites
+    const changedIds = safeRewrites
       .map((r) => r.blockId)
       .filter((id) => {
         const before = currentBlocks.find((b) => b.id === id)
@@ -451,6 +574,8 @@ export async function runGeneralRepairAgent(
         return before.enText !== after.enText || before.jaText !== after.jaText
       })
 
+    // 部分採用後の global check: 違反数が増えていない (= no net regression) なら採用。
+    // coverage 悪化は採用しない (safe rewrite でも ja_span 変更で coverage を下げる可能性あり)
     const improvedAny =
       afterViolations < beforeViolations || afterCoverageFailed < beforeCoverageFailed
     const regressed =
@@ -459,14 +584,18 @@ export async function runGeneralRepairAgent(
     if (improvedAny && !regressed) {
       currentBlocks = proposedBlocks
       currentCoverage = proposedCoverage
+      const isPartial = droppedRewrites.length > 0
       entries.push({
         ...baseEntry,
-        status: 'improved',
+        status: isPartial ? 'improved_partial' : 'improved',
         blocksAfter: afterSnapshot,
         changedBlockIds: changedIds,
         violationsAfter: afterViolations,
         coverageFailedAfter: afterCoverageFailed,
-        rationale: llmResult.parsed.rationale,
+        rationale: isPartial
+          ? `${llmResult.parsed.rationale}; accepted ${safeRewrites.length}/${rewrites.length} rewrites (${droppedRewrites.length} dropped for hard regression)`
+          : llmResult.parsed.rationale,
+        droppedRewrites: isPartial ? droppedRewrites : undefined,
       })
       if (afterViolations === 0 && afterCoverageFailed === 0) break
     } else {
@@ -477,7 +606,10 @@ export async function runGeneralRepairAgent(
         changedBlockIds: changedIds,
         violationsAfter: afterViolations,
         coverageFailedAfter: afterCoverageFailed,
-        rationale: llmResult.parsed.rationale,
+        rationale: regressed
+          ? `${llmResult.parsed.rationale}; reverted: net violation/coverage regression after partial adoption`
+          : `${llmResult.parsed.rationale}; reverted: no net improvement after partial adoption`,
+        droppedRewrites: droppedRewrites.length > 0 ? droppedRewrites : undefined,
       })
     }
   }

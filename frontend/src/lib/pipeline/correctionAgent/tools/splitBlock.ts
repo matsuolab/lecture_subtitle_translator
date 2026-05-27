@@ -6,6 +6,7 @@ import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
 import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
+import { countCpsChars } from '@/lib/subtitleMetrics'
 import { buildMetrics } from '../metrics'
 import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
 import { llmCallWithMeta } from '../../llmCallWithMeta'
@@ -323,6 +324,14 @@ export const splitBlockTool: Tool = {
     // JA が短すぎる場合も同様。2 分割すると各 unit が 12 文字程度になり成立しない。
     if (normalizeForLengthCheck(block.jaText).length < SPLIT_BLOCK_MIN_TRANSCRIPT_CHARS) return false
 
+    const isDurationViolation =
+      ctx.block.violation === 'long_segment' || ctx.block.violation === 'merged_long'
+    const isExtremeReadabilityViolation =
+      (ctx.block.violation === 'verbose_en' || ctx.block.violation === 'line_length_only') &&
+      m.tier === 'extreme' &&
+      normalizeForLengthCheck(block.jaText).length >= 45
+    if (!isDurationViolation && !isExtremeReadabilityViolation) return false
+
     return true
   },
 
@@ -365,7 +374,7 @@ export const splitBlockTool: Tool = {
     const availableMs = totalDurationMs - gapMs * (cleanUnits.length - 1)
     const minDurationMs = Math.round(thresholds.subtitleMinDurationSec * 1000)
 
-    const durationsMs = allocateDurationsMs(translated.map(en => en.length), availableMs, minDurationMs)
+    const durationsMs = allocateDurationsMs(translated.map(en => countCpsChars(en)), availableMs, minDurationMs)
     if (!durationsMs) {
       return buildFailurePatch(block, 'split_block: rejected split because total duration cannot satisfy minimum display time')
     }
@@ -379,6 +388,7 @@ export const splitBlockTool: Tool = {
         : start + clampMs(durationsMs[index], minDurationMs) / 1000
       cursor = end + gapMs / 1000
       const enText = translated[index]
+      const enChars = countCpsChars(enText)
       const nextBlock: EnBlock = {
         ...block,
         id: index === 0 ? block.id : block.id * 1000 + index + 1,
@@ -388,8 +398,8 @@ export const splitBlockTool: Tool = {
         jaChars: unit.text.replace(/\s/g, '').length,
         enText,
         enRaw: enText,
-        enChars: enText.length,
-        cps: enText.length / Math.max(0.001, end - start),
+        enChars,
+        cps: enChars / Math.max(0.001, end - start),
         maxLineLen: enText.length,
         compressCount: 0,
         expandCount: 0,

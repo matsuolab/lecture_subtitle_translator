@@ -7,6 +7,7 @@ import { checkTerminology } from './terminologyCheck'
 import type { PipelineThresholds } from './blockTypes'
 import { buildReviewItemsForBlock } from './reviewDiagnostics'
 import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
+import { formatLines } from './formatLines'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -54,9 +55,11 @@ export async function runPhase3(
     }
   }
 
-  const terminology = await runNode('terminologyCheck', () => checkTerminology(normalizedBlocks, glossaryTerms))
-  reviewItems.push(...normalizedBlocks.flatMap(block => buildReviewItemsForBlock(block, thresholds)))
-  const blocks = await runNode('toSubtitleBlocks', () => toSubtitleBlocks(normalizedBlocks, reviewItems))
+  const finalFormattedBlocks = await runNode('finalFormatLines', () => formatLines(normalizedBlocks, thresholds))
+
+  const terminology = await runNode('terminologyCheck', () => checkTerminology(finalFormattedBlocks, glossaryTerms))
+  reviewItems.push(...finalFormattedBlocks.flatMap(block => buildReviewItemsForBlock(block, thresholds)))
+  const blocks = await runNode('toSubtitleBlocks', () => toSubtitleBlocks(finalFormattedBlocks, reviewItems))
 
   terminology.misses.forEach((miss, index) => {
     reviewItems.push({

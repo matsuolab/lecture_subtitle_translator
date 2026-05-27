@@ -7,6 +7,7 @@ import { validateCoverage } from './coverageValidator'
 import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from './aiProvider'
 import { resolveCompressModelId } from './prompts'
 import { tauriFetch } from '@/lib/tauriFetch'
+import { safePush, getCurrentLlmUsageSink } from './llmUsageSink'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
 /**
@@ -156,6 +157,9 @@ function buildRepairUserPrompt(input: RepairPromptInput): string {
     max_line_len: b.maxLineLen,
     current_violation: b.violation,
     align_conf: b.alignConf,
+    context_group_id: b.contextGroupId,
+    context_group_role: b.contextGroupRole,
+    context_group_text: b.contextGroupText,
     compress_count: b.compressCount,
     expand_count: b.expandCount,
     correction_attempts: summarizeCorrectionAttempts(b.correctionAttempts),
@@ -168,6 +172,8 @@ function buildRepairUserPrompt(input: RepairPromptInput): string {
     ja_span: b.jaText,
     en: b.enText,
     current_violation: b.violation,
+    context_group_id: b.contextGroupId,
+    context_group_role: b.contextGroupRole,
   })
 
   return JSON.stringify({
@@ -219,6 +225,7 @@ async function callCoverageRepairLlm(
   const connection = requireAiConnection(settings, 'coverage repair')
   const resolvedModel = requireChatModelForProvider(settings, model, 'coverage repair')
 
+  const callStartedAt = Date.now()
   try {
     const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -253,6 +260,17 @@ async function callCoverageRepairLlm(
     const completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : undefined
     const completionDetails = usage?.completion_tokens_details as Record<string, unknown> | undefined
     const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
+    const promptDetails = usage?.prompt_tokens_details as Record<string, unknown> | undefined
+    const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
+    safePush(getCurrentLlmUsageSink(), {
+      nodeId: `coverageRepairAgent[effort=${effort}]`,
+      model: resolvedModel,
+      promptTokens: promptTokens ?? 0,
+      completionTokens: completionTokens ?? 0,
+      reasoningTokens,
+      cachedInputTokens,
+      durationMs: Date.now() - callStartedAt,
+    })
 
     if (!content.trim()) {
       return { parsed: null, errorMessage: 'coverage_repair response empty', promptTokens, completionTokens, reasoningTokens }
