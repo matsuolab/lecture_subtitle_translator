@@ -16,6 +16,7 @@ export interface AdminSettings {
   correctionModel: string
   pdfExtractionUseVision: boolean
   pdfExtractionVisionModel: string
+  pdfFormulaMiniModel: string
   pdfExtractionParallel: boolean
   glossaryMaxOutputTokens: number
   apiRequestConcurrency: number

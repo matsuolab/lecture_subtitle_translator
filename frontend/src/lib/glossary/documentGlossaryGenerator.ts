@@ -1,22 +1,24 @@
 /**
- * 自作辞書生成パイプライン (Step 1 実装)
+ * 自作辞書生成パイプライン
  *
  * 詳細設計は docs/glossary_pipeline_design.md を参照。
  *
  * 本ファイルが担う範囲:
  *   - 処理 0: extractDocumentTheme (講義主題の事前把握)
  *   - 処理 A+B: requestCandidateChunk / requestDetailBatch (PDF テキスト + 画像から候補抽出)
- *
- * 未実装 (今後 Step 2〜4 で追加):
- *   - 処理 C (LLM 整理・ペアリング)
- *   - 処理 D (ルールベース検証)
- *   - 処理 E (LLM 翻訳補完)
+ *   - 処理 C: normalizeEntry / compactSelfMadeEntries 側の正規化・統合
+ *   - 処理 B2: requestFormulaMiniReview (必要ページだけ mini で数式・画像文字を追加確認)
+ *   - 処理 D: verifyEntryAgainstPdf / applyPromptPolicy (用途別の deterministic policy)
  */
 
 import type {
   SelfMadeGlossaryCategory,
   SelfMadeGlossaryChildSource,
+  SelfMadeGlossaryDecisionReason,
+  SelfMadeGlossaryDocumentMatch,
   SelfMadeGlossaryEntry,
+  SelfMadeGlossaryLlmClaimedSource,
+  SelfMadeGlossaryPromptPolicy,
   SelfMadeGlossaryValueSource,
 } from '@/context/GlossaryContext'
 import { requireAiConnection, requireChatModelForProvider, resolveChatCompletionTokenLimitForProvider, resolveJsonResponseFormatForProvider } from '@/lib/pipeline/aiProvider'
@@ -50,7 +52,7 @@ type ChatMessageContent = string | Array<
  * 抽出パス。
  * Step 1 では 'all' のみ。複雑なフォールバック分岐は次の Step (C/D 実装時) で見直す。
  */
-type GlossaryExtractionPass = 'all'
+type GlossaryExtractionPass = 'all' | 'formula_mini'
 
 interface RawGlossaryEvidence {
   page?: unknown
@@ -65,6 +67,7 @@ interface RawGlossaryReference {
 
 interface RawGlossaryEntry {
   category?: unknown
+  llmClaimedSource?: unknown
   ja?: unknown
   jaSource?: unknown
   en?: unknown
@@ -85,6 +88,7 @@ interface RawGlossaryEntry {
 interface RawGlossaryCandidate {
   text?: unknown
   category?: unknown
+  llmClaimedSource?: unknown
   page?: unknown
   snippet?: unknown
   ja?: unknown
@@ -96,12 +100,33 @@ interface RawGlossaryCandidate {
 interface NormalizedGlossaryCandidate {
   text: string
   category: SelfMadeGlossaryCategory
+  llmClaimedSource?: SelfMadeGlossaryLlmClaimedSource
   page?: number
   snippet?: string
   ja?: string
   en?: string
   formula?: string
   displayText?: string
+}
+
+interface RawFormulaMiniReview {
+  candidateId?: unknown
+  formula?: unknown
+  latex?: unknown
+  displayText?: unknown
+  confidence?: unknown
+  reviewReason?: unknown
+  evidence?: unknown
+}
+
+interface NormalizedFormulaMiniReview {
+  candidateId?: string
+  formula?: string
+  latex?: string
+  displayText?: string
+  confidence: number
+  reviewReason?: string
+  evidence: SelfMadeGlossaryChildSource[]
 }
 
 interface DocumentTheme {
@@ -353,7 +378,9 @@ const ABSOLUTE_RULES = `絶対に守ること:
 - 推測で値を作らない。PDF に書かれていない情報は空欄にする
 - ja は PDF に実在する日本語表記のみ、en は PDF に実在する英語表記のみ
 - どちらか一方が PDF に書かれていない場合、そのフィールドは空文字、対応 Source は "missing"
-- jaSource / enSource は申告したら検証されます。PDF に実在しない値を "document" 申告すると後段で削除されます
+- jaSource / enSource は "document" | "vision" | "llm_inferred" | "missing" のいずれかにする
+- llmClaimedSource は監査用メタデータです。本文だけで確認したなら "document_text"、ページ画像で補ったなら "page_image"、不明なら "unknown"
+- llmClaimedSource の判定のために候補品質を落とさない。本文と画像の両方を見て、正しい候補を優先する
 - JSON のみを返す`
 
 const FORMULA_NOTATION_RULES = `数式・記号 (category="formula") の表記ルール:
@@ -396,6 +423,7 @@ ${FORMULA_NOTATION_RULES}
 候補抽出段の追加制約:
 - 1 候補は text/category/page/snippet を基本とする
 - ja/en/formula/displayText は PDF 上で明確に分かる場合のみ短く入れる
+- llmClaimedSource は source 判定を厳密にするためではなく、あとで監査するために記録する
 - desc, note, reviewReason, spokenJa, spokenEn, domain, evidence, references はこの段では出さない
 - snippet は候補が出ている短い本文断片 (50 字以内)
 - 同概念の正式用語と略語が同じ箇所に並ぶ場合は、正式用語側を 1 候補だけ出す
@@ -407,6 +435,7 @@ JSON 形式:
     {
       "text": "",
       "category": "term" | "proper_noun" | "formula" | "abbreviation" | "reference",
+      "llmClaimedSource": "document_text" | "page_image" | "unknown",
       "page": 1,
       "snippet": "",
       "ja": "",
@@ -460,6 +489,7 @@ ${FORMULA_NOTATION_RULES}
 - 入力候補にない用語を補完しない
 - desc/note/reviewReason/snippet は短くする (50〜100 字)
 - ja または en が不明な場合は空文字にし、対応 Source は "missing"
+- llmClaimedSource は候補から引き継ぎ、判断できない場合は "unknown"
 - 略語と正式名が同じ概念を指す場合、別 entry にせず正式名 entry の abbr に略語を入れる
 - 既存 candidate の category を勝手に変えない (明らかな誤分類のときだけ訂正可)
 
@@ -468,6 +498,7 @@ JSON 形式:
   "entries": [
     {
       "category": "term" | "proper_noun" | "formula" | "abbreviation" | "reference",
+      "llmClaimedSource": "document_text" | "page_image" | "unknown",
       "ja": "",
       "jaSource": "document" | "vision" | "llm_inferred" | "missing",
       "en": "",
@@ -490,6 +521,77 @@ JSON 形式:
 ${JSON.stringify(candidates, null, 2)}`
 }
 
+function buildFormulaMiniPrompt(
+  document: ExtractedPdfDocument,
+  page: ExtractedPdfPage,
+  entries: SelfMadeGlossaryEntry[],
+  themeContext: string,
+): string {
+  const candidates = entries
+    .filter(entry => entry.category === 'formula' || entry.formula || entry.latex || entry.displayText)
+    .map(entry => ({
+      candidateId: entry.id,
+      category: entry.category,
+      formula: entry.formula ?? '',
+      latex: entry.latex ?? '',
+      displayText: entry.displayText ?? '',
+      snippet: entry.children.find(child => child.page === page.page)?.snippet ?? '',
+    }))
+
+  return `以下のPDFページ画像とPDF本文を照合し、字幕辞書に入れる数式・記号表記を正確に確認してください。
+
+文書名: ${document.source.name}
+ページ: ${page.page}
+
+${themeContext ? `${themeContext}\n` : ''}
+${FORMULA_NOTATION_RULES}
+
+目的:
+- nano候補で壊れやすい添字・上付き・ギリシャ文字・分数・max/exp/log等の式を、画像を見て正しい canonical 表記へ直す
+- PDF text layer の崩れた表記ではなく、ページ画像上の見た目と意味に合う displayText / latex を返す
+- 既存候補が間違っている場合は candidateId を付けたまま修正値を返す
+- 画像上に明確な重要数式があり、既存候補に無い場合だけ candidateId を空にして追加する
+
+禁止:
+- 新しい専門用語の翻訳を作らない
+- 数式でない通常語を formula として返さない
+- \\text{...} だけの LaTeX を formula として返さない
+- 値が読めない場合は無理に補完しない
+
+JSON 形式:
+{
+  "formulas": [
+    {
+      "candidateId": "",
+      "formula": "",
+      "latex": "",
+      "displayText": "",
+      "confidence": 0.0,
+      "reviewReason": "",
+      "evidence": [{ "page": ${page.page}, "snippet": "" }]
+    }
+  ]
+}
+
+既存候補:
+${JSON.stringify(candidates, null, 2)}
+
+PDF本文:
+${formatPagesForPrompt([page], MAX_LOCAL_CHARS_PER_REQUEST)}`
+}
+
+function buildFormulaMiniUserContent(
+  document: ExtractedPdfDocument,
+  page: ExtractedPdfPage,
+  entries: SelfMadeGlossaryEntry[],
+  themeContext: string,
+): ChatMessageContent {
+  const prompt = buildFormulaMiniPrompt(document, page, entries, themeContext)
+  const content: Exclude<ChatMessageContent, string> = [{ type: 'text', text: prompt }]
+  if (page.imageDataUrl) content.push({ type: 'image_url', image_url: { url: page.imageDataUrl, detail: 'high' } })
+  return content
+}
+
 function batchCandidates(candidates: NormalizedGlossaryCandidate[], batchSize: number): NormalizedGlossaryCandidate[][] {
   const batches: NormalizedGlossaryCandidate[][] = []
   for (let i = 0; i < candidates.length; i += batchSize) {
@@ -507,6 +609,12 @@ function rawEntries(parsed: Record<string, unknown>): RawGlossaryEntry[] {
 function rawCandidates(parsed: Record<string, unknown>): RawGlossaryCandidate[] {
   return Array.isArray(parsed.candidates)
     ? parsed.candidates.filter((candidate): candidate is RawGlossaryCandidate => Boolean(candidate) && typeof candidate === 'object')
+    : []
+}
+
+function rawFormulaMiniReviews(parsed: Record<string, unknown>): RawFormulaMiniReview[] {
+  return Array.isArray(parsed.formulas)
+    ? parsed.formulas.filter((candidate): candidate is RawFormulaMiniReview => Boolean(candidate) && typeof candidate === 'object')
     : []
 }
 
@@ -533,6 +641,19 @@ function normalizeCategory(value: unknown): SelfMadeGlossaryCategory {
   return 'term'
 }
 
+function normalizeLlmClaimedSource(value: unknown): SelfMadeGlossaryLlmClaimedSource | undefined {
+  if (value === 'document_text' || value === 'page_image' || value === 'unknown') return value
+  return undefined
+}
+
+function looksLikeTextOnlyLatex(value: string | undefined): boolean {
+  return /^\\text\{[^}]+\}$/.test((value ?? '').trim())
+}
+
+function hasFormulaSignal(value: string | undefined): boolean {
+  return /[=+\-*/^_∂∇Σ∑Π∏√≤≥∞≈≠±×÷𝛼𝛽𝛾𝛿𝜃𝜂𝜀]|\b(exp|log|max|min|softmax|relu)\b/i.test(value ?? '')
+}
+
 function normalizeCandidate(raw: RawGlossaryCandidate): NormalizedGlossaryCandidate | null {
   const text = asString(raw.text)
   const ja = asOptionalString(raw.ja)
@@ -545,12 +666,38 @@ function normalizeCandidate(raw: RawGlossaryCandidate): NormalizedGlossaryCandid
   return {
     text: fallbackText,
     category: normalizeCategory(raw.category),
+    llmClaimedSource: normalizeLlmClaimedSource(raw.llmClaimedSource),
     page: asPage(raw.page),
     snippet: asOptionalString(raw.snippet),
     ja,
     en,
     formula,
     displayText,
+  }
+}
+
+function normalizeFormulaMiniReview(raw: RawFormulaMiniReview): NormalizedFormulaMiniReview | null {
+  const formula = asOptionalString(raw.formula)
+  const latex = asOptionalString(raw.latex)
+  const displayText = asOptionalString(raw.displayText)
+  if (!formula && !latex && !displayText) return null
+  if (looksLikeTextOnlyLatex(latex) && !hasFormulaSignal(formula) && !hasFormulaSignal(displayText)) return null
+  const evidence: SelfMadeGlossaryChildSource[] = []
+  if (Array.isArray(raw.evidence)) {
+    for (const item of raw.evidence as RawGlossaryEvidence[]) {
+      const page = asPage(item.page)
+      const snippet = asOptionalString(item.snippet)
+      if (page || snippet) evidence.push({ type: 'page', page, snippet })
+    }
+  }
+  return {
+    candidateId: asOptionalString(raw.candidateId),
+    formula,
+    latex,
+    displayText,
+    confidence: asConfidence(raw.confidence),
+    reviewReason: asOptionalString(raw.reviewReason),
+    evidence,
   }
 }
 
@@ -591,6 +738,15 @@ function looksLikeUrlOrDomain(value: string): boolean {
   return /^https?:\/\//.test(text) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/?$/.test(text)
 }
 
+function looksLikeNoiseValue(value: string): boolean {
+  const text = value.trim()
+  if (!text) return false
+  if (/^(p\.?\s*)?\d+$|^第?\d+回$|^chapter\s*\d+$/i.test(text)) return true
+  if (/^(copyright|all rights reserved|参考文献|references?|目次|講義|演習)$/i.test(text)) return true
+  if (text.length <= 1 && !/[A-Za-z0-9\u3040-\u30ff\u3400-\u9fff]/.test(text)) return true
+  return false
+}
+
 function applyDeterministicClassification(
   category: SelfMadeGlossaryCategory,
   ja: string,
@@ -614,6 +770,16 @@ function applyDeterministicClassification(
       assistiveEligible: false,
       disabled: true,
       reviewReason: 'URL または引用元ドメインのため正式辞書・補正利用から除外',
+    }
+  }
+
+  if (values.some(looksLikeNoiseValue)) {
+    return {
+      category: 'reference',
+      formalEligible: false,
+      assistiveEligible: false,
+      disabled: true,
+      reviewReason: 'ページ番号・章番号・参照見出し等のノイズ候補のため除外',
     }
   }
 
@@ -643,6 +809,44 @@ function applyDeterministicClassification(
         assistiveEligible: true,
         disabled: false,
       }
+  }
+}
+
+function buildDecisionReason(code: string, severity: SelfMadeGlossaryDecisionReason['severity'], message: string): SelfMadeGlossaryDecisionReason {
+  return { code, severity, message }
+}
+
+function applyPromptPolicy(entry: SelfMadeGlossaryEntry, extraReasons: SelfMadeGlossaryDecisionReason[] = []): SelfMadeGlossaryEntry {
+  const reasons: SelfMadeGlossaryDecisionReason[] = [...(entry.verificationReasons ?? []), ...extraReasons]
+  const reasonCodes = new Set(reasons.map(reason => reason.code))
+  const hasTermValue = Boolean(entry.ja || entry.en || entry.abbr || entry.formula || entry.displayText)
+  const hasPair = Boolean(entry.ja && entry.en)
+  const disabled = entry.disabled || entry.category === 'reference' || reasonCodes.has('dangerous_noise')
+  const correctionEligible = !disabled && hasTermValue
+  const translationEligible = !disabled && hasPair && entry.category !== 'formula'
+  const formalEligible = !disabled && hasPair && entry.category !== 'formula' && entry.documentMatch?.ja !== false && entry.documentMatch?.en !== false
+  const policyReasons = [
+    disabled ? 'disabled_or_reference' : undefined,
+    !hasPair ? 'missing_ja_en_pair' : undefined,
+    entry.category === 'formula' ? 'formula_assistive_only' : undefined,
+    entry.documentMatch?.ja === false || entry.documentMatch?.en === false ? 'document_match_warning' : undefined,
+  ].filter((reason): reason is string => Boolean(reason))
+  const promptPolicy: SelfMadeGlossaryPromptPolicy = {
+    correction: correctionEligible ? 'include_canonical' : 'exclude',
+    translation: translationEligible ? 'include_canonical' : 'exclude',
+    formalExport: formalEligible ? 'include' : 'exclude',
+    reasons: policyReasons.length > 0 ? policyReasons : ['ready'],
+  }
+
+  return {
+    ...entry,
+    disabled,
+    correctionEligible,
+    translationEligible,
+    formalEligible,
+    assistiveEligible: correctionEligible || translationEligible,
+    promptPolicy,
+    verificationReasons: reasons.length > 0 ? reasons : undefined,
   }
 }
 
@@ -678,18 +882,24 @@ function normalizeChildren(raw: RawGlossaryEntry, pagesByNumber: Map<number, Ext
 
 function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, pagesByNumber: Map<number, ExtractedPdfPage>): SelfMadeGlossaryEntry | null {
   const now = new Date().toISOString()
-  const initialCategory = normalizeCategory(raw.category)
+  let initialCategory = normalizeCategory(raw.category)
   const ja = asString(raw.ja)
   const en = asString(raw.en)
   const formula = asString(raw.formula)
+  const latex = asOptionalString(raw.latex)
   const displayText = asString(raw.displayText)
   const abbr = asOptionalString(raw.abbr)
 
   if (!ja && !en && !abbr && !formula && !displayText) return null
+  const textOnlyLatexFormula = initialCategory === 'formula'
+    && looksLikeTextOnlyLatex(latex)
+    && !hasFormulaSignal(formula)
+    && !hasFormulaSignal(displayText)
+  if (textOnlyLatexFormula) initialCategory = ja || en ? 'term' : 'reference'
 
   const classification = applyDeterministicClassification(initialCategory, ja, en, formula, displayText)
 
-  return {
+  const entry: SelfMadeGlossaryEntry = {
     id: crypto.randomUUID(),
     category: classification.category,
     origin: 'document_generated',
@@ -699,8 +909,19 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
     enSource: normalizeValueSource(raw.enSource, en),
     abbr,
     formula: formula || undefined,
-    latex: asOptionalString(raw.latex),
+    latex,
     displayText: displayText || undefined,
+    llmClaimedSource: normalizeLlmClaimedSource(raw.llmClaimedSource),
+    canonicalFormula: formula || latex || displayText
+      ? {
+          formula: formula || undefined,
+          latex,
+          displayText: displayText || undefined,
+          sourcePass: 'candidate_nano',
+          selectedReason: 'initial_candidate',
+        }
+      : undefined,
+    formulaConsistency: classification.category === 'formula' ? 'nano_only' : undefined,
     domain: asOptionalString(raw.domain),
     note: asOptionalString(raw.note),
     desc: asOptionalString(raw.desc),
@@ -709,7 +930,8 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
     assistiveEligible: classification.assistiveEligible,
     provisional: true,
     disabled: classification.disabled,
-    reviewReason: classification.reviewReason ?? asOptionalString(raw.reviewReason),
+    reviewReason: classification.reviewReason
+      ?? (textOnlyLatexFormula ? '\\text{...} のみのLaTeXをformula扱いしないため降格' : asOptionalString(raw.reviewReason)),
     jaConfirmed: false,
     enConfirmed: false,
     promoted: false,
@@ -718,12 +940,15 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
     createdAt: now,
     updatedAt: now,
   }
+
+  return applyPromptPolicy(entry)
 }
 
 function rawEntryFromCandidate(candidate: NormalizedGlossaryCandidate): RawGlossaryEntry {
   const text = candidate.text
   return {
     category: candidate.category,
+    llmClaimedSource: candidate.llmClaimedSource ?? 'unknown',
     ja: candidate.ja ?? '',
     jaSource: candidate.ja ? 'document' : 'missing',
     en: candidate.en ?? '',
@@ -739,11 +964,11 @@ function rawEntryFromCandidate(candidate: NormalizedGlossaryCandidate): RawGloss
 }
 
 // ============================================================
-// 処理 D: ハルシネーション検証 (ルールベース)
+// 処理 D: 用途別 policy 生成 + document text 照合 (ルールベース)
 //
-// LLM (A+B / C) が「PDF に書かれている」と申告した値が
-// 本当に PDF テキストに存在するかを文字列照合で検証する。
-// 存在しない値は空にし、対応 source を "missing" に降格する。
+// LLM の source 申告は監査メタデータとして保存し、品質判定には使いすぎない。
+// PDF text layer に見つからない値も削除せず、documentMatch=false として
+// reviewRequired 相当の理由を残し、prompt への利用可否は用途別 policy で決める。
 //
 // 検証ポリシー (jaSource/enSource ごと):
 //   - document       : 完全一致または部分一致を要求。落ちたら missing 降格
@@ -757,18 +982,18 @@ function rawEntryFromCandidate(candidate: NormalizedGlossaryCandidate): RawGloss
 interface PdfHaystack {
   /** ページ結合済み生テキスト (デバッグ・ログ用) */
   raw: string
-  /** 小文字化＋空白圧縮した照合用テキスト */
+  /** NFKC、小文字化、空白圧縮した照合用テキスト */
   normalized: string
 }
 
 function buildPdfHaystack(document: ExtractedPdfDocument): PdfHaystack {
   const raw = document.pages.map(page => page.text).join('\n')
-  const normalized = raw.toLowerCase().replace(/\s+/g, ' ')
+  const normalized = raw.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ')
   return { raw, normalized }
 }
 
 function normalizeNeedle(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+  return value.normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
 function pdfContains(haystack: PdfHaystack, needle: string): boolean {
@@ -782,16 +1007,17 @@ function shouldVerifySource(source: SelfMadeGlossaryValueSource): boolean {
 }
 
 interface VerifiedValue {
-  value: string
   source: SelfMadeGlossaryValueSource
-  changed: boolean
+  documentMatch?: boolean
+  changedSource: boolean
 }
 
 function verifyValue(value: string, source: SelfMadeGlossaryValueSource, haystack: PdfHaystack): VerifiedValue {
-  if (!value) return { value, source, changed: false }
-  if (!shouldVerifySource(source)) return { value, source, changed: false }
-  if (pdfContains(haystack, value)) return { value, source, changed: false }
-  return { value: '', source: 'missing', changed: true }
+  if (!value) return { source, changedSource: false }
+  const documentMatch = pdfContains(haystack, value)
+  if (!shouldVerifySource(source)) return { source, documentMatch, changedSource: false }
+  if (documentMatch) return { source, documentMatch, changedSource: false }
+  return { source: 'llm_inferred', documentMatch, changedSource: true }
 }
 
 export interface GlossaryVerificationChange {
@@ -815,37 +1041,44 @@ export function verifyEntryAgainstPdf(entry: SelfMadeGlossaryEntry, haystack: Pd
   rejectedClaims: number
 } {
   const reasons: string[] = []
+  const decisionReasons: SelfMadeGlossaryDecisionReason[] = []
   let rejectedClaims = 0
 
   const ja = verifyValue(entry.ja, entry.jaSource, haystack)
-  if (ja.changed) {
-    reasons.push(`ja "${entry.ja}" not found in PDF; source demoted document → missing`)
+  if (ja.changedSource) {
+    reasons.push(`ja "${entry.ja}" not found in PDF text layer; source demoted document → llm_inferred`)
+    decisionReasons.push(buildDecisionReason('ja_document_match_failed', 'warning', 'ja が PDF text layer に見つからないため要確認'))
     rejectedClaims += 1
   }
 
   const en = verifyValue(entry.en, entry.enSource, haystack)
-  if (en.changed) {
-    reasons.push(`en "${entry.en}" not found in PDF; source demoted document → missing`)
+  if (en.changedSource) {
+    reasons.push(`en "${entry.en}" not found in PDF text layer; source demoted document → llm_inferred`)
+    decisionReasons.push(buildDecisionReason('en_document_match_failed', 'warning', 'en が PDF text layer に見つからないため要確認'))
     rejectedClaims += 1
   }
 
-  if (reasons.length === 0) {
-    return { entry, changed: false, reasons: [], rejectedClaims: 0 }
+  const documentMatch: SelfMadeGlossaryDocumentMatch = {
+    ja: entry.ja ? ja.documentMatch : undefined,
+    en: entry.en ? en.documentMatch : undefined,
+    formula: entry.formula ? pdfContains(haystack, entry.formula) : undefined,
+    displayText: entry.displayText ? pdfContains(haystack, entry.displayText) : undefined,
   }
 
   const existingReason = entry.reviewReason?.trim()
   const newReason = `ハルシネーション検証: ${reasons.join(' / ')}`
+  const verifiedEntry = applyPromptPolicy({
+    ...entry,
+    jaSource: ja.source,
+    enSource: en.source,
+    documentMatch,
+    reviewReason: reasons.length > 0 ? (existingReason ? `${existingReason} | ${newReason}` : newReason) : entry.reviewReason,
+    updatedAt: new Date().toISOString(),
+  }, decisionReasons)
+
   return {
-    entry: {
-      ...entry,
-      ja: ja.value,
-      en: en.value,
-      jaSource: ja.source,
-      enSource: en.source,
-      reviewReason: existingReason ? `${existingReason} | ${newReason}` : newReason,
-      updatedAt: new Date().toISOString(),
-    },
-    changed: true,
+    entry: verifiedEntry,
+    changed: reasons.length > 0 || JSON.stringify(entry.documentMatch) !== JSON.stringify(documentMatch),
     reasons,
     rejectedClaims,
   }
@@ -892,6 +1125,257 @@ function verifyEntriesWithHaystack(entries: SelfMadeGlossaryEntry[], haystack: P
  */
 export function verifyEntriesAgainstPdf(entries: SelfMadeGlossaryEntry[], document: ExtractedPdfDocument): GlossaryVerificationResult {
   return verifyEntriesWithHaystack(entries, buildPdfHaystack(document))
+}
+
+// ============================================================
+// 処理 B2: mini による数式・画像文字の追加確認
+// ============================================================
+
+const MATH_RISK_PATTERN = /[∂∇Σ∑Π∏√≤≥≦≧∞≈≠±×÷→←↔𝛼𝛽𝛾𝛿𝜃𝜂𝜀𝑎𝑏𝑐𝑑𝑒𝑓𝑔𝑣𝑤𝑥𝑦𝑧𝒩]|\\(frac|sum|prod|nabla|partial|theta|alpha|beta|gamma|eta|epsilon)|\b(exp|log|max|min|softmax|relu|uniform|normal|gaussian|nadam|amsgrad)\b/i
+
+function pageHasFormulaRisk(page: ExtractedPdfPage): boolean {
+  return MATH_RISK_PATTERN.test(page.text)
+}
+
+function shouldRunFormulaMiniReview(page: ExtractedPdfPage, entries: SelfMadeGlossaryEntry[]): boolean {
+  if (!page.imageDataUrl) return false
+  if (entries.some(entry => entry.category === 'formula' || entry.formula || entry.latex || entry.displayText)) return true
+  return pageHasFormulaRisk(page)
+}
+
+function resolveFormulaMiniModel(settings: AdminSettings): string {
+  return settings.pdfFormulaMiniModel || settings.pdfExtractionVisionModel || settings.translationModel
+}
+
+function formulaKey(value: string | undefined): string {
+  return (value ?? '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function formulaReviewDiffers(entry: SelfMadeGlossaryEntry, review: NormalizedFormulaMiniReview): boolean {
+  return formulaKey(entry.formula) !== formulaKey(review.formula)
+    || formulaKey(entry.latex) !== formulaKey(review.latex)
+    || formulaKey(entry.displayText) !== formulaKey(review.displayText)
+}
+
+function applyFormulaMiniReviewToEntry(entry: SelfMadeGlossaryEntry, review: NormalizedFormulaMiniReview): SelfMadeGlossaryEntry {
+  const differs = formulaReviewDiffers(entry, review)
+  const previousCanonical = entry.canonicalFormula ?? (
+    entry.formula || entry.latex || entry.displayText
+      ? {
+          formula: entry.formula,
+          latex: entry.latex,
+          displayText: entry.displayText,
+          sourcePass: 'candidate_nano' as const,
+          selectedReason: 'pre_formula_mini',
+        }
+      : undefined
+  )
+  const alternativeFormulaCandidates = [
+    ...(entry.alternativeFormulaCandidates ?? []),
+    ...(previousCanonical && differs
+      ? [{
+          ...previousCanonical,
+          sourcePass: previousCanonical.sourcePass ?? 'candidate_nano',
+        }]
+      : []),
+  ]
+  const reviewReason = review.reviewReason
+    ? `${entry.reviewReason ? `${entry.reviewReason} | ` : ''}mini数式確認: ${review.reviewReason}`
+    : entry.reviewReason
+
+  return applyPromptPolicy({
+    ...entry,
+    category: 'formula',
+    formula: review.formula ?? entry.formula,
+    latex: review.latex ?? entry.latex,
+    displayText: review.displayText ?? entry.displayText,
+    confidence: Math.max(entry.confidence, review.confidence),
+    llmClaimedSource: 'page_image',
+    canonicalFormula: {
+      formula: review.formula ?? entry.formula,
+      latex: review.latex ?? entry.latex,
+      displayText: review.displayText ?? entry.displayText,
+      sourcePass: 'formula_mini',
+      selectedReason: differs ? 'formula_mini_overrode_nano' : 'formula_mini_confirmed',
+    },
+    alternativeFormulaCandidates,
+    formulaMiniChecked: true,
+    formulaConsistency: differs ? 'formula_mini_overrode_nano' : 'formula_agree',
+    reviewReason,
+    children: [...entry.children, ...review.evidence],
+    updatedAt: new Date().toISOString(),
+  })
+}
+
+function createFormulaEntryFromMiniReview(
+  review: NormalizedFormulaMiniReview,
+  document: ExtractedPdfDocument,
+  page: ExtractedPdfPage,
+): SelfMadeGlossaryEntry {
+  const now = new Date().toISOString()
+  return applyPromptPolicy({
+    id: crypto.randomUUID(),
+    category: 'formula',
+    origin: 'document_generated',
+    ja: '',
+    en: '',
+    jaSource: 'missing',
+    enSource: 'missing',
+    formula: review.formula,
+    latex: review.latex,
+    displayText: review.displayText,
+    llmClaimedSource: 'page_image',
+    canonicalFormula: {
+      formula: review.formula,
+      latex: review.latex,
+      displayText: review.displayText,
+      sourcePass: 'formula_mini',
+      selectedReason: 'formula_mini_added',
+    },
+    formulaMiniChecked: true,
+    formulaConsistency: 'mini_only',
+    confidence: review.confidence,
+    formalEligible: false,
+    assistiveEligible: true,
+    provisional: true,
+    disabled: false,
+    reviewReason: review.reviewReason ? `mini数式確認: ${review.reviewReason}` : undefined,
+    jaConfirmed: false,
+    enConfirmed: false,
+    promoted: false,
+    source: document.source,
+    children: review.evidence.length > 0 ? review.evidence : [{ type: 'page', page: page.page }],
+    createdAt: now,
+    updatedAt: now,
+  })
+}
+
+async function requestFormulaMiniReview(
+  settings: AdminSettings,
+  document: ExtractedPdfDocument,
+  page: ExtractedPdfPage,
+  entries: SelfMadeGlossaryEntry[],
+  themeContext: string,
+  chunkIndex: number,
+  chunkCount: number,
+  onProgress?: GlossaryGenerationOptions['onProgress'],
+): Promise<NormalizedFormulaMiniReview[]> {
+  const connection = requireAiConnection(settings, 'self-made glossary formula mini review')
+  const model = requireChatModelForProvider(settings, resolveFormulaMiniModel(settings), 'self-made glossary formula mini review')
+  const pass: GlossaryExtractionPass = 'formula_mini'
+  onProgress?.({
+    step: 'chunk_start',
+    chunkIndex,
+    chunkCount,
+    pages: [page.page],
+    pass,
+    message: `${pass}: page ${page.page} mini review started (${entries.length} entries)`,
+  })
+
+  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
+      response_format: resolveJsonResponseFormatForProvider(settings),
+      messages: [
+        {
+          role: 'system',
+          content: 'You verify formulas and image-visible mathematical notation from a PDF page image. Return strict JSON only.',
+        },
+        {
+          role: 'user',
+          content: buildFormulaMiniUserContent(document, page, entries, themeContext),
+        },
+      ],
+    }),
+  })
+
+  const text = await response.text()
+  if (!response.ok) {
+    throw new Error(`Glossary formula mini review API failed: HTTP ${response.status} ${text.slice(0, 500)}`)
+  }
+
+  let json: ChatCompletionResponse
+  try {
+    json = JSON.parse(text) as ChatCompletionResponse
+  } catch (err) {
+    throw new Error(`Glossary formula mini review response JSON parse failed at page ${page.page}: ${err instanceof Error ? err.message : String(err)} / body=${text.slice(0, 500)}`)
+  }
+
+  const choice = json.choices?.[0]
+  const finishReason = choice?.finish_reason ?? 'unknown'
+  const content = choice?.message?.content
+  onProgress?.({
+    step: 'api_response',
+    chunkIndex,
+    chunkCount,
+    pages: [page.page],
+    pass,
+    message: `${pass}: page ${page.page} finish_reason=${finishReason}, content_chars=${content?.length ?? 0}${formatUsage(json)}`,
+  })
+  if (finishReason === 'length') {
+    const err = new Error(`Glossary formula mini review stopped by length limit at page ${page.page}.`)
+    ;(err as Error & { glossaryFinishReason?: string }).glossaryFinishReason = finishReason
+    throw err
+  }
+  if (!content) throw new Error('Glossary formula mini review response did not include message content')
+
+  const reviews = rawFormulaMiniReviews(parseJsonObjectFromLlmContent(content, `Glossary formula mini review page ${page.page}`))
+    .map(normalizeFormulaMiniReview)
+    .filter((review): review is NormalizedFormulaMiniReview => Boolean(review))
+  onProgress?.({
+    step: 'chunk_done',
+    chunkIndex,
+    chunkCount,
+    pages: [page.page],
+    pass,
+    message: `${pass}: page ${page.page} ${reviews.length} formula reviews`,
+  })
+  return reviews
+}
+
+async function applyFormulaMiniReviewIfNeeded(
+  settings: AdminSettings,
+  document: ExtractedPdfDocument,
+  page: ExtractedPdfPage,
+  entries: SelfMadeGlossaryEntry[],
+  themeContext: string,
+  chunkIndex: number,
+  chunkCount: number,
+  onProgress?: GlossaryGenerationOptions['onProgress'],
+): Promise<SelfMadeGlossaryEntry[]> {
+  if (!settings.pdfExtractionUseVision || !shouldRunFormulaMiniReview(page, entries)) return entries
+  try {
+    const reviews = await requestFormulaMiniReview(settings, document, page, entries, themeContext, chunkIndex, chunkCount, onProgress)
+    if (reviews.length === 0) return entries
+    const result = [...entries]
+    const indexById = new Map(result.map((entry, index) => [entry.id, index]))
+    for (const review of reviews) {
+      const idx = review.candidateId ? indexById.get(review.candidateId) : undefined
+      if (idx !== undefined) {
+        result[idx] = applyFormulaMiniReviewToEntry(result[idx], review)
+      } else {
+        result.push(createFormulaEntryFromMiniReview(review, document, page))
+      }
+    }
+    return result
+  } catch (error) {
+    onProgress?.({
+      step: 'chunk_done',
+      chunkIndex,
+      chunkCount,
+      pages: [page.page],
+      pass: 'formula_mini',
+      message: `formula_mini: page ${page.page} skipped after failure (${error instanceof Error ? error.message : String(error)})`,
+    })
+    return entries
+  }
 }
 
 // ============================================================
@@ -1161,7 +1645,7 @@ function emitVerificationLog(
     chunkCount,
     pages,
     pass,
-    message: `${pass} verification: ${result.totalRejected} claims rejected across ${result.changes.length} entries (PDF 照合で document 申告が落ちた値を missing に降格)`,
+    message: `${pass} verification: ${result.totalRejected} document claims warned across ${result.changes.length} entries (PDF text 照合で落ちた値は削除せず llm_inferred に降格)`,
   })
 }
 
@@ -1211,7 +1695,17 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
         .map(candidate => normalizeEntry(rawEntryFromCandidate(candidate), document, pagesByNumber))
         .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
       if (normalizedBatch.length > 0) {
-        const verification = verifyEntriesWithHaystack(normalizedBatch, haystack)
+        const formulaCheckedBatch = await applyFormulaMiniReviewIfNeeded(
+          settings,
+          document,
+          pages[0],
+          normalizedBatch,
+          themeContext,
+          i,
+          chunks.length,
+          options.onProgress,
+        )
+        const verification = verifyEntriesWithHaystack(formulaCheckedBatch, haystack)
         emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
         options.onEntries?.(verification.entries)
         return verification.entries
@@ -1238,13 +1732,24 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
         .map(entry => normalizeEntry(entry, document, pagesByNumber))
         .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
       if (normalizedBatch.length > 0) {
-        const verification = verifyEntriesWithHaystack(normalizedBatch, haystack)
-        emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
-        pageEntries.push(...verification.entries)
-        options.onEntries?.(verification.entries)
+        pageEntries.push(...normalizedBatch)
       }
     }
-    return pageEntries
+    if (pageEntries.length === 0) return pageEntries
+    const formulaCheckedEntries = await applyFormulaMiniReviewIfNeeded(
+      settings,
+      document,
+      pages[0],
+      pageEntries,
+      themeContext,
+      i,
+      chunks.length,
+      options.onProgress,
+    )
+    const verification = verifyEntriesWithHaystack(formulaCheckedEntries, haystack)
+    emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
+    options.onEntries?.(verification.entries)
+    return verification.entries
   })
 
   entries.push(...passEntries.flat())

@@ -137,7 +137,7 @@ async function callCorrectionApi(
 ): Promise<CorrectionApiResult> {
   const glossaryNote =
     glossaryTerms.length > 0
-      ? `【専門用語リスト】\n${glossaryTerms.slice(0, 100).join('、')}\n\n`
+      ? `【専門用語リスト】\n${glossaryTerms.join('、')}\n\n`
       : ''
 
   const fallbackTexts = segments.map((s) => normalizeSpaces(s.text))
