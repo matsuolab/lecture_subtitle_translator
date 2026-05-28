@@ -100,6 +100,7 @@ export function SettingsTab({
           translationModel: adminSettings.translationModel.trim() || modelId,
           correctionModel: adminSettings.correctionModel.trim() || modelId,
           pdfExtractionVisionModel: adminSettings.pdfExtractionVisionModel.trim() || modelId,
+          pdfFormulaMiniModel: adminSettings.pdfFormulaMiniModel.trim() || modelId,
           compressModel: adminSettings.compressModel.trim() || modelId,
           microModel: adminSettings.microModel.trim() || modelId,
           expandModel: adminSettings.expandModel.trim() || modelId,
@@ -148,6 +149,7 @@ export function SettingsTab({
         translationModel: DEFAULT_GEMINI_CHAT_MODEL,
         correctionModel: DEFAULT_GEMINI_CHAT_MODEL,
         pdfExtractionVisionModel: DEFAULT_GEMINI_CHAT_MODEL,
+        pdfFormulaMiniModel: DEFAULT_GEMINI_CHAT_MODEL,
         compressModel: DEFAULT_GEMINI_CHAT_MODEL,
         microModel: DEFAULT_GEMINI_CHAT_MODEL,
         expandModel: DEFAULT_GEMINI_CHAT_MODEL,
@@ -163,6 +165,7 @@ export function SettingsTab({
         translationModel: '',
         correctionModel: '',
         pdfExtractionVisionModel: '',
+        pdfFormulaMiniModel: '',
         compressModel: '',
         microModel: '',
         expandModel: '',
@@ -176,7 +179,8 @@ export function SettingsTab({
       openaiCompatibleBaseUrl: '',
       translationModel: DEFAULT_OPENAI_CHAT_MODEL,
       correctionModel: DEFAULT_OPENAI_CHAT_MODEL,
-      pdfExtractionVisionModel: DEFAULT_OPENAI_CHAT_MODEL,
+      pdfExtractionVisionModel: 'gpt-5.4-nano',
+      pdfFormulaMiniModel: DEFAULT_OPENAI_CHAT_MODEL,
       compressModel: DEFAULT_OPENAI_CHAT_MODEL,
       microModel: 'gpt-5.4-nano',
       expandModel: DEFAULT_OPENAI_CHAT_MODEL,
@@ -646,6 +650,15 @@ export function SettingsTab({
             listId="available-models-list"
             hint="辞書作成でVision LLMを有効にした場合だけ使います。テキスト専用モデルでは失敗します"
             onChange={(value) => onAdminSettingsChange({ pdfExtractionVisionModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label="PDF数式確認モデル"
+            value={adminSettings.pdfFormulaMiniModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
+            listId="available-models-list"
+            hint="辞書作成で数式・画像文字の追加確認に使います。空欄の場合はPDF抽出Visionモデルにフォールバックします"
+            onChange={(value) => onAdminSettingsChange({ pdfFormulaMiniModel: value })}
           />
           <NumberField
             theme={theme}

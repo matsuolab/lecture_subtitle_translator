@@ -193,36 +193,49 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
   return result
 }
 
+function canUseSelfMadeForCorrection(entry: SelfMadeGlossaryEntry): boolean {
+  if (entry.disabled) return false
+  if (entry.promptPolicy) return entry.promptPolicy.correction === 'include_canonical'
+  return Boolean(entry.formalEligible || entry.assistiveEligible)
+}
+
+function canUseSelfMadeForTranslation(entry: SelfMadeGlossaryEntry): boolean {
+  if (entry.disabled) return false
+  if (entry.promptPolicy) return entry.promptPolicy.translation === 'include_canonical'
+  return Boolean((entry.formalEligible || entry.assistiveEligible) && entry.ja && entry.en)
+}
+
+function canonicalFormulaText(entry: SelfMadeGlossaryEntry): string | undefined {
+  return entry.canonicalFormula?.displayText
+    ?? entry.canonicalFormula?.formula
+    ?? entry.displayText
+    ?? entry.formula
+}
+
 function buildPipelineGlossary(glossary: GlossaryEntry[], selfMadeGlossary: SelfMadeGlossaryEntry[]): LocalPipelineGlossary {
   const confirmedFormal = glossary.filter(entry => entry.confirmed)
-  const usableSelfMade = selfMadeGlossary.filter(entry =>
-    !entry.disabled
-    && (entry.formalEligible || entry.assistiveEligible),
-  )
+  const correctionSelfMade = selfMadeGlossary.filter(canUseSelfMadeForCorrection)
+  const translationSelfMade = selfMadeGlossary.filter(canUseSelfMadeForTranslation)
 
   const correctionTerms = uniqueNonEmpty([
     ...confirmedFormal.flatMap(entry => [entry.ja, entry.abbr]),
-    ...usableSelfMade.flatMap(entry => [
+    ...correctionSelfMade.flatMap(entry => [
       entry.ja,
       entry.abbr,
-      entry.formula,
-      entry.displayText,
+      canonicalFormulaText(entry),
       entry.spokenJa,
     ]),
-  ]).slice(0, 160)
+  ])
 
   const translationTerms = uniqueNonEmpty([
     ...confirmedFormal.flatMap(entry => [
       entry.ja && entry.en ? `${entry.ja} => ${entry.en}` : undefined,
       entry.abbr,
     ]),
-    ...usableSelfMade.flatMap(entry => [
+    ...translationSelfMade.flatMap(entry => [
       entry.ja && entry.en ? `${entry.ja} => ${entry.en}` : undefined,
-      entry.formula && (entry.spokenEn || entry.spokenJa)
-        ? `${entry.formula} => ${entry.spokenEn ?? entry.spokenJa}`
-        : undefined,
-      entry.displayText && (entry.spokenEn || entry.spokenJa)
-        ? `${entry.displayText} => ${entry.spokenEn ?? entry.spokenJa}`
+      canonicalFormulaText(entry) && (entry.spokenEn || entry.spokenJa)
+        ? `${canonicalFormulaText(entry)} => ${entry.spokenEn ?? entry.spokenJa}`
         : undefined,
       entry.abbr,
     ]),
@@ -325,6 +338,7 @@ function sanitizeAdminSettings(settings: AdminSettings): Partial<AdminSettings> 
     correctionModel: settings.correctionModel,
     pdfExtractionUseVision: settings.pdfExtractionUseVision,
     pdfExtractionVisionModel: settings.pdfExtractionVisionModel,
+    pdfFormulaMiniModel: settings.pdfFormulaMiniModel,
     pdfExtractionParallel: settings.pdfExtractionParallel,
     glossaryMaxOutputTokens: settings.glossaryMaxOutputTokens,
     apiRequestConcurrency: settings.apiRequestConcurrency,
