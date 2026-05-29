@@ -11,6 +11,7 @@ export interface LocaleStrings {
     exportCsv: ToastMessage
     exportJson: ToastMessage
     exportAdminSettings: ToastMessage
+    exportGlossaryLog: ToastMessage
     importGlossary: ToastMessage
     importAdminSettings: ToastMessage
     saveSettings: ToastMessage
@@ -33,6 +34,11 @@ export interface LocaleStrings {
   loadProjectTitle: string
   saveProjectTitle: string
   exportSrtTitle: string
+  srtFormatLabel: string
+  srtFormatSource: string
+  srtFormatTarget: string
+  srtFormatBoth: string
+  srtFormatSelectTitle: string
   restored: string
   videoLoadChoiceTitle: string
   videoLoadChoiceDesc: (name: string, count: number) => string

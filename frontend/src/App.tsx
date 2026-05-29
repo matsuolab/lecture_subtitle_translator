@@ -22,6 +22,7 @@ import {
   importSrt,
   exportSrt,
   type SessionExportData,
+  type SrtExportFormat,
 } from '@/api/persistence'
 import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
 import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/pipelineClient'
@@ -193,16 +194,17 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
   return result
 }
 
+// 補正 prompt: disabled でない PDF 抽出候補をすべて投入する。
+// formal / assistive のような自動分類で絞ると Adagrad / MLP / Layer Norm のような
+// 有用語まで落ちるため、enabled / disabled だけで判定する。
 function canUseSelfMadeForCorrection(entry: SelfMadeGlossaryEntry): boolean {
-  if (entry.disabled) return false
-  if (entry.promptPolicy) return entry.promptPolicy.correction === 'include_canonical'
-  return Boolean(entry.formalEligible || entry.assistiveEligible)
+  return !entry.disabled
 }
 
+// 翻訳 prompt: 日英ペアが揃っているもののみ (片側だけだと "Ja => En" 形式が作れない)
 function canUseSelfMadeForTranslation(entry: SelfMadeGlossaryEntry): boolean {
   if (entry.disabled) return false
-  if (entry.promptPolicy) return entry.promptPolicy.translation === 'include_canonical'
-  return Boolean((entry.formalEligible || entry.assistiveEligible) && entry.ja && entry.en)
+  return Boolean(entry.ja && entry.en)
 }
 
 function canonicalFormulaText(entry: SelfMadeGlossaryEntry): string | undefined {
@@ -221,6 +223,7 @@ function buildPipelineGlossary(glossary: GlossaryEntry[], selfMadeGlossary: Self
     ...confirmedFormal.flatMap(entry => [entry.ja, entry.abbr]),
     ...correctionSelfMade.flatMap(entry => [
       entry.ja,
+      entry.en,
       entry.abbr,
       canonicalFormulaText(entry),
       entry.spokenJa,
@@ -239,7 +242,19 @@ function buildPipelineGlossary(glossary: GlossaryEntry[], selfMadeGlossary: Self
         : undefined,
       entry.abbr,
     ]),
-  ]).slice(0, 160)
+  ])
+
+  const enabledSelfMade = selfMadeGlossary.filter(entry => !entry.disabled).length
+  const disabledSelfMade = selfMadeGlossary.length - enabledSelfMade
+  // 抽出ログから候補数が追えるよう、上限なしで全件投入していることを記録する
+  console.info('[glossary] pipeline glossary built', {
+    formalConfirmed: confirmedFormal.length,
+    selfMadeTotal: selfMadeGlossary.length,
+    selfMadeEnabled: enabledSelfMade,
+    selfMadeDisabled: disabledSelfMade,
+    correctionTerms: correctionTerms.length,
+    translationTerms: translationTerms.length,
+  })
 
   return { correctionTerms, translationTerms }
 }
@@ -471,6 +486,21 @@ export default function App() {
     restoredSession?.session?.pipelineHistory ?? [],
   )
   const [pipelineStatusPinned, setPipelineStatusPinned] = useState(false)
+  const [srtExportFormat, setSrtExportFormat] = useState<SrtExportFormat>(() => {
+    try {
+      const saved = localStorage.getItem('srtExportFormat')
+      if (saved === 'source' || saved === 'target' || saved === 'both') return saved
+      // 旧スキーマ ('en' | 'ja' | 'both') からのマイグレーション
+      if (saved === 'en' || saved === 'ja') {
+        const migrated: SrtExportFormat = saved === 'ja' ? 'target' : 'source'
+        try { localStorage.setItem('srtExportFormat', migrated) } catch { /* ignore */ }
+        return migrated
+      }
+    } catch {
+      // ignore (e.g. SSR / private mode)
+    }
+    return 'source'
+  })
   const [glossaryGenerationLog, setGlossaryGenerationLog] = useState<string[]>([])
   const [glossaryGenerationBusy, setGlossaryGenerationBusy] = useState(false)
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
@@ -1315,9 +1345,18 @@ export default function App() {
   }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource, getWorkLogExport])
 
   const handleExportSrt = useCallback(() => {
-    exportSrt(blocks, adminSettings)
+    exportSrt(blocks, adminSettings, srtExportFormat)
     toast.success('exportSrt')
-  }, [adminSettings, blocks, toast])
+  }, [adminSettings, blocks, srtExportFormat, toast])
+
+  const handleSrtFormatChange = useCallback((next: SrtExportFormat) => {
+    setSrtExportFormat(next)
+    try {
+      localStorage.setItem('srtExportFormat', next)
+    } catch {
+      // ignore persistence failure
+    }
+  }, [])
 
   const handleExportProjectJson = useCallback(() => {
     exportProjectJson(buildSessionExport())
@@ -2330,6 +2369,16 @@ export default function App() {
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
                 <Download size={11} />SRT出力
               </button>
+              <select
+                value={srtExportFormat}
+                onChange={(e) => handleSrtFormatChange(e.target.value as SrtExportFormat)}
+                title={t.srtFormatSelectTitle}
+                aria-label={t.srtFormatLabel}
+                style={{ fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 6px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
+                <option value="source">{t.srtFormatSource}</option>
+                <option value="target">{t.srtFormatTarget}</option>
+                <option value="both">{t.srtFormatBoth}</option>
+              </select>
               <div style={{ width: 1, background: theme.panelBorder, alignSelf: 'stretch', margin: '2px 2px' }} />
               <button onClick={() => importRef.current?.click()} title={t.loadProjectTitle}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 8px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>

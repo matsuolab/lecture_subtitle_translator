@@ -55,14 +55,12 @@ export function GlossaryTab({
   const [isDragOver, setIsDragOver] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [importMsg, setImportMsg] = useState<string | null>(null)
-  const [selfMadeFilter, setSelfMadeFilter] = useState<'active' | 'formal' | 'assistive' | 'term' | 'proper_noun' | 'formula' | 'abbreviation' | 'reference' | 'disabled' | 'all'>('active')
+  const [selfMadeFilter, setSelfMadeFilter] = useState<'enabled' | 'term' | 'proper_noun' | 'formula' | 'abbreviation' | 'reference' | 'disabled' | 'all'>('enabled')
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteTarget | null>(null)
   const isBusy = isImporting || isGenerating
 
   const selfMadeFilterOptions: Array<{ value: typeof selfMadeFilter; label: string }> = [
-    { value: 'active', label: '有効' },
-    { value: 'formal', label: '正式候補' },
-    { value: 'assistive', label: '補正用' },
+    { value: 'enabled', label: '有効候補' },
     { value: 'term', label: '専門用語' },
     { value: 'proper_noun', label: '固有名詞' },
     { value: 'formula', label: '数式' },
@@ -74,9 +72,7 @@ export function GlossaryTab({
 
   const filteredSelfMadeGlossary = selfMadeGlossary.filter(entry => {
     if (selfMadeFilter === 'all') return true
-    if (selfMadeFilter === 'active') return !entry.disabled && entry.category !== 'reference'
-    if (selfMadeFilter === 'formal') return !entry.disabled && entry.formalEligible
-    if (selfMadeFilter === 'assistive') return !entry.disabled && entry.assistiveEligible && !entry.formalEligible
+    if (selfMadeFilter === 'enabled') return !entry.disabled
     if (selfMadeFilter === 'term') return !entry.disabled && entry.category === 'term'
     if (selfMadeFilter === 'proper_noun') return !entry.disabled && entry.category === 'proper_noun'
     if (selfMadeFilter === 'formula') return !entry.disabled && entry.category === 'formula'
@@ -106,8 +102,37 @@ export function GlossaryTab({
   const appendGenerationLog = useCallback((event: GlossaryGenerationProgressEvent | string) => {
     const text = typeof event === 'string' ? event : event.message
     const stamp = new Date().toLocaleTimeString()
-    setGenerationLog(prev => [`${stamp} ${text}`, ...prev].slice(0, 80))
+    setGenerationLog(prev => [`${stamp} ${text}`, ...prev])
   }, [setGenerationLog])
+
+  const exportGenerationLog = useCallback(() => {
+    if (generationLog.length === 0) return
+    const payload = {
+      kind: 'glossary-generation-log',
+      exportedAt: new Date().toISOString(),
+      logLines: generationLog,
+      settings: {
+        translationProvider: adminSettings.translationProvider,
+        translationModel: adminSettings.translationModel,
+        correctionModel: adminSettings.correctionModel,
+        pdfExtractionUseVision: adminSettings.pdfExtractionUseVision,
+        pdfExtractionVisionModel: adminSettings.pdfExtractionVisionModel,
+        pdfFormulaMiniModel: adminSettings.pdfFormulaMiniModel,
+        pdfExtractionParallel: adminSettings.pdfExtractionParallel,
+        glossaryMaxOutputTokens: adminSettings.glossaryMaxOutputTokens,
+        apiRequestConcurrency: adminSettings.apiRequestConcurrency,
+      },
+      currentSelfMadeGlossaryCount: selfMadeGlossary.length,
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `glossary-generation-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success('exportGlossaryLog')
+  }, [adminSettings, generationLog, selfMadeGlossary.length, toast])
 
   const processFile = useCallback(async (file: File) => {
     if (isBusy) return
@@ -145,8 +170,8 @@ export function GlossaryTab({
         })
         const added = addedTotal
         const updated = updatedTotal
-        showMsg(`自作辞書を作成しました: ${added} 件追加、${updated} 件更新`)
-        setGenerationLog([])
+        showMsg(`専門用語候補を抽出しました: ${added} 件追加、${updated} 件更新`)
+        appendGenerationLog(`completed: ${added} added, ${updated} updated`)
         toast.success('importGlossary', { added, updated })
       } else {
         showMsg('非対応形式です（CSV / XLSX / PDF を使用してください）')
@@ -154,6 +179,7 @@ export function GlossaryTab({
       }
     } catch (err) {
       const error = describeError(err)
+      appendGenerationLog(`ERROR: ${error}`)
       showMsg(`読み込みエラー: ${error}`)
       toast.error('glossaryImportError', { error })
     } finally {
@@ -182,13 +208,13 @@ export function GlossaryTab({
           appendGenerationLog(`saved batch: ${added} added, ${updated} updated`)
         },
       })
-      showMsg(`PDFから自作辞書を作成しました: ${addedTotal} 件追加、${updatedTotal} 件更新`)
-      setGenerationLog([])
+      showMsg(`PDFから専門用語候補を抽出しました: ${addedTotal} 件追加、${updatedTotal} 件更新`)
+      appendGenerationLog(`completed: ${addedTotal} added, ${updatedTotal} updated`)
       toast.success('importGlossary', { added: addedTotal, updated: updatedTotal })
     } catch (err) {
       const error = describeError(err)
       appendGenerationLog(`ERROR: ${error}`)
-      showMsg(`辞書作成エラー: ${error}`)
+      showMsg(`専門用語抽出エラー: ${error}`)
       toast.error('glossaryImportError', { error })
     } finally {
       setIsGenerating(false)
@@ -319,6 +345,9 @@ export function GlossaryTab({
       default: return '不明'
     }
   }
+
+  const sourceValueLabel = (entry: SelfMadeGlossaryEntry) => entry.ja || entry.displayText || entry.formula || '(ソース未設定)'
+  const targetValueLabel = (entry: SelfMadeGlossaryEntry) => entry.en || entry.spokenEn || '(ターゲット未設定)'
 
   const addToGlossary = (i: number) => {
     const term = extracted[i]
@@ -462,7 +491,7 @@ export function GlossaryTab({
           <button
             onClick={() => createRef.current?.click()}
             disabled={isBusy}
-            title="PDFから自作辞書を作成"
+            title="PDFから専門用語候補を抽出 (補正promptに使う)"
             style={{
               display: 'flex', alignItems: 'center', gap: 5,
               border: `1px solid ${theme.accent}`,
@@ -479,7 +508,7 @@ export function GlossaryTab({
             }}
           >
             <Sparkles size={11} style={{ flexShrink: 0 }} />
-            {isGenerating ? '作成中...' : '辞書作成'}
+            {isGenerating ? '抽出中...' : '用語抽出'}
           </button>
           <label
             title="ページ画像もVision対応LLMへ送って、数式・図表・画像化文字の抽出精度を上げる"
@@ -580,14 +609,30 @@ export function GlossaryTab({
           background: theme.cardBg,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: theme.textSecondary }}>辞書作成ログ</span>
+            <span style={{ fontSize: 11, fontWeight: 700, color: theme.textSecondary }}>専門用語抽出ログ</span>
             {isBusy && <span style={{ fontSize: 11, color: theme.textMuted }}>処理中...</span>}
+            <button
+              type="button"
+              onClick={exportGenerationLog}
+              disabled={generationLog.length === 0}
+              style={{
+                marginLeft: 'auto',
+                border: `1px solid ${theme.btnBorder}`,
+                background: theme.btnBg,
+                color: generationLog.length === 0 ? theme.textDisabled : theme.textSecondary,
+                borderRadius: 6,
+                padding: '2px 8px',
+                fontSize: 11,
+                cursor: generationLog.length === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              ログ出力
+            </button>
             <button
               type="button"
               onClick={() => setGenerationLog([])}
               disabled={isBusy}
               style={{
-                marginLeft: 'auto',
                 border: `1px solid ${theme.btnBorder}`,
                 background: 'none',
                 color: isBusy ? theme.textDisabled : theme.textSecondary,
@@ -614,7 +659,7 @@ export function GlossaryTab({
         </div>
       )}
 
-      {sectionHeader(`自作辞書 (${filteredSelfMadeGlossary.length}/${selfMadeGlossary.length})`, theme.textSecondary)}
+      {sectionHeader(`専門用語候補 (${filteredSelfMadeGlossary.length}/${selfMadeGlossary.length})`, theme.textSecondary)}
 
       <div style={{
         marginBottom: 12,
@@ -736,7 +781,7 @@ export function GlossaryTab({
           border: `1px dashed ${theme.panelBorder}`,
           borderRadius: 8,
         }}>
-          自作辞書は空です。PDFから辞書作成すると候補が追加されます。
+          専門用語候補はまだありません。PDFを読み込むと書き起こし補正に使う候補が抽出されます。
         </div>
       )}
 
@@ -754,21 +799,21 @@ export function GlossaryTab({
               {categoryLabel(entry)}
             </span>
             <span style={{ fontSize: 15, fontWeight: 700, color: theme.textPrimary }}>
-              {entry.ja || entry.displayText || entry.formula || '(日本語未設定)'}
+              {sourceValueLabel(entry)}
             </span>
             <span style={{ fontSize: 10, color: theme.textMuted }}>[{sourceLabel(entry.jaSource)}]</span>
             <span style={{ color: theme.textSecondary, fontSize: 13 }}>→</span>
             <span style={{ fontSize: 15, fontWeight: 700, color: theme.glossaryEnTermColor }}>
-              {entry.en || entry.spokenEn || '(英語未設定)'}
+              {targetValueLabel(entry)}
             </span>
             <span style={{ fontSize: 10, color: theme.textMuted }}>[{sourceLabel(entry.enSource)}]</span>
             {entry.abbr && (
               <span style={{ fontSize: 11, color: theme.textMuted }}>({entry.abbr})</span>
             )}
           </div>
-          {(entry.desc || entry.note || entry.latex) && (
+          {(entry.note || entry.latex) && (
             <div style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, marginTop: 6 }}>
-              {entry.desc || entry.note || entry.latex}
+              {entry.note || entry.latex}
             </div>
           )}
           {entry.reviewReason && (
@@ -778,11 +823,8 @@ export function GlossaryTab({
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
             <span style={{ fontSize: 11, color: theme.textSecondary }}>{t.source} {primarySourceLabel(entry)}</span>
-            {!entry.formalEligible && (
-              <span style={{ fontSize: 11, color: theme.textMuted }}>正式辞書対象外</span>
-            )}
-            {entry.assistiveEligible && (
-              <span style={{ fontSize: 11, color: theme.textMuted }}>補正利用候補</span>
+            {entry.disabled && (
+              <span style={{ fontSize: 11, color: theme.textMuted }}>補正promptから除外</span>
             )}
             {entry.origin === 'formal_import' && (
               <span style={{ fontSize: 11, color: theme.textMuted }}>正式辞書由来</span>
@@ -804,7 +846,7 @@ export function GlossaryTab({
                 cursor: isBusy ? 'not-allowed' : 'pointer',
               }}
             >
-              日{entry.jaConfirmed ? '確認済み' : '未確認'}
+              ソース{entry.jaConfirmed ? '確認済み' : '未確認'}
             </button>
             <button
               onClick={() => handleToggleConfirmed(entry, 'enConfirmed')}
@@ -819,7 +861,7 @@ export function GlossaryTab({
                 cursor: isBusy ? 'not-allowed' : 'pointer',
               }}
             >
-              英{entry.enConfirmed ? '確認済み' : '未確認'}
+              ターゲット{entry.enConfirmed ? '確認済み' : '未確認'}
             </button>
             <button
               onClick={() => {
