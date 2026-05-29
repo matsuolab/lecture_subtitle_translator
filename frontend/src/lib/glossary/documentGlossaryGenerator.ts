@@ -142,7 +142,7 @@ interface DocumentTheme {
 
 const MAX_CHARS_PER_REQUEST = 12_000
 const MAX_LOCAL_CHARS_PER_REQUEST = 7_000
-const LOCAL_DETAIL_BATCH_SIZE = 5
+const LOCAL_DETAIL_BATCH_SIZE = 20
 
 const MIN_GLOSSARY_OUTPUT_TOKENS = 256
 const MAX_GLOSSARY_OUTPUT_TOKENS = 16384
@@ -279,36 +279,23 @@ export async function extractDocumentTheme(
   const connection = requireAiConnection(settings, 'glossary document theme extraction')
   const model = requireChatModelForProvider(settings, settings.translationModel, 'glossary document theme extraction')
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, THEME_PROBE_MAX_OUTPUT_TOKENS),
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        {
-          role: 'system',
-          content: 'You summarize the subject of a lecture/technical PDF in strict JSON. No commentary.',
-        },
-        {
-          role: 'user',
-          content: buildThemePrompt(document, probePages),
-        },
-      ],
-    }),
+  const json = await postGlossaryChatCompletion(connection, 'Glossary document theme API', {
+    model,
+    temperature: 0,
+    ...resolveChatCompletionTokenLimitForProvider(settings, THEME_PROBE_MAX_OUTPUT_TOKENS),
+    response_format: resolveJsonResponseFormatForProvider(settings),
+    messages: [
+      {
+        role: 'system',
+        content: 'You summarize the subject of a lecture/technical PDF in strict JSON. No commentary.',
+      },
+      {
+        role: 'user',
+        content: buildThemePrompt(document, probePages),
+      },
+    ],
   })
 
-  const text = await response.text()
-  if (!response.ok) {
-    throw new Error(`Glossary document theme API failed: HTTP ${response.status} ${text.slice(0, 500)}`)
-  }
-
-  const json = JSON.parse(text) as ChatCompletionResponse
   const content = json.choices?.[0]?.message?.content
   if (!content) {
     return { subject: '', domain: '', keyConcepts: [], promptContext: '' }
@@ -357,26 +344,31 @@ const CATEGORY_GUIDE = `分類タグ (category) は以下の 5 つのいずれ�
 - "abbreviation": 略語 (展開先の正式名が存在するもの)。例: ML, CNN, DL
 - "reference":    参照・引用元・URL (辞書化対象外、自動的に disabled になる)。例: https://..., Bengio+ 2007`
 
-const EXTRACTION_RULES = `抽出する:
-- この資料の主題に直結する技術用語・固有名詞・略語
-- 字幕補正で読み間違えやすい数式・記号表記
-- 主題で扱われる概念名
+const EXTRACTION_RULES = `この処理は「字幕の書き起こし補正に使うための専門用語候補リスト」を作るタスクです。
+完成した辞書を作るタスクではありません。
+recall を precision より優先してください。判定に迷ったら抽出する。後で人間が無効化します。
 
-抽出しない:
-- 一般動詞・形容詞 (「学ぶ」「単純」「複雑」「計算する」)
-- 主題と無関係な一般名詞 (「人」「方法」「内容」「結果」)
-- 教育用語一般 (「講義」「演習」「目次」「参考文献」)
-- 講師名・大学名・組織名は reference として記録
+抽出する:
+- 主題に関連しそうな技術用語・固有名詞・略語・手法名・モデル名・ライブラリ名・データセット名
+- 数式・記号・添字付き変数・形状表記
+- 主題で扱われる概念名 (例: 「最適化」「正則化」「Adagrad」「Layer Norm」「MLP」「JAX」「TPU」「GPU」「CPU」「PyTorch」「SGD法」「陰的正則化」「Multi-task Learning」)
+- 章題・節題に含まれる単独の専門語 (見出しそのものではなく、含まれる固有名詞・手法名)
+- 短く一般語に見えても、専門用語として使われていそうな語
+
+抽出しない (明確なノイズだけ):
+- 講師・演習担当の人名行 (例: 「講義講師 XX」「演習講師 YY」)
+- 大学・所属組織のフッター (例: "THE UNIVERSITY OF TOKYO")
+- 明確な URL
+- ページ番号や章番号だけの文字列
 - 単独では意味が分からない指示語 (「これ」「以下」「先程」)
 
-判定に迷ったら:
-- 「この語を字幕辞書から削除したら字幕品質が下がるか?」で判断
-- 下がらないなら抽出しない`
+判定に迷ったら抽出する。一般語かどうかの判定はしない。`
 
 const ABSOLUTE_RULES = `絶対に守ること:
 - 翻訳はしない。PDF に存在しない訳語を補わない
 - 推測で値を作らない。PDF に書かれていない情報は空欄にする
-- ja は PDF に実在する日本語表記のみ、en は PDF に実在する英語表記のみ
+- ja は source 側表記、en は target 側表記を格納する内部互換フィールド
+- 現行運用では source=日本語、target=英語。PDF に実在する source/target 表記のみ入れる
 - どちらか一方が PDF に書かれていない場合、そのフィールドは空文字、対応 Source は "missing"
 - jaSource / enSource は "document" | "vision" | "llm_inferred" | "missing" のいずれかにする
 - llmClaimedSource は監査用メタデータです。本文だけで確認したなら "document_text"、ページ画像で補ったなら "page_image"、不明なら "unknown"
@@ -407,7 +399,8 @@ function buildCandidatePrompt(
   maxChars: number,
   themeContext: string,
 ): string {
-  return `以下の PDF 資料から、字幕の書き起こし修正・英訳修正に使う専門用語の「候補名だけ」を抽出してください。
+  return `以下の PDF 資料から、字幕の書き起こし修正・英訳修正に役立つ「専門用語候補」を抽出してください。
+完成した辞書 entry を作るタスクではありません。recall 重視で、迷ったら抽出してください。
 
 文書名: ${document.source.name}
 
@@ -422,11 +415,13 @@ ${FORMULA_NOTATION_RULES}
 
 候補抽出段の追加制約:
 - 1 候補は text/category/page/snippet を基本とする
-- ja/en/formula/displayText は PDF 上で明確に分かる場合のみ短く入れる
-- llmClaimedSource は source 判定を厳密にするためではなく、あとで監査するために記録する
-- desc, note, reviewReason, spokenJa, spokenEn, domain, evidence, references はこの段では出さない
+- ja/en/formula/displayText は PDF 上で明確に分かる場合のみ短く入れる。片方が無くてもよい
+- abbreviation は SGD / GPU / TPU のような略語そのものだけに使う。Optimizer / Deep Learning / Regularization のような英語用語を abbreviation にしない
+- 「日本語のみ候補」と「英語のみ候補」が同じ箇所で同一概念を指す場合、別候補にせず 1 候補にまとめる
+- 章題・節題そのもの (例: 「Transformer基礎」「深層学習と画像認識」) は候補に入れてよいが、できれば含まれる単独の専門語 (例: 「Transformer」「深層学習」) を別候補として出すこと
+- llmClaimedSource は監査メタデータ。本文だけで確認したなら "document_text"、ページ画像で補ったなら "page_image"、不明なら "unknown"
+- desc, note, reviewReason, spokenJa, spokenEn, domain, references はこの段でも次段でも出さない
 - snippet は候補が出ている短い本文断片 (50 字以内)
-- 同概念の正式用語と略語が同じ箇所に並ぶ場合は、正式用語側を 1 候補だけ出す
 ${useVision ? '- 添付ページ画像も同じ抽出対象として確認する。PDF テキストで崩れている数式・添字・上付き・ギリシャ文字・図表中の略語は画像で読める表記を入れる' : ''}
 
 JSON 形式:
@@ -473,7 +468,8 @@ function buildDetailPrompt(
   candidates: NormalizedGlossaryCandidate[],
   themeContext: string,
 ): string {
-  return `以下の候補だけを、自作辞書へ保存する詳細 JSON に展開してください。
+  return `以下の候補を、字幕補正用の専門用語候補 JSON に展開してください。
+完成した辞書 entry ではなく、補正prompt に渡すための候補一覧です。
 
 文書名: ${document.source.name}
 
@@ -487,13 +483,20 @@ ${FORMULA_NOTATION_RULES}
 詳細展開段の追加制約:
 - 新しい候補を追加しない
 - 入力候補にない用語を補完しない
-- desc/note/reviewReason/snippet は短くする (50〜100 字)
+- 入力候補にない訳語を作らない (推測翻訳禁止)
+- 入力候補内に同一概念の日本語表記と英語表記がある場合は 1 entry に統合する
+  例: 「深層学習」と "Deep Learning" は 1 entry にする
+- abbreviation は略語本体 (SGD, GPU, TPU など) に使う。Optimizer / Deep Learning のような英語用語そのものを abbreviation にしない
+- 候補をむやみに drop しない。短い・一般語に見える・章題に出てきた、などで落とさない
+- domain / desc / note / reviewReason / references は出力しない (空文字でも出さない)
+- note はユーザー自由記入欄として UI には残すが、LLM側からは生成しない
+- evidence.snippet は候補が出た最短断片だけにする (40 字以内)
 - ja または en が不明な場合は空文字にし、対応 Source は "missing"
 - llmClaimedSource は候補から引き継ぎ、判断できない場合は "unknown"
 - 略語と正式名が同じ概念を指す場合、別 entry にせず正式名 entry の abbr に略語を入れる
 - 既存 candidate の category を勝手に変えない (明らかな誤分類のときだけ訂正可)
 
-JSON 形式:
+JSON 形式 (これ以外のフィールドは出力しない):
 {
   "entries": [
     {
@@ -507,12 +510,7 @@ JSON 形式:
       "formula": "",
       "latex": "",
       "displayText": "",
-      "domain": "",
-      "desc": "",
-      "note": "",
-      "reviewReason": "",
-      "evidence": [{ "page": 1, "snippet": "" }],
-      "references": [{ "page": 1, "url": "", "label": "" }]
+      "evidence": [{ "page": 1, "snippet": "" }]
     }
   ]
 }
@@ -567,7 +565,6 @@ JSON 形式:
       "latex": "",
       "displayText": "",
       "confidence": 0.0,
-      "reviewReason": "",
       "evidence": [{ "page": ${page.page}, "snippet": "" }]
     }
   ]
@@ -626,6 +623,41 @@ function formatUsage(json: ChatCompletionResponse): string {
   const total = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined
   if (prompt === undefined && completion === undefined && total === undefined) return ''
   return `, tokens=${prompt ?? '?'} in/${completion ?? '?'} out/${total ?? '?'} total`
+}
+
+function formatGlossaryCallFailure(context: string, error: unknown): string {
+  return `${context}: ${error instanceof Error ? error.message : String(error)}`
+}
+
+async function postGlossaryChatCompletion(
+  connection: { baseUrl: string; apiKey: string },
+  context: string,
+  body: Record<string, unknown>,
+): Promise<ChatCompletionResponse> {
+  let response: Awaited<ReturnType<typeof tauriFetch>>
+  try {
+    response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
+      },
+      body: JSON.stringify(body),
+    })
+  } catch (error) {
+    throw new Error(formatGlossaryCallFailure(`${context} fetch_failed`, error))
+  }
+
+  const text = await response.text().catch(() => '')
+  if (!response.ok) {
+    throw new Error(`${context} http_${response.status}: ${text.slice(0, 500)}`)
+  }
+
+  try {
+    return JSON.parse(text) as ChatCompletionResponse
+  } catch (error) {
+    throw new Error(formatGlossaryCallFailure(`${context} response_json_parse_failed`, error) + ` / body=${text.slice(0, 500)}`)
+  }
 }
 
 function normalizeCategory(value: unknown): SelfMadeGlossaryCategory {
@@ -701,23 +733,41 @@ function normalizeFormulaMiniReview(raw: RawFormulaMiniReview): NormalizedFormul
   }
 }
 
-function dedupeCandidates(candidates: NormalizedGlossaryCandidate[]): NormalizedGlossaryCandidate[] {
+function normalizeCandidateKeyText(value: string | undefined): string {
+  return (value ?? '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function candidateDedupeKey(candidate: NormalizedGlossaryCandidate, scope: 'chunk' | 'document'): string {
+  const text = normalizeCandidateKeyText(candidate.text)
+  const ja = normalizeCandidateKeyText(candidate.ja)
+  const en = normalizeCandidateKeyText(candidate.en)
+  const formula = normalizeCandidateKeyText(candidate.formula ?? candidate.displayText)
+  const page = scope === 'chunk' ? String(candidate.page ?? '') : ''
+  if (candidate.category === 'formula' && formula) return ['formula', formula, page].join('|')
+  if (ja && en) return [candidate.category, ja, en, page].join('|')
+  if (ja) return [candidate.category, 'ja', ja, page].join('|')
+  if (en) return [candidate.category, 'en', en, page].join('|')
+  return [candidate.category, text, page].join('|')
+}
+
+function dedupeCandidates(candidates: NormalizedGlossaryCandidate[], scope: 'chunk' | 'document' = 'chunk'): NormalizedGlossaryCandidate[] {
   const seen = new Set<string>()
   const deduped: NormalizedGlossaryCandidate[] = []
   for (const candidate of candidates) {
-    const key = [
-      candidate.category,
-      candidate.text.toLowerCase(),
-      candidate.ja?.toLowerCase() ?? '',
-      candidate.en?.toLowerCase() ?? '',
-      candidate.formula ?? '',
-      candidate.page ?? '',
-    ].join('|')
+    const key = candidateDedupeKey(candidate, scope)
     if (seen.has(key)) continue
     seen.add(key)
     deduped.push(candidate)
   }
   return deduped
+}
+
+function shouldExpandCandidate(candidate: NormalizedGlossaryCandidate): boolean {
+  const values = [candidate.text, candidate.ja, candidate.en, candidate.formula, candidate.displayText].filter(Boolean) as string[]
+  if (candidate.category === 'reference') return false
+  if (values.some(looksLikeUrlOrDomain)) return false
+  if (values.some(looksLikeObviousMetadataNoise)) return false
+  return true
 }
 
 function normalizeValueSource(value: unknown, text: string): SelfMadeGlossaryValueSource {
@@ -738,13 +788,21 @@ function looksLikeUrlOrDomain(value: string): boolean {
   return /^https?:\/\//.test(text) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/?$/.test(text)
 }
 
-function looksLikeNoiseValue(value: string): boolean {
+function looksLikeObviousMetadataNoise(value: string): boolean {
   const text = value.trim()
   if (!text) return false
   if (/^(p\.?\s*)?\d+$|^第?\d+回$|^chapter\s*\d+$/i.test(text)) return true
-  if (/^(copyright|all rights reserved|参考文献|references?|目次|講義|演習)$/i.test(text)) return true
+  if (/^(copyright|all rights reserved)$/i.test(text)) return true
+  if (/^the university of tokyo$/i.test(text)) return true
+  if (/^講義講師[\s:：]?/.test(text)) return true
+  if (/^演習講師[\s:：]?/.test(text)) return true
   if (text.length <= 1 && !/[A-Za-z0-9\u3040-\u30ff\u3400-\u9fff]/.test(text)) return true
   return false
+}
+
+function looksLikeAcronym(value: string): boolean {
+  const text = value.trim()
+  return /^[A-Z][A-Z0-9+-]{1,9}$/.test(text)
 }
 
 function applyDeterministicClassification(
@@ -773,15 +831,17 @@ function applyDeterministicClassification(
     }
   }
 
-  if (values.some(looksLikeNoiseValue)) {
+  if (values.some(looksLikeObviousMetadataNoise)) {
     return {
       category: 'reference',
       formalEligible: false,
       assistiveEligible: false,
       disabled: true,
-      reviewReason: 'ページ番号・章番号・参照見出し等のノイズ候補のため除外',
+      reviewReason: '明確なメタ情報 (講師名・所属・ページ番号など) のため初期 disabled',
     }
   }
+
+  // 章題・見出し由来候補は自動 disabled にしない (Layer Norm / 陰的正則化 等を取りこぼさないため)
 
   switch (category) {
     case 'reference':
@@ -850,6 +910,102 @@ function applyPromptPolicy(entry: SelfMadeGlossaryEntry, extraReasons: SelfMadeG
   }
 }
 
+function mergeValueSource(
+  previous: SelfMadeGlossaryValueSource,
+  incoming: SelfMadeGlossaryValueSource,
+): SelfMadeGlossaryValueSource {
+  const priority: Record<SelfMadeGlossaryValueSource, number> = {
+    document: 5,
+    vision: 4,
+    manual: 3,
+    llm_translation: 2,
+    llm_inferred: 1,
+    missing: 0,
+  }
+  return priority[incoming] > priority[previous] ? incoming : previous
+}
+
+function uniqueChildren(children: SelfMadeGlossaryChildSource[]): SelfMadeGlossaryChildSource[] {
+  const seen = new Set<string>()
+  return children.filter(child => {
+    const key = [child.type, child.page ?? '', child.url ?? '', child.snippet ?? '', child.label ?? ''].join('\u0000')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function generatedEntryMergeKey(entry: SelfMadeGlossaryEntry): string {
+  const ja = normalizeCandidateKeyText(entry.ja)
+  const en = normalizeCandidateKeyText(entry.en)
+  const abbr = normalizeCandidateKeyText(entry.abbr)
+  const formula = normalizeCandidateKeyText(entry.canonicalFormula?.formula ?? entry.formula ?? entry.displayText)
+  if (entry.category === 'formula' && formula) return `formula\u0000${formula}`
+  if (ja && en) return `${entry.category}\u0000${ja}\u0000${en}`
+  if (abbr && en) return `abbr\u0000${abbr}\u0000${en}`
+  if (abbr && ja) return `abbr\u0000${abbr}\u0000${ja}`
+  if (ja) return `${entry.category}\u0000ja\u0000${ja}`
+  if (en) return `${entry.category}\u0000en\u0000${en}`
+  return `${entry.category}\u0000${formula || normalizeCandidateKeyText(entry.displayText)}`
+}
+
+function mergeGeneratedEntry(previous: SelfMadeGlossaryEntry, incoming: SelfMadeGlossaryEntry): SelfMadeGlossaryEntry {
+  const ja = incoming.ja || previous.ja
+  const en = incoming.en || previous.en
+  const merged: SelfMadeGlossaryEntry = {
+    ...previous,
+    ...incoming,
+    id: previous.id,
+    ja,
+    en,
+    jaSource: incoming.ja ? mergeValueSource(previous.jaSource, incoming.jaSource) : previous.jaSource,
+    enSource: incoming.en ? mergeValueSource(previous.enSource, incoming.enSource) : previous.enSource,
+    abbr: incoming.abbr || previous.abbr,
+    formula: incoming.formula || previous.formula,
+    latex: incoming.latex || previous.latex,
+    displayText: incoming.displayText || previous.displayText,
+    domain: undefined,
+    note: previous.note || incoming.note,
+    desc: undefined,
+    reviewReason: previous.reviewReason || incoming.reviewReason,
+    canonicalFormula: incoming.formulaMiniChecked ? incoming.canonicalFormula : (previous.formulaMiniChecked ? previous.canonicalFormula : incoming.canonicalFormula ?? previous.canonicalFormula),
+    alternativeFormulaCandidates: [
+      ...(previous.alternativeFormulaCandidates ?? []),
+      ...(incoming.alternativeFormulaCandidates ?? []),
+    ],
+    formulaMiniChecked: previous.formulaMiniChecked || incoming.formulaMiniChecked,
+    formulaConsistency: incoming.formulaConsistency ?? previous.formulaConsistency,
+    confidence: Math.max(previous.confidence, incoming.confidence),
+    formalEligible: previous.formalEligible || incoming.formalEligible,
+    assistiveEligible: previous.assistiveEligible || incoming.assistiveEligible,
+    correctionEligible: previous.correctionEligible || incoming.correctionEligible,
+    translationEligible: previous.translationEligible || incoming.translationEligible,
+    disabled: previous.disabled && incoming.disabled,
+    children: uniqueChildren([...previous.children, ...incoming.children]),
+    updatedAt: new Date().toISOString(),
+  }
+  return applyPromptPolicy(merged)
+}
+
+function mergeGeneratedEntries(entries: SelfMadeGlossaryEntry[]): SelfMadeGlossaryEntry[] {
+  const result: SelfMadeGlossaryEntry[] = []
+  const indexByKey = new Map<string, number>()
+  for (const entry of entries) {
+    const key = generatedEntryMergeKey(entry)
+    const existingIndex = indexByKey.get(key)
+    if (existingIndex === undefined) {
+      indexByKey.set(key, result.length)
+      result.push(entry)
+      continue
+    }
+    const merged = mergeGeneratedEntry(result[existingIndex], entry)
+    result[existingIndex] = merged
+    indexByKey.delete(key)
+    indexByKey.set(generatedEntryMergeKey(merged), existingIndex)
+  }
+  return result
+}
+
 function normalizeChildren(raw: RawGlossaryEntry, pagesByNumber: Map<number, ExtractedPdfPage>): SelfMadeGlossaryChildSource[] {
   const children: SelfMadeGlossaryChildSource[] = []
   const evidence = Array.isArray(raw.evidence) ? raw.evidence as RawGlossaryEvidence[] : []
@@ -896,6 +1052,7 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
     && !hasFormulaSignal(formula)
     && !hasFormulaSignal(displayText)
   if (textOnlyLatexFormula) initialCategory = ja || en ? 'term' : 'reference'
+  if (initialCategory === 'abbreviation' && !looksLikeAcronym(abbr ?? en ?? ja)) initialCategory = en || ja ? 'term' : 'reference'
 
   const classification = applyDeterministicClassification(initialCategory, ja, en, formula, displayText)
 
@@ -922,16 +1079,17 @@ function normalizeEntry(raw: RawGlossaryEntry, document: ExtractedPdfDocument, p
         }
       : undefined,
     formulaConsistency: classification.category === 'formula' ? 'nano_only' : undefined,
-    domain: asOptionalString(raw.domain),
-    note: asOptionalString(raw.note),
-    desc: asOptionalString(raw.desc),
+    domain: undefined,
+    note: undefined,
+    desc: undefined,
     confidence: asConfidence(raw.confidence),
     formalEligible: classification.formalEligible,
     assistiveEligible: classification.assistiveEligible,
     provisional: true,
     disabled: classification.disabled,
+    // LLM の reviewReason は無視する。disabled 用途で人間が読む説明だけ残す。
     reviewReason: classification.reviewReason
-      ?? (textOnlyLatexFormula ? '\\text{...} のみのLaTeXをformula扱いしないため降格' : asOptionalString(raw.reviewReason)),
+      ?? (textOnlyLatexFormula ? '\\text{...} のみのLaTeXをformula扱いしないため降格' : undefined),
     jaConfirmed: false,
     enConfirmed: false,
     promoted: false,
@@ -955,7 +1113,6 @@ function rawEntryFromCandidate(candidate: NormalizedGlossaryCandidate): RawGloss
     enSource: candidate.en ? 'document' : 'missing',
     formula: candidate.formula ?? (candidate.category === 'formula' ? text : ''),
     displayText: candidate.displayText ?? text,
-    desc: '',
     note: '',
     reviewReason: '',
     evidence: [{ page: candidate.page, snippet: candidate.snippet ?? text }],
@@ -1272,41 +1429,22 @@ async function requestFormulaMiniReview(
     message: `${pass}: page ${page.page} mini review started (${entries.length} entries)`,
   })
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        {
-          role: 'system',
-          content: 'You verify formulas and image-visible mathematical notation from a PDF page image. Return strict JSON only.',
-        },
-        {
-          role: 'user',
-          content: buildFormulaMiniUserContent(document, page, entries, themeContext),
-        },
-      ],
-    }),
+  const json = await postGlossaryChatCompletion(connection, `Glossary formula mini review API page ${page.page}`, {
+    model,
+    temperature: 0,
+    ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
+    response_format: resolveJsonResponseFormatForProvider(settings),
+    messages: [
+      {
+        role: 'system',
+        content: 'You verify formulas and image-visible mathematical notation from a PDF page image. Return strict JSON only.',
+      },
+      {
+        role: 'user',
+        content: buildFormulaMiniUserContent(document, page, entries, themeContext),
+      },
+    ],
   })
-
-  const text = await response.text()
-  if (!response.ok) {
-    throw new Error(`Glossary formula mini review API failed: HTTP ${response.status} ${text.slice(0, 500)}`)
-  }
-
-  let json: ChatCompletionResponse
-  try {
-    json = JSON.parse(text) as ChatCompletionResponse
-  } catch (err) {
-    throw new Error(`Glossary formula mini review response JSON parse failed at page ${page.page}: ${err instanceof Error ? err.message : String(err)} / body=${text.slice(0, 500)}`)
-  }
 
   const choice = json.choices?.[0]
   const finishReason = choice?.finish_reason ?? 'unknown'
@@ -1407,41 +1545,22 @@ async function requestCandidateChunk(
     message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: pages ${pageNumbers.join(', ')}`,
   })
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        {
-          role: 'system',
-          content: 'You extract glossary candidates strictly from given PDF text/images. Never translate or invent values. Return strict JSON only.',
-        },
-        {
-          role: 'user',
-          content: buildCandidateUserContent(document, pages, useVision, maxChars, themeContext),
-        },
-      ],
-    }),
+  const json = await postGlossaryChatCompletion(connection, `Glossary candidate extraction API pass=${pass} pages ${pageNumbers.join(', ')}`, {
+    model,
+    temperature: 0,
+    ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
+    response_format: resolveJsonResponseFormatForProvider(settings),
+    messages: [
+      {
+        role: 'system',
+        content: 'You extract glossary candidates strictly from given PDF text/images. Never translate or invent values. Return strict JSON only.',
+      },
+      {
+        role: 'user',
+        content: buildCandidateUserContent(document, pages, useVision, maxChars, themeContext),
+      },
+    ],
   })
-
-  const text = await response.text()
-  if (!response.ok) {
-    throw new Error(`Glossary candidate extraction API failed: HTTP ${response.status} ${text.slice(0, 500)}`)
-  }
-
-  let json: ChatCompletionResponse
-  try {
-    json = JSON.parse(text) as ChatCompletionResponse
-  } catch (err) {
-    throw new Error(`Glossary candidate response JSON parse failed at pages ${pageNumbers.join(', ')}: ${err instanceof Error ? err.message : String(err)} / body=${text.slice(0, 500)}`)
-  }
 
   const choice = json.choices?.[0]
   const finishReason = choice?.finish_reason ?? 'unknown'
@@ -1514,41 +1633,22 @@ async function requestDetailBatch(
     message: `${pass} detail batch ${batchIndex + 1}/${batchCount}: ${candidates.length} candidates`,
   })
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        {
-          role: 'system',
-          content: 'You expand a fixed small list of glossary candidates into strict JSON entries. Do not translate or invent new values.',
-        },
-        {
-          role: 'user',
-          content: buildDetailPrompt(document, candidates, themeContext),
-        },
-      ],
-    }),
+  const json = await postGlossaryChatCompletion(connection, `Glossary detail generation API pass=${pass} batch ${batchIndex + 1}/${batchCount}`, {
+    model,
+    temperature: 0,
+    ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
+    response_format: resolveJsonResponseFormatForProvider(settings),
+    messages: [
+      {
+        role: 'system',
+        content: 'You expand a fixed small list of glossary candidates into strict JSON entries. Do not translate or invent new values.',
+      },
+      {
+        role: 'user',
+        content: buildDetailPrompt(document, candidates, themeContext),
+      },
+    ],
   })
-
-  const text = await response.text()
-  if (!response.ok) {
-    throw new Error(`Glossary detail generation API failed: HTTP ${response.status} ${text.slice(0, 500)}`)
-  }
-
-  let json: ChatCompletionResponse
-  try {
-    json = JSON.parse(text) as ChatCompletionResponse
-  } catch (err) {
-    throw new Error(`Glossary detail response JSON parse failed at batch ${batchIndex + 1}/${batchCount}: ${err instanceof Error ? err.message : String(err)} / body=${text.slice(0, 500)}`)
-  }
 
   const choice = json.choices?.[0]
   const finishReason = choice?.finish_reason ?? 'unknown'
@@ -1638,14 +1738,13 @@ function emitVerificationLog(
   chunkCount: number,
   onProgress?: GlossaryGenerationOptions['onProgress'],
 ): void {
-  if (result.totalRejected === 0) return
   onProgress?.({
     step: 'api_response',
     chunkIndex,
     chunkCount,
     pages,
     pass,
-    message: `${pass} verification: ${result.totalRejected} document claims warned across ${result.changes.length} entries (PDF text 照合で落ちた値は削除せず llm_inferred に降格)`,
+    message: `${pass} verification: ${result.totalEntries} entries, ${result.totalChecked} checked, ${result.totalDocumentClaims} document claims, ${result.totalRejected} warned across ${result.changes.length} entries`,
   })
 }
 
@@ -1675,8 +1774,7 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
 
   const passEntries = await mapWithConcurrency(chunks.length, concurrency, async (i) => {
     const pages = chunks[i]
-    const pageNumbers = pages.map(p => p.page)
-    const candidates = await requestCandidateChunk(
+    return requestCandidateChunk(
       settings,
       document,
       pages,
@@ -1688,71 +1786,134 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
       pass,
       options.onProgress,
     )
-    if (candidates.length === 0) return []
-
-    if (lightweightAssistive) {
-      const normalizedBatch = candidates
-        .map(candidate => normalizeEntry(rawEntryFromCandidate(candidate), document, pagesByNumber))
-        .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
-      if (normalizedBatch.length > 0) {
-        const formulaCheckedBatch = await applyFormulaMiniReviewIfNeeded(
-          settings,
-          document,
-          pages[0],
-          normalizedBatch,
-          themeContext,
-          i,
-          chunks.length,
-          options.onProgress,
-        )
-        const verification = verifyEntriesWithHaystack(formulaCheckedBatch, haystack)
-        emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
-        options.onEntries?.(verification.entries)
-        return verification.entries
-      }
-      return []
-    }
-
-    const pageEntries: SelfMadeGlossaryEntry[] = []
-    const batches = batchCandidates(candidates, LOCAL_DETAIL_BATCH_SIZE)
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-      const raw = await requestDetailBatchWithFallback(
-        settings,
-        document,
-        batches[batchIndex],
-        themeContext,
-        i,
-        chunks.length,
-        batchIndex,
-        batches.length,
-        pass,
-        options.onProgress,
-      )
-      const normalizedBatch = raw
-        .map(entry => normalizeEntry(entry, document, pagesByNumber))
-        .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
-      if (normalizedBatch.length > 0) {
-        pageEntries.push(...normalizedBatch)
-      }
-    }
-    if (pageEntries.length === 0) return pageEntries
-    const formulaCheckedEntries = await applyFormulaMiniReviewIfNeeded(
-      settings,
-      document,
-      pages[0],
-      pageEntries,
-      themeContext,
-      i,
-      chunks.length,
-      options.onProgress,
-    )
-    const verification = verifyEntriesWithHaystack(formulaCheckedEntries, haystack)
-    emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
-    options.onEntries?.(verification.entries)
-    return verification.entries
   })
 
-  entries.push(...passEntries.flat())
+  const allCandidates = passEntries.flat()
+  const filteredCandidates = allCandidates.filter(shouldExpandCandidate)
+  const mergedCandidates = dedupeCandidates(filteredCandidates, 'document')
+  options.onProgress?.({
+    step: 'api_response',
+    chunkIndex: 0,
+    chunkCount: chunks.length,
+    pages: [],
+    pass,
+    message: `${pass} candidate policy: ${allCandidates.length} raw -> ${filteredCandidates.length} after deterministic filter -> ${mergedCandidates.length} after document merge`,
+  })
+
+  if (mergedCandidates.length === 0) {
+    options.onProgress?.({
+      step: 'chunk_done',
+      chunkIndex: chunks.length - 1,
+      chunkCount: chunks.length,
+      pages: [],
+      pass,
+      message: `${pass}: pass completed (0 entries)`,
+    })
+    return []
+  }
+
+  if (lightweightAssistive) {
+    const normalizedBatch = mergedCandidates
+      .map(candidate => normalizeEntry(rawEntryFromCandidate(candidate), document, pagesByNumber))
+      .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
+    const mergedBatch = mergeGeneratedEntries(normalizedBatch)
+    options.onProgress?.({
+      step: 'api_response',
+      chunkIndex: 0,
+      chunkCount: chunks.length,
+      pages: [],
+      pass,
+      message: `${pass} C merge: ${normalizedBatch.length} assistive entries -> ${mergedBatch.length} canonical entries`,
+    })
+    const checkedEntries: SelfMadeGlossaryEntry[] = []
+    const entriesByPage = groupEntriesByPrimaryPage(mergedBatch)
+    for (const [pageNumber, pageEntries] of entriesByPage) {
+      const page = pagesByNumber.get(pageNumber)
+      if (!page) {
+        checkedEntries.push(...pageEntries)
+        continue
+      }
+      checkedEntries.push(...await applyFormulaMiniReviewIfNeeded(
+        settings,
+        document,
+        page,
+        pageEntries,
+        themeContext,
+        pageNumber - 1,
+        chunks.length,
+        options.onProgress,
+      ))
+    }
+    const verification = verifyEntriesWithHaystack(checkedEntries, haystack)
+    emitVerificationLog(verification, [], pass, 0, chunks.length, options.onProgress)
+    options.onEntries?.(verification.entries)
+    entries.push(...verification.entries)
+    options.onProgress?.({
+      step: 'chunk_done',
+      chunkIndex: chunks.length - 1,
+      chunkCount: chunks.length,
+      pages: [],
+      pass,
+      message: `${pass}: pass completed (${entries.length} entries)`,
+    })
+    return entries
+  }
+
+  const rawEntries: RawGlossaryEntry[] = []
+  const batches = batchCandidates(mergedCandidates, LOCAL_DETAIL_BATCH_SIZE)
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const raw = await requestDetailBatchWithFallback(
+      settings,
+      document,
+      batches[batchIndex],
+      themeContext,
+      0,
+      chunks.length,
+      batchIndex,
+      batches.length,
+      pass,
+      options.onProgress,
+    )
+    rawEntries.push(...raw)
+  }
+
+  const normalizedEntries = rawEntries
+    .map(entry => normalizeEntry(entry, document, pagesByNumber))
+    .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
+  const mergedEntries = mergeGeneratedEntries(normalizedEntries)
+  options.onProgress?.({
+    step: 'api_response',
+    chunkIndex: 0,
+    chunkCount: chunks.length,
+    pages: [],
+    pass,
+    message: `${pass} C merge: ${normalizedEntries.length} detailed entries -> ${mergedEntries.length} canonical entries`,
+  })
+  const checkedEntries: SelfMadeGlossaryEntry[] = []
+  const entriesByPage = groupEntriesByPrimaryPage(mergedEntries)
+  for (const [pageNumber, pageEntries] of entriesByPage) {
+    const page = pagesByNumber.get(pageNumber)
+    if (!page) {
+      checkedEntries.push(...pageEntries)
+      continue
+    }
+    checkedEntries.push(...await applyFormulaMiniReviewIfNeeded(
+      settings,
+      document,
+      page,
+      pageEntries,
+      themeContext,
+      pageNumber - 1,
+      chunks.length,
+      options.onProgress,
+    ))
+  }
+
+  const verification = verifyEntriesWithHaystack(checkedEntries, haystack)
+  emitVerificationLog(verification, [], pass, 0, chunks.length, options.onProgress)
+  options.onEntries?.(verification.entries)
+  entries.push(...verification.entries)
+
   options.onProgress?.({
     step: 'chunk_done',
     chunkIndex: chunks.length - 1,
@@ -1763,6 +1924,17 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
   })
 
   return entries
+}
+
+function groupEntriesByPrimaryPage(entries: SelfMadeGlossaryEntry[]): Map<number, SelfMadeGlossaryEntry[]> {
+  const grouped = new Map<number, SelfMadeGlossaryEntry[]>()
+  for (const entry of entries) {
+    const page = entry.children.find(child => typeof child.page === 'number')?.page ?? 0
+    const list = grouped.get(page) ?? []
+    list.push(entry)
+    grouped.set(page, list)
+  }
+  return grouped
 }
 
 async function generateLocalSelfMadeGlossaryFromPdf(

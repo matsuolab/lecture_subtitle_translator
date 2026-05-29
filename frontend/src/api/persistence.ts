@@ -231,7 +231,13 @@ function parseSrt(text: string): SubtitleBlock[] {
 
 // ─── SRT エクスポート ──────────────────────────────────────────────────────
 
-export function exportSrt(blocks: SubtitleBlock[], settings: AdminSettings): void {
+export type SrtExportFormat = 'source' | 'target' | 'both'
+
+export function exportSrt(
+  blocks: SubtitleBlock[],
+  settings: AdminSettings,
+  format: SrtExportFormat = 'source',
+): void {
   let normalizeSource = (text: string) => text
   if (settings.textNormalizationEnabled) {
     try {
@@ -246,12 +252,28 @@ export function exportSrt(blocks: SubtitleBlock[], settings: AdminSettings): voi
     }
   }
 
+  const renderBody = (block: SubtitleBlock): string => {
+    const source = normalizeSource(block.source ?? '').trim()
+    const target = (block.target ?? '').trim()
+    if (format === 'target') return target
+    if (format === 'both') {
+      if (source && target) return `${source}\n${target}`
+      return source || target
+    }
+    return source
+  }
+
+  const filename =
+    format === 'target' ? 'subtitles.target.srt'
+    : format === 'both' ? 'subtitles.bilingual.srt'
+    : 'subtitles.srt'
+
   const lines = blocks.map((block, i) => {
     const start = secondsToSrtTime(block.startTime)
     const end   = secondsToSrtTime(block.endTime)
-    return `${i + 1}\n${start} --> ${end}\n${normalizeSource(block.source)}`
+    return `${i + 1}\n${start} --> ${end}\n${renderBody(block)}`
   })
-  downloadFile(lines.join('\n\n') + '\n', 'subtitles.srt', 'text/plain')
+  downloadFile(lines.join('\n\n') + '\n', filename, 'text/plain')
 }
 
 // ─── 内部ユーティリティ ────────────────────────────────────────────────────
