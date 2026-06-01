@@ -1469,63 +1469,92 @@ export default function App() {
   }, [reset, beginWorkLogSession, t.importSrtError, t.importError, importEntries])
 
   // Tauri: ネイティブDrag&Dropのフォールバック（WindowsビルドでHTML5 D&Dが効かない対策）
+  //
+  // ドロップ処理の本体は ref に保持し、毎レンダー最新の closure を書き込む。
+  // こうすることで onDragDropEvent の登録/解除を「マウント時に 1 回」だけに固定できる。
+  // （依存配列に reset / importEntries 等の useCallback を並べると、字幕編集のたびに
+  //   effect が再実行され、登録/解除が繰り返されて Tauri の unregisterListener が
+  //   例外を投げ、main.tsx のグローバルハンドラがアプリ全体を潰す原因になっていた。）
+  const handleNativeDropRef = useRef<(path: string) => Promise<void>>(async () => {})
+  handleNativeDropRef.current = async (path: string) => {
+    const name = path.toLowerCase()
+    try {
+      if (isVideoPathLike(name)) {
+        handleVideoPathInput(path)
+        return
+      }
+      if (name.endsWith('.srt') || name.endsWith('.txt')) {
+        const imported = await importSrt(await readTextFileAsFile(path))
+        reset(imported)
+        beginWorkLogSession('srt_import', imported)
+        return
+      }
+      if (name.endsWith('.json')) {
+        const imported = await importProjectJson(await readTextFileAsFile(path))
+        reset(imported)
+        beginWorkLogSession('json_import', imported)
+        return
+      }
+      if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
+        setActiveTab('dictionary')
+        let entries
+        if (name.endsWith('.csv')) {
+          const { parseGlossaryCsv } = await import('@/lib/glossary/csvParser')
+          const file = await readTextFileAsFile(path)
+          entries = parseGlossaryCsv(await file.text())
+        } else {
+          const { convertMatsuoLabXlsx } = await import('@/lib/glossary/xlsxConverter')
+          entries = await convertMatsuoLabXlsx(await readBinaryFileAsFile(path))
+        }
+        importEntries(entries)
+        return
+      }
+      alert(`非対応のファイル形式です: ${path}
+対応形式: .srt, .txt, .json, .csv, .xlsx, ${VIDEO_EXTENSIONS.join(', ')}`)
+    } catch (err) {
+      alert(`読み込みに失敗しました: ${describeError(err)}`)
+    }
+  }
+
   useEffect(() => {
     if (!isTauri()) return
     let cancelled = false
     let unlisten: (() => void) | null = null
-    getCurrentWebview().onDragDropEvent(async (event) => {
-      if (cancelled) return
-      if (event.payload.type !== 'drop') return
-      if (Date.now() - lastHtmlDropRef.current < 500) return
-      const paths = event.payload.paths
-      if (!paths || paths.length === 0) return
-      const path = paths[0]
-      const name = path.toLowerCase()
-      try {
-        if (isVideoPathLike(name)) {
-          handleVideoPathInput(path)
-          return
-        }
-        if (name.endsWith('.srt') || name.endsWith('.txt')) {
-          const imported = await importSrt(await readTextFileAsFile(path))
-          reset(imported)
-          beginWorkLogSession('srt_import', imported)
-          return
-        }
-        if (name.endsWith('.json')) {
-          const imported = await importProjectJson(await readTextFileAsFile(path))
-          reset(imported)
-          beginWorkLogSession('json_import', imported)
-          return
-        }
-        if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
-          setActiveTab('dictionary')
-          let entries
-          if (name.endsWith('.csv')) {
-            const { parseGlossaryCsv } = await import('@/lib/glossary/csvParser')
-            const file = await readTextFileAsFile(path)
-            entries = parseGlossaryCsv(await file.text())
-          } else {
-            const { convertMatsuoLabXlsx } = await import('@/lib/glossary/xlsxConverter')
-            entries = await convertMatsuoLabXlsx(await readBinaryFileAsFile(path))
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (cancelled) return
+        if (event.payload.type !== 'drop') return
+        if (Date.now() - lastHtmlDropRef.current < 500) return
+        const paths = event.payload.paths
+        if (!paths || paths.length === 0) return
+        void handleNativeDropRef.current(paths[0])
+      })
+      .then((fn) => {
+        // すでにアンマウント済みなら即解除（解除自体の失敗は無視）
+        if (cancelled) {
+          try {
+            fn()
+          } catch (err) {
+            console.error('drag-drop unlisten (post-unmount) failed', err)
           }
-          importEntries(entries)
-          return
+        } else {
+          unlisten = fn
         }
-        alert(`非対応のファイル形式です: ${path}
-対応形式: .srt, .txt, .json, .csv, .xlsx, ${VIDEO_EXTENSIONS.join(', ')}`)
-      } catch (err) {
-        alert(`読み込みに失敗しました: ${describeError(err)}`)
-      }
-    }).then(fn => {
-      if (cancelled) fn()  // すでにアンマウント済みなら即解除
-      else unlisten = fn
-    })
+      })
+      .catch((err) => {
+        console.error('onDragDropEvent register failed', err)
+      })
     return () => {
       cancelled = true
-      unlisten?.()
+      // Tauri の unregisterListener は不整合な状態で同期 throw することがある。
+      // ここで握りつぶさないと main.tsx のグローバルハンドラが全画面エラーを出す。
+      try {
+        unlisten?.()
+      } catch (err) {
+        console.error('drag-drop unlisten failed', err)
+      }
     }
-  }, [reset, beginWorkLogSession, importEntries, handleVideoPathInput, readTextFileAsFile, readBinaryFileAsFile])
+  }, [])
 
   const handleLoadVideo = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]

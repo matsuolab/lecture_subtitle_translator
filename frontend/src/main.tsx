@@ -70,14 +70,24 @@ function renderFatal(error: unknown) {
   )
 }
 
+// 初回描画が完了するまでの間だけ、未捕捉エラーで全画面 fatal を出す。
+// 描画完了後（=通常運用中）の一過性エラーまで全画面を潰すと、本来トーストや
+// try/catch で吸収できる軽微なエラーで「アプリが落ちた」体験になってしまうため、
+// 起動後はログ出力のみに留める。
+let appBooted = false
+
 window.addEventListener('error', (event) => {
-  console.error('Unhandled startup error', event.error ?? event.message)
-  renderFatal(event.error ?? event.message)
+  console.error('Unhandled error', event.error ?? event.message)
+  if (!appBooted) {
+    renderFatal(event.error ?? event.message)
+  }
 })
 
 window.addEventListener('unhandledrejection', (event) => {
-  console.error('Unhandled startup rejection', event.reason)
-  renderFatal(event.reason)
+  console.error('Unhandled rejection', event.reason)
+  if (!appBooted) {
+    renderFatal(event.reason)
+  }
 })
 
 root.render(
@@ -95,3 +105,11 @@ root.render(
     </StartupErrorBoundary>
   </StrictMode>,
 )
+
+// 描画スケジュール後の次フレームで「起動完了」とみなす。
+// 以降の未捕捉エラーは全画面 fatal にせずログのみとする。
+requestAnimationFrame(() => {
+  requestAnimationFrame(() => {
+    appBooted = true
+  })
+})
