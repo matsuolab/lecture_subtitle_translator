@@ -1,12 +1,8 @@
 import type { AdminSettings } from '@/types/adminSettings'
+import { createAiGateway } from '@/lib/aiGateway'
 import { requireAiConnection } from './aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
 
 const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small'
-
-interface EmbeddingResponse {
-  data?: Array<{ embedding?: number[] }>
-}
 
 /**
  * Embedding 計算が利用可能かを判定。
@@ -34,40 +30,8 @@ export async function fetchEmbeddings(
   if (texts.length === 0) return []
   if (!isSemanticCheckAvailable(settings)) return null
 
-  const connection = requireAiConnection(settings, 'semantic check')
   const model = settings.embeddingModel?.trim() || DEFAULT_EMBEDDING_MODEL
-
-  try {
-    const response = await tauriFetch(`${connection.baseUrl}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model,
-        input: texts,
-      }),
-    })
-
-    if (!response.ok) {
-      return null
-    }
-
-    const payload = await response.json<EmbeddingResponse>()
-    const data = payload.data ?? []
-    if (data.length !== texts.length) return null
-
-    const vectors: number[][] = []
-    for (const item of data) {
-      const v = item.embedding
-      if (!Array.isArray(v) || v.length === 0) return null
-      vectors.push(v)
-    }
-    return vectors
-  } catch {
-    return null
-  }
+  return createAiGateway(settings).embeddings({ model, input: texts })
 }
 
 /**

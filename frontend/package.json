@@ -2,10 +2,12 @@
   "name": "subtitle-editor",
   "private": true,
   "version": "0.4.14",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "check": "tsc -b && vitest run --config vitest.config.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts",

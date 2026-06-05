@@ -1,7 +1,10 @@
+import type { ModelProfilePresetId } from './modelProfile'
+
 export type TranslationProvider = 'openai' | 'gemini' | 'local_openai'
 export type ServiceMode = 'managed_service' | 'legacy_pipeline'
 export type SemanticCheckMode = 'off' | 'log_only' | 'enforce'
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+export type { ModelProfilePresetId } from './modelProfile'
 
 export interface AdminSettings {
   serviceMode: ServiceMode
@@ -12,6 +15,14 @@ export interface AdminSettings {
   geminiApiKey: string
   openaiCompatibleBaseUrl: string
   translationProvider: TranslationProvider
+  modelProfilePreset: ModelProfilePresetId
+  modelProfileJson: string
+  chatTextProfilePreset: ModelProfilePresetId
+  chatTextProfileJson: string
+  chatVisionProfilePreset: ModelProfilePresetId
+  chatVisionProfileJson: string
+  embeddingProfilePreset: ModelProfilePresetId
+  embeddingProfileJson: string
   translationModel: string
   correctionModel: string
   pdfExtractionUseVision: boolean

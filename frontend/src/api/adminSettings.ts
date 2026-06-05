@@ -1,4 +1,4 @@
-import type { AdminSettings, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
 import {
@@ -24,6 +24,13 @@ const SHARED_SETTINGS_EXCLUDED_FIELDS = [
   'geminiApiKey',
   'workLogDir',
 ] satisfies Array<keyof AdminSettings>
+const OPTIONAL_SHARED_SETTINGS_EXCLUDED_FIELDS = [
+  'openaiCompatibleBaseUrl',
+] satisfies Array<keyof AdminSettings>
+
+export interface SharedAdminSettingsExportOptions {
+  includeOpenAiCompatibleBaseUrl?: boolean
+}
 
 export interface SharedAdminSettingsExport {
   version: number
@@ -43,6 +50,14 @@ export function getDefaultAdminSettings(): AdminSettings {
     geminiApiKey: '',
     openaiCompatibleBaseUrl: '',
     translationProvider: DEFAULT_TRANSLATION_PROVIDER,
+    modelProfilePreset: 'auto',
+    modelProfileJson: '',
+    chatTextProfilePreset: 'auto',
+    chatTextProfileJson: '',
+    chatVisionProfilePreset: 'auto',
+    chatVisionProfileJson: '',
+    embeddingProfilePreset: 'auto',
+    embeddingProfileJson: '',
     translationModel: 'gpt-5.4-mini',
     correctionModel: 'gpt-5.4-mini',
     pdfExtractionUseVision: false,
@@ -61,8 +76,8 @@ export function getDefaultAdminSettings(): AdminSettings {
     subtitleMaxDurationSec: 7.0,
     qualityCorrectionThreshold: 0.15,
     pipelineShortDurationSec: 1.5,
-    pipelineLongDurationSec: 10.0,
-    pipelineMergedLongDurationSec: 7.0,
+    pipelineLongDurationSec: 14.0,
+    pipelineMergedLongDurationSec: 12.0,
     pipelineVerboseEnRatio: 1.5,
     pipelineOverCompressedRatio: 0.25,
     pipelineOverCompressedJaChars: 15,
@@ -130,6 +145,20 @@ function normalizeTranslationProvider(value: unknown): TranslationProvider {
   return DEFAULT_TRANSLATION_PROVIDER
 }
 
+function normalizeModelProfilePreset(value: unknown): ModelProfilePresetId {
+  if (
+    value === 'auto'
+    || value === 'openai'
+    || value === 'gemma'
+    || value === 'qwen'
+    || value === 'deepseek'
+    || value === 'non_reasoning'
+  ) {
+    return value
+  }
+  return 'auto'
+}
+
 function normalizeSemanticCheckMode(value: unknown): SemanticCheckMode {
   if (value === 'off' || value === 'log_only' || value === 'enforce') return value
   return 'log_only'
@@ -163,6 +192,14 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     geminiApiKey: typeof raw.geminiApiKey === 'string' ? raw.geminiApiKey : '',
     openaiCompatibleBaseUrl: typeof raw.openaiCompatibleBaseUrl === 'string' ? raw.openaiCompatibleBaseUrl : '',
     translationProvider: normalizeTranslationProvider(raw.translationProvider),
+    modelProfilePreset: normalizeModelProfilePreset(raw.modelProfilePreset),
+    modelProfileJson: typeof raw.modelProfileJson === 'string' ? raw.modelProfileJson : '',
+    chatTextProfilePreset: normalizeModelProfilePreset(raw.chatTextProfilePreset ?? raw.modelProfilePreset),
+    chatTextProfileJson: typeof raw.chatTextProfileJson === 'string' ? raw.chatTextProfileJson : typeof raw.modelProfileJson === 'string' ? raw.modelProfileJson : '',
+    chatVisionProfilePreset: normalizeModelProfilePreset(raw.chatVisionProfilePreset ?? raw.modelProfilePreset),
+    chatVisionProfileJson: typeof raw.chatVisionProfileJson === 'string' ? raw.chatVisionProfileJson : typeof raw.modelProfileJson === 'string' ? raw.modelProfileJson : '',
+    embeddingProfilePreset: normalizeModelProfilePreset(raw.embeddingProfilePreset ?? raw.modelProfilePreset),
+    embeddingProfileJson: typeof raw.embeddingProfileJson === 'string' ? raw.embeddingProfileJson : typeof raw.modelProfileJson === 'string' ? raw.modelProfileJson : '',
     translationModel: typeof raw.translationModel === 'string' && raw.translationModel ? raw.translationModel : defaults.translationModel,
     correctionModel: typeof raw.correctionModel === 'string' && raw.correctionModel ? raw.correctionModel : defaults.correctionModel,
     pdfExtractionUseVision: typeof raw.pdfExtractionUseVision === 'boolean' ? raw.pdfExtractionUseVision : defaults.pdfExtractionUseVision,
@@ -239,21 +276,35 @@ export function saveAdminSettings(settings: AdminSettings): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeAdminSettings(settings)))
 }
 
-function stripUnshareableAdminSettings(settings: AdminSettings): Partial<AdminSettings> {
+function resolveSharedSettingsExcludedFields(options: SharedAdminSettingsExportOptions = {}): Array<keyof AdminSettings> {
+  return [
+    ...SHARED_SETTINGS_EXCLUDED_FIELDS,
+    ...(options.includeOpenAiCompatibleBaseUrl ? [] : OPTIONAL_SHARED_SETTINGS_EXCLUDED_FIELDS),
+  ]
+}
+
+function stripUnshareableAdminSettings(
+  settings: AdminSettings,
+  options: SharedAdminSettingsExportOptions = {},
+): Partial<AdminSettings> {
   const shared: Partial<AdminSettings> = { ...settings }
-  for (const field of SHARED_SETTINGS_EXCLUDED_FIELDS) {
+  for (const field of resolveSharedSettingsExcludedFields(options)) {
     delete shared[field]
   }
   return shared
 }
 
-export function createSharedAdminSettingsExport(settings: AdminSettings): SharedAdminSettingsExport {
+export function createSharedAdminSettingsExport(
+  settings: AdminSettings,
+  options: SharedAdminSettingsExportOptions = {},
+): SharedAdminSettingsExport {
+  const excludedFields = resolveSharedSettingsExcludedFields(options)
   return {
     version: SHARED_SETTINGS_VERSION,
     exportedAt: new Date().toISOString(),
     kind: 'subtitle-editor-admin-settings',
-    excludedFields: [...SHARED_SETTINGS_EXCLUDED_FIELDS],
-    settings: stripUnshareableAdminSettings(normalizeAdminSettings(settings)),
+    excludedFields: [...excludedFields],
+    settings: stripUnshareableAdminSettings(normalizeAdminSettings(settings), options),
   }
 }
 
@@ -270,5 +321,5 @@ export function parseSharedAdminSettingsExport(text: string): Partial<AdminSetti
     : parsed
 
   const normalized = normalizeAdminSettings(rawSettings)
-  return stripUnshareableAdminSettings(normalized)
+  return stripUnshareableAdminSettings(normalized, { includeOpenAiCompatibleBaseUrl: true })
 }

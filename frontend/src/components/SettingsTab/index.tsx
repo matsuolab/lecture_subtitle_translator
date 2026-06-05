@@ -5,8 +5,10 @@ import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useToast } from '@/context/ToastContext'
-import type { AdminSettings, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ModelProfilePresetId, ServiceMode, TranslationProvider } from '@/types/adminSettings'
 import { createSharedAdminSettingsExport, parseSharedAdminSettingsExport } from '@/api/adminSettings'
+import { createAiGateway } from '@/lib/aiGateway'
+import type { AiGatewayProbeName } from '@/lib/aiGateway'
 import {
   DEFAULT_GEMINI_CHAT_MODEL,
   DEFAULT_OPENAI_CHAT_MODEL,
@@ -27,6 +29,12 @@ type ServiceCheckState = {
   message: string
 }
 
+type AiGatewayProbeItem = {
+  name: AiGatewayProbeName
+  status: 'checking' | 'success' | 'error'
+  message: string
+}
+
 type SettingsTabProps = {
   adminSettings: AdminSettings
   serviceCheck: ServiceCheckState
@@ -38,6 +46,15 @@ type SettingsTabProps = {
 const serviceModeOptions: Array<{ value: ServiceMode; label: string }> = [
   { value: 'managed_service', label: 'AWS / リモート実行' },
   { value: 'legacy_pipeline', label: 'このPCで実行' },
+]
+
+const modelProfilePresetOptions: Array<{ value: ModelProfilePresetId; label: string }> = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'gemma', label: 'Gemma' },
+  { value: 'qwen', label: 'Qwen' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'non_reasoning', label: 'Non reasoning' },
 ]
 
 export function SettingsTab({
@@ -64,6 +81,8 @@ export function SettingsTab({
   const [normalizationPreview, setNormalizationPreview] = React.useState('It’s “machine learning” with\u00A0NBSP.')
   const [normalizationMatchInput, setNormalizationMatchInput] = React.useState('')
   const [normalizationReplacementInput, setNormalizationReplacementInput] = React.useState('')
+  const [aiGatewayProbeItems, setAiGatewayProbeItems] = React.useState<AiGatewayProbeItem[]>([])
+  const [aiGatewayProbeRunning, setAiGatewayProbeRunning] = React.useState(false)
   const sharedSettingsImportRef = React.useRef<HTMLInputElement>(null)
   const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
   const normalizationValidation = React.useMemo(
@@ -111,6 +130,28 @@ export function SettingsTab({
       setModelRefreshState('idle')
     } catch {
       setModelRefreshState('error')
+    }
+  }
+
+  async function handleAiGatewayProbe() {
+    setAiGatewayProbeRunning(true)
+    setAiGatewayProbeItems([
+      { name: 'Connection', status: 'checking', message: 'checking /models' },
+      { name: 'Chat Text', status: 'checking', message: 'waiting' },
+      { name: 'Embeddings', status: 'checking', message: 'waiting' },
+      { name: 'Chat Vision', status: 'checking', message: 'waiting' },
+    ])
+
+    try {
+      const results = await createAiGateway(adminSettings).probeAll()
+      setAiGatewayProbeItems(results)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setAiGatewayProbeItems(prev => prev.map(item => (
+        item.status === 'checking' ? { ...item, status: 'error', message } : item
+      )))
+    } finally {
+      setAiGatewayProbeRunning(false)
     }
   }
 
@@ -215,7 +256,8 @@ export function SettingsTab({
   }
 
   function exportSharedAdminSettings() {
-    const payload = createSharedAdminSettingsExport(adminSettings)
+    const includeOpenAiCompatibleBaseUrl = window.confirm('OpenAI互換 Base URL も共有設定に含めますか？\nローカルPC固有のURLや社内URLを含めたくない場合はキャンセルしてください。')
+    const payload = createSharedAdminSettingsExport(adminSettings, { includeOpenAiCompatibleBaseUrl })
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -451,8 +493,8 @@ export function SettingsTab({
             />
           </div>
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-            プロンプト、例文、モデル、閾値、接続先URLなどを共有します。Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
-            共有先では各種キーだけ個別に入力してください。
+            プロンプト、例文、モデル、プロファイル、閾値を共有します。OpenAI互換 Base URL は出力時に含めるか選択します。
+            Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
           </div>
         </FieldCard>
         <FieldCard theme={theme}>
@@ -601,6 +643,53 @@ export function SettingsTab({
               ? 'LM Studio・Ollama などのローカルサーバーや、Azure OpenAI・Groq などの OpenAI 互換サービスを使います。APIキーはサービス側で要求される場合のみ入力してください。'
               : '翻訳、補正、短縮、分割、文脈統合などのLLM処理に使うプロバイダとAPIキーです。入力したキーはこのPCの設定として保存されます。'}
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={() => void handleAiGatewayProbe()}
+              disabled={aiGatewayProbeRunning}
+              style={{
+                padding: '8px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textPrimary,
+                cursor: aiGatewayProbeRunning ? 'wait' : 'pointer',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              {aiGatewayProbeRunning ? 'Checking...' : 'AI Gateway 接続チェック'}
+            </button>
+          </div>
+          {aiGatewayProbeItems.length > 0 && (
+            <div style={{ display: 'grid', gap: 6 }}>
+              {aiGatewayProbeItems.map(item => {
+                const color = item.status === 'success'
+                  ? '#22c55e'
+                  : item.status === 'error'
+                    ? '#ef4444'
+                    : theme.textSecondary
+                return (
+                  <div
+                    key={item.name}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '92px 70px minmax(0, 1fr)',
+                      gap: 8,
+                      alignItems: 'center',
+                      fontSize: 11,
+                      color: theme.textSecondary,
+                    }}
+                  >
+                    <span style={{ color: theme.textPrimary, fontWeight: 600 }}>{item.name}</span>
+                    <span style={{ color, fontWeight: 700 }}>{item.status}</span>
+                    <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{item.message}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </FieldCard>
 
         <FieldCard theme={theme}>
@@ -691,6 +780,47 @@ export function SettingsTab({
             listId="available-models-list"
             hint="空欄 = text-embedding-3-small"
             onChange={(value) => onAdminSettingsChange({ embeddingModel: value })}
+          />
+          <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+            <ModelProfileSelect
+              theme={theme}
+              label="Chat Text プロファイル"
+              value={adminSettings.chatTextProfilePreset}
+              onChange={(value) => onAdminSettingsChange({ chatTextProfilePreset: value })}
+            />
+            <ModelProfileSelect
+              theme={theme}
+              label="Chat Vision プロファイル"
+              value={adminSettings.chatVisionProfilePreset}
+              onChange={(value) => onAdminSettingsChange({ chatVisionProfilePreset: value })}
+            />
+            <ModelProfileSelect
+              theme={theme}
+              label="Embedding プロファイル"
+              value={adminSettings.embeddingProfilePreset}
+              onChange={(value) => onAdminSettingsChange({ embeddingProfilePreset: value })}
+            />
+          </div>
+          <TextareaField
+            theme={theme}
+            label="Chat Text カスタムプロファイルJSON"
+            value={adminSettings.chatTextProfileJson}
+            placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+            onChange={(value) => onAdminSettingsChange({ chatTextProfileJson: value })}
+          />
+          <TextareaField
+            theme={theme}
+            label="Chat Vision カスタムプロファイルJSON"
+            value={adminSettings.chatVisionProfileJson}
+            placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+            onChange={(value) => onAdminSettingsChange({ chatVisionProfileJson: value })}
+          />
+          <TextareaField
+            theme={theme}
+            label="Embedding カスタムプロファイルJSON"
+            value={adminSettings.embeddingProfileJson}
+            placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+            onChange={(value) => onAdminSettingsChange({ embeddingProfileJson: value })}
           />
           <ComboField
             theme={theme}
@@ -1670,6 +1800,41 @@ function SelectField({
         }}
       >
         {options.map(option => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function ModelProfileSelect({
+  theme,
+  label,
+  value,
+  onChange,
+}: {
+  theme: Theme
+  label: string
+  value: ModelProfilePresetId
+  onChange: (value: ModelProfilePresetId) => void
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as ModelProfilePresetId)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+        }}
+      >
+        {modelProfilePresetOptions.map(option => (
           <option key={option.value} value={option.value}>{option.label}</option>
         ))}
       </select>

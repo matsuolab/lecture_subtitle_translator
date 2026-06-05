@@ -1,37 +1,12 @@
 import type { AdminSettings } from '@/types/adminSettings'
+import { createAiGateway } from '@/lib/aiGateway'
 import type { EnBlock, JaBlock, ViolationCode } from './blockTypes'
 import { computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
 import { DEFAULT_TRANSLATION_FEW_SHOT_JSON, pickTranslateSystemPrompt, resolveTranslateModelId } from './prompts'
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
-import { safePush, getCurrentLlmUsageSink } from './llmUsageSink'
-
-/**
- * OpenAI Chat Completions レスポンスから usage を抽出し、現在の usage sink に push する共通ヘルパ。
- * 失敗時（usage 未取得）は safePush 側でスキップされる。
- */
-function pushUsageFromResponse(nodeId: string, model: string, payload: unknown, durationMs: number): void {
-  const usage = (payload as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined
-  if (!usage) return
-  const promptTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0
-  const completionTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0
-  const completionDetails = usage.completion_tokens_details as Record<string, unknown> | undefined
-  const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
-  const promptDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined
-  const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
-  safePush(getCurrentLlmUsageSink(), {
-    nodeId,
-    model,
-    promptTokens,
-    completionTokens,
-    reasoningTokens,
-    cachedInputTokens,
-    durationMs,
-  })
-}
 
 const MAX_SEGMENTS_PER_REQUEST = 40
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
@@ -97,8 +72,7 @@ function computeJaRatio(text: string): number {
 }
 
 function resolveApiConfig(settings: AdminSettings): {
-  apiKey: string
-  baseUrl: string
+  settings: AdminSettings
   providerLabel: string
   model: string
   systemPrompt: string
@@ -113,8 +87,7 @@ function resolveApiConfig(settings: AdminSettings): {
     ? LOCAL_MAX_SEGMENTS_PER_REQUEST
     : MAX_SEGMENTS_PER_REQUEST
   return {
-    apiKey: connection.apiKey,
-    baseUrl: connection.baseUrl,
+    settings,
     providerLabel: connection.providerLabel,
     model,
     systemPrompt: pickTranslateSystemPrompt(model, settings.translationAdditionalInstructions),
@@ -254,67 +227,52 @@ async function callOpenAICompatible(
   const glossaryInstruction = glossaryTerms.length > 0
     ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
     : ''
-  const callStartedAt = Date.now()
-  const response = await tauriFetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: 0.0,
-      messages: [
-        { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            segments: config.fewShotSegments,
-          }),
-        },
-        {
-          role: 'assistant',
-          content: JSON.stringify({
-            translations: config.fewShotTranslations,
-          }),
-        },
-        {
-          role: 'user',
-          content: JSON.stringify(buildTranslationUserPayload(inputs)),
-        },
-      ],
-    }),
+  const result = await createAiGateway(config.settings).chatText({
+    nodeName: 'translateEn[batch]',
+    model: config.model,
+    temperature: 0.0,
+    responseFormat: 'omit',
+    messages: [
+      { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          segments: config.fewShotSegments,
+        }),
+      },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          translations: config.fewShotTranslations,
+        }),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify(buildTranslationUserPayload(inputs)),
+      },
+    ],
   })
 
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`translation API returned HTTP ${response.status}: ${detail}`)
+  if (result.finishReason === 'length') {
+    throw new TranslationRetryableError(`translation API stopped because output length was reached. content=${result.content.slice(0, 500)}`)
   }
-
-  const payload = await response.json()
-  pushUsageFromResponse('translateEn[batch]', config.model, payload, Date.now() - callStartedAt)
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const finishReason = payload?.choices?.[0]?.finish_reason
-  if (finishReason === 'length') {
-    throw new TranslationRetryableError(`translation API stopped because output length was reached. content=${content.slice(0, 500)}`)
-  }
-  if (!content.trim()) {
-    throw new TranslationRetryableError(`translation API response did not include message content. payload=${summarizeTranslationPayload(payload)}`)
+  if (result.errorMessage || !result.content.trim()) {
+    throw new TranslationRetryableError(`translation API response did not include message content. error=${result.errorMessage ?? 'empty_response'}`)
   }
 
   let parsed: Record<string, unknown>
   try {
-    parsed = parseJsonObjectFromLlmContent(content, 'translation')
+    parsed = parseJsonObjectFromLlmContent(result.content, 'translation')
   } catch (error) {
     throw new TranslationRetryableError(
-      `${error instanceof Error ? error.message : String(error)}. content=${content.slice(0, 500)}`,
+      `${error instanceof Error ? error.message : String(error)}. content=${result.content.slice(0, 500)}`,
     )
   }
 
   const translations = parsed.translations
   if (!Array.isArray(translations) || !translations.every((item) => typeof item === 'string')) {
     throw new TranslationRetryableError(
-      `translation response was not valid JSON with a translations array. content=${content.slice(0, 500)}`,
+      `translation response was not valid JSON with a translations array. content=${result.content.slice(0, 500)}`,
     )
   }
   if (translations.length !== inputs.length) {
@@ -333,84 +291,69 @@ async function callContextGroupAllocation(
   const glossaryInstruction = glossaryTerms.length > 0
     ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
     : ''
-  const callStartedAt = Date.now()
-  const response = await tauriFetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: 0.0,
-      messages: [
-        { role: 'system', content: withContextGroupAllocationInstruction(config.systemPrompt) + glossaryInstruction },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            context_groups: [
-              {
-                id: 'example-1',
-                text: 'それを防ぐために、 ペナルティがかかるような目的関数を設計してやるというのがL2正則化になります。',
-                items: [
-                  { index: 0, role: 'lead', duration_sec: 3.6, text: 'それを防ぐために、' },
-                  { index: 1, role: 'middle', duration_sec: 3.9, text: 'ペナルティがかかるような目的関数を設' },
-                  { index: 2, role: 'tail', duration_sec: 3.2, text: '計してやるというのがL2正則化になります。' },
-                ],
-              },
-            ],
-          }),
-        },
-        {
-          role: 'assistant',
-          content: JSON.stringify({
-            groups: [
-              {
-                id: 'example-1',
-                translations: [
-                  'To prevent that,',
-                  'we design an objective function with a penalty.',
-                  'That is L2 regularization.',
-                ],
-              },
-            ],
-          }),
-        },
-        {
-          role: 'user',
-          content: JSON.stringify(buildContextGroupTranslationPayload(groups)),
-        },
-      ],
-    }),
+  const result = await createAiGateway(config.settings).chatText({
+    nodeName: 'translateEn[contextGroupAllocation]',
+    model: config.model,
+    temperature: 0.0,
+    responseFormat: 'omit',
+    messages: [
+      { role: 'system', content: withContextGroupAllocationInstruction(config.systemPrompt) + glossaryInstruction },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          context_groups: [
+            {
+              id: 'example-1',
+              text: 'それを防ぐために、 ペナルティがかかるような目的関数を設計してやるというのがL2正則化になります。',
+              items: [
+                { index: 0, role: 'lead', duration_sec: 3.6, text: 'それを防ぐために、' },
+                { index: 1, role: 'middle', duration_sec: 3.9, text: 'ペナルティがかかるような目的関数を設' },
+                { index: 2, role: 'tail', duration_sec: 3.2, text: '計してやるというのがL2正則化になります。' },
+              ],
+            },
+          ],
+        }),
+      },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          groups: [
+            {
+              id: 'example-1',
+              translations: [
+                'To prevent that,',
+                'we design an objective function with a penalty.',
+                'That is L2 regularization.',
+              ],
+            },
+          ],
+        }),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify(buildContextGroupTranslationPayload(groups)),
+      },
+    ],
   })
 
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new TranslationRetryableError(`context group translation API returned HTTP ${response.status}: ${detail.slice(0, 500)}`)
+  if (result.finishReason === 'length') {
+    throw new TranslationRetryableError(`context group translation stopped because output length was reached. content=${result.content.slice(0, 500)}`)
   }
-
-  const payload = await response.json()
-  pushUsageFromResponse('translateEn[contextGroupAllocation]', config.model, payload, Date.now() - callStartedAt)
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const finishReason = payload?.choices?.[0]?.finish_reason
-  if (finishReason === 'length') {
-    throw new TranslationRetryableError(`context group translation stopped because output length was reached. content=${content.slice(0, 500)}`)
-  }
-  if (!content.trim()) {
-    throw new TranslationRetryableError(`context group translation response did not include message content. payload=${summarizeTranslationPayload(payload)}`)
+  if (result.errorMessage || !result.content.trim()) {
+    throw new TranslationRetryableError(`context group translation response did not include message content. error=${result.errorMessage ?? 'empty_response'}`)
   }
 
   let parsed: Record<string, unknown>
   try {
-    parsed = parseJsonObjectFromLlmContent(content, 'context group translation')
+    parsed = parseJsonObjectFromLlmContent(result.content, 'context group translation')
   } catch (error) {
     throw new TranslationRetryableError(
-      `${error instanceof Error ? error.message : String(error)}. content=${content.slice(0, 500)}`,
+      `${error instanceof Error ? error.message : String(error)}. content=${result.content.slice(0, 500)}`,
     )
   }
 
   if (!Array.isArray(parsed.groups)) {
-    throw new TranslationRetryableError(`context group translation response did not include groups array. content=${content.slice(0, 500)}`)
+    throw new TranslationRetryableError(`context group translation response did not include groups array. content=${result.content.slice(0, 500)}`)
   }
 
   const expected = new Map(groups.map(group => [group.id, group]))
@@ -498,86 +441,55 @@ async function callTranslationOnce(
   const glossaryInstruction = glossaryTerms.length > 0
     ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
     : ''
-  const callStartedAt = Date.now()
-  let response: Awaited<ReturnType<typeof tauriFetch>>
-  try {
-    response = await tauriFetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+  const result = await createAiGateway(config.settings).chatText({
+    nodeName: 'translateEn[single]',
+    model: config.model,
+    temperature: 0.0,
+    responseFormat: 'omit',
+    messages: [
+      { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          segments: config.fewShotSegments,
+        }),
       },
-      body: JSON.stringify({
-        model: config.model,
-        temperature: 0.0,
-        messages: [
-          { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              segments: config.fewShotSegments,
-            }),
-          },
-          {
-            role: 'assistant',
-            content: JSON.stringify({
-              translations: config.fewShotTranslations,
-            }),
-          },
-          {
-            role: 'user',
-            content: JSON.stringify(buildTranslationUserPayload([input])),
-          },
-        ],
-      }),
-    })
-  } catch (err) {
-    return { translation: '', errorMessage: `fetch_failed: ${err instanceof Error ? err.message : String(err)}` }
-  }
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    return { translation: '', errorMessage: `http_${response.status}: ${detail.slice(0, 200)}` }
-  }
-
-  let payload: Record<string, unknown>
-  try {
-    payload = (await response.json()) as Record<string, unknown>
-  } catch (err) {
-    return { translation: '', errorMessage: `json_response_parse_failed: ${err instanceof Error ? err.message : String(err)}` }
-  }
-  pushUsageFromResponse('translateEn[single]', config.model, payload, Date.now() - callStartedAt)
-
-  const choices = Array.isArray(payload.choices) ? payload.choices : []
-  const firstChoice = choices[0] as Record<string, unknown> | undefined
-  const finishReason = typeof firstChoice?.finish_reason === 'string' ? firstChoice.finish_reason : undefined
-  const message = firstChoice?.message as Record<string, unknown> | undefined
-  const refusal = typeof message?.refusal === 'string' ? message.refusal : null
-  const content: string = typeof message?.content === 'string' ? message.content : ''
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          translations: config.fewShotTranslations,
+        }),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify(buildTranslationUserPayload([input])),
+      },
+    ],
+  })
 
   // 即諦め分岐: content_filter / refusal / length
-  if (finishReason === 'content_filter') {
-    return { translation: '', finishReason, refusal, errorMessage: 'content_filter' }
+  if (result.finishReason === 'content_filter') {
+    return { translation: '', finishReason: result.finishReason, refusal: result.refusal, errorMessage: 'content_filter' }
   }
-  if (refusal) {
-    return { translation: '', finishReason, refusal, errorMessage: `model_refusal: ${refusal.slice(0, 200)}` }
+  if (result.refusal) {
+    return { translation: '', finishReason: result.finishReason, refusal: result.refusal, errorMessage: `model_refusal: ${result.refusal.slice(0, 200)}` }
   }
-  if (finishReason === 'length') {
-    return { translation: '', finishReason, errorMessage: `truncated_at_length_limit (content_preview=${content.slice(0, 100)})` }
+  if (result.finishReason === 'length') {
+    return { translation: '', finishReason: result.finishReason, errorMessage: `truncated_at_length_limit (content_preview=${result.content.slice(0, 100)})` }
   }
-  if (!content.trim()) {
-    return { translation: '', finishReason, errorMessage: `empty_response (payload_keys=${Object.keys(payload).join(',')})` }
+  if (result.errorMessage || !result.content.trim()) {
+    return { translation: '', finishReason: result.finishReason, errorMessage: result.errorMessage ?? 'empty_response' }
   }
 
   // JSON 解析
   let parsed: Record<string, unknown>
   try {
-    parsed = parseJsonObjectFromLlmContent(content, 'translation single')
+    parsed = parseJsonObjectFromLlmContent(result.content, 'translation single')
   } catch (err) {
     return {
       translation: '',
-      finishReason,
-      errorMessage: `json_parse_failed: ${err instanceof Error ? err.message : String(err)} (content=${content.slice(0, 200)})`,
+      finishReason: result.finishReason,
+      errorMessage: `json_parse_failed: ${err instanceof Error ? err.message : String(err)} (content=${result.content.slice(0, 200)})`,
     }
   }
 
@@ -585,11 +497,11 @@ async function callTranslationOnce(
   if (!Array.isArray(translations) || translations.length === 0 || typeof translations[0] !== 'string') {
     return {
       translation: '',
-      finishReason,
-      errorMessage: `invalid_response_format: expected translations[0]: string. content=${content.slice(0, 200)}`,
+      finishReason: result.finishReason,
+      errorMessage: `invalid_response_format: expected translations[0]: string. content=${result.content.slice(0, 200)}`,
     }
   }
-  return { translation: normalizeSpaces(String(translations[0])), finishReason, refusal }
+  return { translation: normalizeSpaces(String(translations[0])), finishReason: result.finishReason, refusal: result.refusal }
 }
 
 /**
@@ -661,23 +573,6 @@ async function retranslateBlockIndividually(
     succeeded: false,
     reason: `${lastReason} after_${maxAttempts}_retries`,
   }
-}
-
-function summarizeTranslationPayload(payload: unknown): string {
-  if (!payload || typeof payload !== 'object') return String(payload)
-  const row = payload as Record<string, unknown>
-  const choices = Array.isArray(row.choices) ? row.choices : []
-  const firstChoice = choices[0] as Record<string, unknown> | undefined
-  const message = firstChoice?.message as Record<string, unknown> | undefined
-  return JSON.stringify({
-    object: row.object,
-    model: row.model,
-    choices: choices.length,
-    finishReason: firstChoice?.finish_reason,
-    messageKeys: message ? Object.keys(message) : [],
-    hasReasoningContent: typeof message?.reasoning_content === 'string',
-    usage: row.usage,
-  })
 }
 
 function isRetryableTranslationError(error: unknown): boolean {
@@ -829,9 +724,7 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
   })
 }
 
-// summarizeTranslationPayload は将来のデバッグ用途で残す（現状は callOpenAICompatible 内で使用）
 export const __testing = {
-  summarizeTranslationPayload,
   looksUntranslated,
   computeJaRatio,
   buildTranslationUserPayload,

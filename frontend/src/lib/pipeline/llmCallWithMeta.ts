@@ -1,7 +1,6 @@
 import type { AdminSettings } from '@/types/adminSettings'
-import { requireAiConnection, resolveJsonResponseFormatForProvider } from './aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
-import { type LlmUsageSink, safePush, getCurrentLlmUsageSink } from './llmUsageSink'
+import { createAiGateway } from '@/lib/aiGateway'
+import { type LlmUsageSink } from './llmUsageSink'
 
 /**
  * Chat Completions API へ 1 リクエスト送り、構造化された結果を返す共通ヘルパー。
@@ -88,17 +87,6 @@ export async function llmCallWithMeta(
   options: LlmCallOptions,
   settings: AdminSettings,
 ): Promise<LlmCallResult> {
-  const connection = (() => {
-    try {
-      return requireAiConnection(settings, options.nodeName)
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err) } as const
-    }
-  })()
-  if ('error' in connection) {
-    return { content: '', errorMessage: `connection_failed: ${connection.error}` }
-  }
-
   const messages: Array<{ role: string; content: string }> = [
     { role: 'system', content: options.systemPrompt },
   ]
@@ -106,159 +94,16 @@ export async function llmCallWithMeta(
     for (const msg of options.fewShotMessages) messages.push(msg)
   }
   messages.push({ role: 'user', content: options.userContent })
-
-  // body 構築
-  const body: Record<string, unknown> = {
+  return createAiGateway(settings).chatText({
+    nodeName: options.nodeName,
     model: options.model,
     messages,
-  }
-  if (options.reasoningEffort) {
-    body.reasoning_effort = options.reasoningEffort
-  } else if (typeof options.temperature === 'number') {
-    body.temperature = options.temperature
-  }
-  if (typeof options.maxTokens === 'number') {
-    body.max_tokens = options.maxTokens
-  }
-  if (options.responseFormat !== 'omit') {
-    if (options.responseFormat === 'json_object' || options.responseFormat === 'text') {
-      body.response_format = { type: options.responseFormat }
-    } else {
-      // provider 既定（OpenAI なら json_object、ローカルは text 等）に従う
-      body.response_format = resolveJsonResponseFormatForProvider(settings)
-    }
-  }
-
-  const callStartedAt = Date.now()
-  let response: Awaited<ReturnType<typeof tauriFetch>>
-  try {
-    response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-      },
-      body: JSON.stringify(body),
-    })
-  } catch (err) {
-    return {
-      content: '',
-      errorMessage: `fetch_failed: ${err instanceof Error ? err.message : String(err)}`,
-    }
-  }
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    return {
-      content: '',
-      httpStatus: response.status,
-      errorMessage: `http_${response.status}: ${detail.slice(0, 200)}`,
-    }
-  }
-
-  let payload: Record<string, unknown>
-  try {
-    payload = (await response.json()) as Record<string, unknown>
-  } catch (err) {
-    return {
-      content: '',
-      errorMessage: `response_json_parse_failed: ${err instanceof Error ? err.message : String(err)}`,
-    }
-  }
-
-  const choices = Array.isArray(payload.choices) ? payload.choices : []
-  const firstChoice = choices[0] as Record<string, unknown> | undefined
-  const finishReason = typeof firstChoice?.finish_reason === 'string' ? firstChoice.finish_reason : undefined
-  const message = firstChoice?.message as Record<string, unknown> | undefined
-  const refusal = typeof message?.refusal === 'string' ? message.refusal : null
-  const content: string = typeof message?.content === 'string' ? message.content : ''
-
-  // usage 抽出
-  const usage = payload.usage as Record<string, unknown> | undefined
-  const promptTokens = typeof usage?.prompt_tokens === 'number' ? usage.prompt_tokens : undefined
-  const completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : undefined
-  const completionDetails = usage?.completion_tokens_details as Record<string, unknown> | undefined
-  const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
-  const promptDetails = usage?.prompt_tokens_details as Record<string, unknown> | undefined
-  const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
-  const durationMs = Date.now() - callStartedAt
-
-  // sink への push（API 失敗時は 0/0 で safePush 側がスキップする）。
-  // options.usageSink 明示指定が優先、未指定なら module-level の current sink を使う。
-  safePush(options.usageSink ?? getCurrentLlmUsageSink(), {
-    nodeId: options.nodeName,
-    model: options.model,
-    promptTokens: promptTokens ?? 0,
-    completionTokens: completionTokens ?? 0,
-    reasoningTokens,
-    cachedInputTokens,
-    durationMs,
+    temperature: options.temperature,
+    reasoningEffort: options.reasoningEffort,
+    maxTokens: options.maxTokens,
+    responseFormat: options.responseFormat,
+    usageSink: options.usageSink,
   })
-
-  // 即諦め分岐: content_filter / refusal
-  if (finishReason === 'content_filter') {
-    return {
-      content: '',
-      finishReason,
-      refusal,
-      errorMessage: 'content_filter',
-      promptTokens,
-      completionTokens,
-      reasoningTokens,
-      cachedInputTokens,
-      durationMs,
-    }
-  }
-  if (refusal) {
-    return {
-      content: '',
-      finishReason,
-      refusal,
-      errorMessage: `model_refusal: ${refusal.slice(0, 200)}`,
-      promptTokens,
-      completionTokens,
-      reasoningTokens,
-      cachedInputTokens,
-      durationMs,
-    }
-  }
-  // リトライ可能エラー: length / empty
-  if (finishReason === 'length') {
-    return {
-      content,
-      finishReason,
-      errorMessage: `truncated_at_length_limit (content_preview=${content.slice(0, 100)})`,
-      promptTokens,
-      completionTokens,
-      reasoningTokens,
-      cachedInputTokens,
-      durationMs,
-    }
-  }
-  if (!content.trim()) {
-    return {
-      content: '',
-      finishReason,
-      errorMessage: `empty_response (payload_keys=${Object.keys(payload).join(',')})`,
-      promptTokens,
-      completionTokens,
-      reasoningTokens,
-      cachedInputTokens,
-      durationMs,
-    }
-  }
-
-  // 成功
-  return {
-    content,
-    finishReason,
-    refusal,
-    promptTokens,
-    completionTokens,
-    reasoningTokens,
-    cachedInputTokens,
-    durationMs,
-  }
 }
 
 /**

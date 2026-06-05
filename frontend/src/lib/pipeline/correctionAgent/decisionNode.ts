@@ -1,4 +1,5 @@
 import type { PipelineThresholds } from '../blockTypes'
+import { createAiGateway } from '@/lib/aiGateway'
 import type {
   AgentThresholds,
   CompressionTier,
@@ -8,8 +9,7 @@ import type {
   DecisionNode,
 } from './types'
 import { buildMetrics } from './metrics'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from '../aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
+import { requireChatModelForProvider } from '../aiProvider'
 import { parseJsonObjectFromLlmContent } from '../jsonResponse'
 
 // ---------------------------------------------------------------------------
@@ -166,44 +166,33 @@ export class LLMDecisionNode implements DecisionNode {
     feasible: CorrectionStrategy[],
   ): Promise<CorrectionStrategy> {
     const { settings } = ctx
-    const connection = requireAiConnection(settings, 'LLM decision')
     const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'LLM decision')
 
     const prompt = buildDecisionPrompt(ctx, feasible)
 
-    const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.0,
-        response_format: resolveJsonResponseFormatForProvider(settings),
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a subtitle correction strategy selector for academic lecture subtitles. ' +
-              'Given context about a subtitle block that violates display constraints, ' +
-              'select the best correction strategy from the provided feasible strategies. ' +
-              'Consider the severity of violation, available timing slack, and academic content preservation. ' +
-              'Do NOT calculate character counts yourself — the code handles constraint checking. ' +
-              'Respond with JSON: {"strategy": "<strategy_name>", "rationale": "<reason in ≤120 chars>"}',
-          },
-          { role: 'user', content: prompt },
-        ],
-      }),
+    const result = await createAiGateway(settings).chatText({
+      nodeName: 'LLM decision',
+      model,
+      temperature: 0.0,
+      responseFormat: undefined,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a subtitle correction strategy selector for academic lecture subtitles. ' +
+            'Given context about a subtitle block that violates display constraints, ' +
+            'select the best correction strategy from the provided feasible strategies. ' +
+            'Consider the severity of violation, available timing slack, and academic content preservation. ' +
+            'Do NOT calculate character counts yourself — the code handles constraint checking. ' +
+            'Respond with JSON: {"strategy": "<strategy_name>", "rationale": "<reason in ≤120 chars>"}',
+        },
+        { role: 'user', content: prompt },
+      ],
     })
 
-    if (!response.ok) {
-      throw new Error(`LLM decision API returned HTTP ${response.status}`)
-    }
+    if (result.errorMessage) throw new Error(`LLM decision API failed: ${result.errorMessage}`)
 
-    const payload = await response.json()
-    const content: string = payload?.choices?.[0]?.message?.content ?? ''
-    const parsed = parseJsonObjectFromLlmContent(content, 'LLM decision')
+    const parsed = parseJsonObjectFromLlmContent(result.content, 'LLM decision')
     const strategy = typeof parsed.strategy === 'string' ? parsed.strategy : ''
 
     if (!isCorrectionStrategy(strategy)) {

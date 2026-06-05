@@ -21,10 +21,11 @@ import type {
   SelfMadeGlossaryPromptPolicy,
   SelfMadeGlossaryValueSource,
 } from '@/context/GlossaryContext'
-import { requireAiConnection, requireChatModelForProvider, resolveChatCompletionTokenLimitForProvider, resolveJsonResponseFormatForProvider } from '@/lib/pipeline/aiProvider'
+import { createAiGateway } from '@/lib/aiGateway'
+import type { ChatTextMessage, ChatVisionOptions } from '@/lib/aiGateway'
+import { requireChatModelForProvider, resolveChatCompletionTokenLimitForProvider, resolveJsonResponseFormatForProvider } from '@/lib/pipeline/aiProvider'
 import { parseJsonObjectFromLlmContent } from '@/lib/pipeline/jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
-import { tauriFetch } from '@/lib/tauriFetch'
 import type { AdminSettings } from '@/types/adminSettings'
 
 import type { ExtractedPdfDocument, ExtractedPdfPage } from './pdfExtractor'
@@ -276,10 +277,9 @@ export async function extractDocumentTheme(
     return { subject: '', domain: '', keyConcepts: [], promptContext: '' }
   }
 
-  const connection = requireAiConnection(settings, 'glossary document theme extraction')
   const model = requireChatModelForProvider(settings, settings.translationModel, 'glossary document theme extraction')
 
-  const json = await postGlossaryChatCompletion(connection, 'Glossary document theme API', {
+  const json = await postGlossaryChatCompletion(settings, 'Glossary document theme API', {
     model,
     temperature: 0,
     ...resolveChatCompletionTokenLimitForProvider(settings, THEME_PROBE_MAX_OUTPUT_TOKENS),
@@ -625,38 +625,64 @@ function formatUsage(json: ChatCompletionResponse): string {
   return `, tokens=${prompt ?? '?'} in/${completion ?? '?'} out/${total ?? '?'} total`
 }
 
-function formatGlossaryCallFailure(context: string, error: unknown): string {
-  return `${context}: ${error instanceof Error ? error.message : String(error)}`
+function hasImageMessageContent(messages: ChatTextMessage[]): boolean {
+  return messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'))
 }
 
 async function postGlossaryChatCompletion(
-  connection: { baseUrl: string; apiKey: string },
+  settings: AdminSettings,
   context: string,
   body: Record<string, unknown>,
 ): Promise<ChatCompletionResponse> {
-  let response: Awaited<ReturnType<typeof tauriFetch>>
-  try {
-    response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
+  const model = typeof body.model === 'string' ? body.model : ''
+  const messages = Array.isArray(body.messages) ? body.messages as ChatTextMessage[] : []
+  if (!model) throw new Error(`${context}: model is required`)
+  if (messages.length === 0) throw new Error(`${context}: messages are required`)
+
+  const responseFormat: 'json_object' | 'text' | 'omit' = (() => {
+    const value = body.response_format as Record<string, unknown> | undefined
+    if (value?.type === 'json_object' || value?.type === 'text') return value.type
+    return 'omit'
+  })()
+  const gateway = createAiGateway(settings)
+  const commonOptions = {
+    nodeName: context,
+    model,
+    temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
+    maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : undefined,
+    responseFormat,
+  }
+  const result = hasImageMessageContent(messages)
+    ? await gateway.chatVision({
+        ...commonOptions,
+        messages: messages as ChatVisionOptions['messages'],
+      })
+    : await gateway.chatText({
+        ...commonOptions,
+        messages,
+        maxCompletionTokens: typeof body.max_completion_tokens === 'number' ? body.max_completion_tokens : undefined,
+      })
+
+  if (result.errorMessage) {
+    throw new Error(`${context} ${result.errorMessage}`)
+  }
+
+  const usage = {
+    prompt_tokens: result.promptTokens,
+    completion_tokens: result.completionTokens,
+    total_tokens: typeof result.promptTokens === 'number' && typeof result.completionTokens === 'number'
+      ? result.promptTokens + result.completionTokens
+      : undefined,
+  }
+
+  return {
+    choices: [{
+      finish_reason: result.finishReason,
+      message: {
+        content: result.content,
       },
-      body: JSON.stringify(body),
-    })
-  } catch (error) {
-    throw new Error(formatGlossaryCallFailure(`${context} fetch_failed`, error))
-  }
-
-  const text = await response.text().catch(() => '')
-  if (!response.ok) {
-    throw new Error(`${context} http_${response.status}: ${text.slice(0, 500)}`)
-  }
-
-  try {
-    return JSON.parse(text) as ChatCompletionResponse
-  } catch (error) {
-    throw new Error(formatGlossaryCallFailure(`${context} response_json_parse_failed`, error) + ` / body=${text.slice(0, 500)}`)
+    }],
+    usage,
   }
 }
 
@@ -1417,7 +1443,6 @@ async function requestFormulaMiniReview(
   chunkCount: number,
   onProgress?: GlossaryGenerationOptions['onProgress'],
 ): Promise<NormalizedFormulaMiniReview[]> {
-  const connection = requireAiConnection(settings, 'self-made glossary formula mini review')
   const model = requireChatModelForProvider(settings, resolveFormulaMiniModel(settings), 'self-made glossary formula mini review')
   const pass: GlossaryExtractionPass = 'formula_mini'
   onProgress?.({
@@ -1429,7 +1454,7 @@ async function requestFormulaMiniReview(
     message: `${pass}: page ${page.page} mini review started (${entries.length} entries)`,
   })
 
-  const json = await postGlossaryChatCompletion(connection, `Glossary formula mini review API page ${page.page}`, {
+  const json = await postGlossaryChatCompletion(settings, `Glossary formula mini review API page ${page.page}`, {
     model,
     temperature: 0,
     ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
@@ -1532,7 +1557,6 @@ async function requestCandidateChunk(
   pass: GlossaryExtractionPass,
   onProgress?: GlossaryGenerationOptions['onProgress'],
 ): Promise<NormalizedGlossaryCandidate[]> {
-  const connection = requireAiConnection(settings, 'self-made glossary candidate extraction')
   const requestedModel = useVision ? settings.pdfExtractionVisionModel : settings.translationModel
   const model = requireChatModelForProvider(settings, requestedModel, 'self-made glossary candidate extraction')
   const pageNumbers = pages.map(page => page.page)
@@ -1545,7 +1569,7 @@ async function requestCandidateChunk(
     message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: pages ${pageNumbers.join(', ')}`,
   })
 
-  const json = await postGlossaryChatCompletion(connection, `Glossary candidate extraction API pass=${pass} pages ${pageNumbers.join(', ')}`, {
+  const json = await postGlossaryChatCompletion(settings, `Glossary candidate extraction API pass=${pass} pages ${pageNumbers.join(', ')}`, {
     model,
     temperature: 0,
     ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
@@ -1621,7 +1645,6 @@ async function requestDetailBatch(
   pass: GlossaryExtractionPass,
   onProgress?: GlossaryGenerationOptions['onProgress'],
 ): Promise<RawGlossaryEntry[]> {
-  const connection = requireAiConnection(settings, 'self-made glossary detail generation')
   const model = requireChatModelForProvider(settings, settings.translationModel, 'self-made glossary detail generation')
   const pages = Array.from(new Set(candidates.map(candidate => candidate.page).filter((page): page is number => typeof page === 'number')))
   onProgress?.({
@@ -1633,7 +1656,7 @@ async function requestDetailBatch(
     message: `${pass} detail batch ${batchIndex + 1}/${batchCount}: ${candidates.length} candidates`,
   })
 
-  const json = await postGlossaryChatCompletion(connection, `Glossary detail generation API pass=${pass} batch ${batchIndex + 1}/${batchCount}`, {
+  const json = await postGlossaryChatCompletion(settings, `Glossary detail generation API pass=${pass} batch ${batchIndex + 1}/${batchCount}`, {
     model,
     temperature: 0,
     ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),

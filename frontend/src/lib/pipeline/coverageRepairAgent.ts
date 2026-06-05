@@ -1,13 +1,13 @@
 import type { AdminSettings } from '@/types/adminSettings'
+import { createAiGateway } from '@/lib/aiGateway'
 import type { EnBlock, PipelineThresholds } from './blockTypes'
 import type { CorrectedSegmentLite } from './correct'
 import type { CoverageIssue, CoverageReport } from './coverageValidator'
 import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
 import { validateCoverage } from './coverageValidator'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from './aiProvider'
+import { requireChatModelForProvider } from './aiProvider'
 import { resolveCompressModelId } from './prompts'
-import { tauriFetch } from '@/lib/tauriFetch'
-import { safePush, getCurrentLlmUsageSink } from './llmUsageSink'
+import { getCurrentLlmUsageSink } from './llmUsageSink'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
 /**
@@ -222,62 +222,33 @@ async function callCoverageRepairLlm(
   model: string,
   effort: string,
 ): Promise<LlmCallResult> {
-  const connection = requireAiConnection(settings, 'coverage repair')
   const resolvedModel = requireChatModelForProvider(settings, model, 'coverage repair')
 
-  const callStartedAt = Date.now()
   try {
-    const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: resolvedModel,
-        reasoning_effort: effort,
-        response_format: resolveJsonResponseFormatForProvider(settings),
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    })
-
-    if (!response.ok) {
-      const detail = await response.text()
-      return { parsed: null, errorMessage: `coverage_repair API HTTP ${response.status}: ${detail.slice(0, 200)}` }
-    }
-
-    const payload = (await response.json()) as Record<string, unknown>
-    const choices = Array.isArray(payload.choices) ? payload.choices : []
-    const firstChoice = choices[0] as Record<string, unknown> | undefined
-    const message = firstChoice?.message as Record<string, unknown> | undefined
-    const content: string = typeof message?.content === 'string' ? message.content : ''
-
-    const usage = payload.usage as Record<string, unknown> | undefined
-    const promptTokens = typeof usage?.prompt_tokens === 'number' ? usage.prompt_tokens : undefined
-    const completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : undefined
-    const completionDetails = usage?.completion_tokens_details as Record<string, unknown> | undefined
-    const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
-    const promptDetails = usage?.prompt_tokens_details as Record<string, unknown> | undefined
-    const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
-    safePush(getCurrentLlmUsageSink(), {
-      nodeId: `coverageRepairAgent[effort=${effort}]`,
+    const result = await createAiGateway(settings).chatText({
+      nodeName: `coverageRepairAgent[effort=${effort}]`,
       model: resolvedModel,
-      promptTokens: promptTokens ?? 0,
-      completionTokens: completionTokens ?? 0,
-      reasoningTokens,
-      cachedInputTokens,
-      durationMs: Date.now() - callStartedAt,
+      reasoningEffort: effort as 'minimal' | 'low' | 'medium' | 'high',
+      responseFormat: undefined,
+      usageSink: getCurrentLlmUsageSink(),
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
     })
 
-    if (!content.trim()) {
-      return { parsed: null, errorMessage: 'coverage_repair response empty', promptTokens, completionTokens, reasoningTokens }
+    if (result.errorMessage) {
+      return {
+        parsed: null,
+        errorMessage: `coverage_repair API failed: ${result.errorMessage}`,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        reasoningTokens: result.reasoningTokens,
+      }
     }
 
     try {
-      const obj = parseJsonObjectFromLlmContent(content, 'coverage_repair')
+      const obj = parseJsonObjectFromLlmContent(result.content, 'coverage_repair')
       const rationale = typeof obj.rationale === 'string' ? obj.rationale : ''
       const rewritesRaw = Array.isArray(obj.rewrites) ? obj.rewrites : []
       const rewrites: LlmRewrite[] = []
@@ -290,10 +261,21 @@ async function callCoverageRepairLlm(
         if (blockId === null || jaSpan === null || en === null) continue
         rewrites.push({ blockId, jaSpan, en })
       }
-      return { parsed: { rewrites, rationale }, promptTokens, completionTokens, reasoningTokens }
+      return {
+        parsed: { rewrites, rationale },
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        reasoningTokens: result.reasoningTokens,
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      return { parsed: null, errorMessage: `coverage_repair JSON parse failed: ${msg}`, promptTokens, completionTokens, reasoningTokens }
+      return {
+        parsed: null,
+        errorMessage: `coverage_repair JSON parse failed: ${msg}`,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        reasoningTokens: result.reasoningTokens,
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

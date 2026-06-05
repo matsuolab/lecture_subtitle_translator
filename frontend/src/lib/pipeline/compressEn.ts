@@ -1,11 +1,11 @@
 import type { AdminSettings } from '@/types/adminSettings'
+import { createAiGateway } from '@/lib/aiGateway'
 import type { EnBlock, PipelineThresholds } from './blockTypes'
 import { computeMetrics, classifyViolation } from './metrics'
 import { formatLines } from './formatLines'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from './prompts'
 import { normalizeSpaces } from './textUtils'
-import { requireAiConnection, requireChatModelForProvider, resolveJsonResponseFormatForProvider } from './aiProvider'
-import { tauriFetch } from '@/lib/tauriFetch'
+import { requireChatModelForProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
 async function callCompress(
@@ -13,35 +13,23 @@ async function callCompress(
   jaText: string,
   settings: AdminSettings,
 ): Promise<string> {
-  const connection = requireAiConnection(settings)
   const model = requireChatModelForProvider(settings, resolveCompressModelId(settings), 'compression')
   const systemPrompt = resolveCompressSystemPrompt(settings, settings.compressPromptOverride)
 
-  const response = await tauriFetch(`${connection.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.0,
-      response_format: resolveJsonResponseFormatForProvider(settings),
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}` },
-      ],
-    }),
+  const result = await createAiGateway(settings).chatText({
+    nodeName: 'compression',
+    model,
+    temperature: 0.0,
+    responseFormat: undefined,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}` },
+    ],
   })
 
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`compress API returned HTTP ${response.status}: ${detail}`)
-  }
+  if (result.errorMessage) throw new Error(`compress API failed: ${result.errorMessage}`)
 
-  const payload = await response.json()
-  const content: string = payload?.choices?.[0]?.message?.content ?? ''
-  const parsed = parseJsonObjectFromLlmContent(content, 'compress')
+  const parsed = parseJsonObjectFromLlmContent(result.content, 'compress')
   const text = typeof parsed.text === 'string' ? parsed.text : ''
   return normalizeSpaces(text.trim())
 }
