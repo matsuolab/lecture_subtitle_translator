@@ -1,0 +1,37 @@
+lecture_subtitle_translator (subtitle-editor)
+Copyright 2026 Tokyo University Matsuo Lab & Matsuo Institute of Technology
+
+This product includes software developed by Tokyo University Matsuo Lab & Matsuo Institute of Technology.
+
+========================================================================
+Third-Party Software Notices and Licenses
+========================================================================
+
+This section contains licensing information for third-party software 
+used in this product.
+
+------------------------------------------------------------------------
+1. Frontend (NPM dependencies)
+------------------------------------------------------------------------
+The frontend components use various open-source libraries licensed under 
+permissive licenses (MIT, Apache-2.0, ISC, BSD-3-Clause, etc.). 
+For details, see the THIRD_PARTY_NOTICES.md file.
+
+------------------------------------------------------------------------
+2. Rust (Tauri dependencies)
+------------------------------------------------------------------------
+The desktop application includes Rust crates developed by third parties.
+These crates are licensed under permissive licenses, primarily MIT or Apache-2.0.
+
+------------------------------------------------------------------------
+3. Backend (Python dependencies)
+------------------------------------------------------------------------
+The backend services use open-source Python libraries licensed under 
+permissive licenses (MIT, BSD-3-Clause, Apache-2.0).
+
+------------------------------------------------------------------------
+4. FFmpeg
+------------------------------------------------------------------------
+This product bundles/uses FFmpeg executables under the LGPLv3 license.
+For detailed information and instructions to replace FFmpeg, please 
+refer to the THIRD_PARTY_NOTICES.md file in the root directory.

@@ -43,6 +43,21 @@ macOS や Windows で警告が出る場合は、配布元を確認したうえ�
 
 リモート実行では、設定後に **接続テスト** を押してください。OK が表示されれば、アプリからリモート実行先へアクセスできています。その後、**レポート** タブからパイプラインを実行できます。
 
+#### ローカル OpenAI 互換サーバーを使う場合
+
+LM Studio や Ollama などを使う場合は、**接続チェックが成功しても、実際の字幕パイプラインに十分な context length が確保されているとは限りません**。翻訳・補正ではプロンプト、few-shot、文脈グループ、用語辞書を同じリクエストに含めるため、サーバー側で次の設定を満たしてください。
+
+| 用途 | 最低値 | 推奨値 |
+|---|---:|---:|
+| 短い音声での翻訳・補正テスト | 16k tokens | 32k tokens |
+| 用語辞書あり、長めの講義、文脈グループが多い処理 | 32k tokens | 64k tokens |
+| PDF Vision / 辞書生成など画像・長文を含む処理 | 32k tokens | 64k tokens 以上 |
+
+- **LM Studio**: モデルロード時の `Context Length` / `n_ctx` を上の値に設定してください。OpenAI 互換 `/v1/chat/completions` 経由では、アプリからリクエストごとに context length を指定できません。
+- **Ollama**: OpenAI 互換 API では context size を直接指定できないため、Ollama アプリの context length 設定、または `OLLAMA_CONTEXT_LENGTH=64000 ollama serve`、もしくは `Modelfile` の `PARAMETER num_ctx 32768` / `65536` で増やしてください。
+- `Context size has been exceeded` が出る場合は、まずローカルサーバー側の実割当 context を確認してください。Ollama は `ollama ps` の `CONTEXT` 列で確認できます。
+- context length を増やすと VRAM / RAM 消費が増えます。GPUからCPUへ大きくオフロードされる場合は、より小さいモデルや量子化モデルを使う方が安定します。
+
 ### 3. 基本的な作業の流れ
 
 1. 動画ファイルを読み込む。
@@ -120,8 +135,26 @@ SRT は英語字幕の出力用です。日本語原文、処理ログ、レビ�
 | `poc/` | 実験・検証コード |
 | `.github/workflows/` | build / release ワークフロー |
 
+## 使用技術
+
+本プロジェクトでは以下の技術を使用しています：
+
+- **フロントエンド / デスクトップアプリ**:
+  - React (v19) / TypeScript
+  - Tauri (v2) - デスクトップアプリケーションフレームワーク
+  - Tailwind CSS (v4)
+  - Vite - ビルドツール
+- **バックエンド / パイプライン**:
+  - Python (v3.13)
+  - FastAPI - パイプライン実行 API
+  - Boto3 - AWS 連携（Lambda, Batch, S3, DynamoDB）
+  - WhisperX - 高精度音声書き起こし・アライメント（GPU環境）
+  - OpenAI API / Google GenAI SDK - 字幕の翻訳・補正・整形用 LLM
+- **メディア処理**:
+  - FFmpeg - 音声抽出用（LGPL ビルドを sidecar として同梱）
+
 ## License
 
-本リポジトリの本体コードのライセンスは別途定めます。
+本リポジトリの本体コードのライセンスは [Apache License, Version 2.0](LICENSE) に従います。
 
 第三者ソフトウェア（同梱する FFmpeg 等）のライセンス・告知は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。

@@ -1,6 +1,7 @@
 {
   "name": "hierarchical-subtitle-planner-poc",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "build": "node ../../frontend/node_modules/typescript/bin/tsc -p tsconfig.json",
