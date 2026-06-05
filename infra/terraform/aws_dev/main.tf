@@ -19,12 +19,14 @@ resource "aws_s3_bucket_cors_configuration" "input" {
   cors_rule {
     allowed_headers = ["*"]
     allowed_methods = ["PUT", "GET", "HEAD"]
+    # 注: tauri://localhost は S3/API Gateway が CORS オリジンとして受け付けない。
+    # macOS/Linux の Tauri は tauriFetch(Rust側HTTP)で直接 PUT するため CORS 対象外。
+    # 詳細: frontend/src/api/pipelineClient.ts / docs/aws_backend_setup_manual.md §3①
     allowed_origins = [
       "http://127.0.0.1:5173",
       "http://localhost:5173",
       "http://tauri.localhost",
       "https://tauri.localhost",
-      "tauri://localhost",
     ]
     expose_headers = ["ETag"]
     max_age_seconds = 300
