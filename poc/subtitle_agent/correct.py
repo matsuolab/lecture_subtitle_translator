@@ -1,7 +1,7 @@
 """ASRセグメント単位のLLM日本語校正 — 本番 correct.ts 移植 (パイプライン A 工程0).
 
 本番 frontend/src/lib/pipeline/correct.ts の SYSTEM_PROMPT・修正ルールを移植。
-講師の話し方が破綻した日本語 (主語述語不整合・逆接/順接の崩れ・ASR誤変換) を
+入力 (ASR書き起こし) の破綻した日本語 (主語述語不整合・逆接/順接の崩れ・ASR誤変換) を
 セグメント全体の文脈で最小限修復する。意味・情報量は変えない (docs/ideas.md I-14)。
 
 設計大原則 (CLAUDE.md): LLMの役割は「意味」側 (壊れた日本語を直す)。文字数・CPS
