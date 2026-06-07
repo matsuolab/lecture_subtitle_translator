@@ -2,6 +2,9 @@
 00_context/
 10_meetings/
 
+# Private: Obsidian vault (internal notes, chat logs — local only)
+vault/
+
 # Internal docs & private notes (local only)
 docs/
 notes/
@@ -21,6 +24,8 @@ poc/cache/
 poc/**/node_modules/
 poc/**/dist/
 poc/**/results/
+poc/bilingual_analysis/out/
+poc/bilingual_analysis/demo/data.js
 results/
 poc/step2_pipeline/output/
 poc/step2_pipeline/.env
@@ -71,3 +76,6 @@ Thumbs.db
 
 # Local-only dev helper scripts (個人開発環境ツール、共有不要)
 scripts/setup-worktree.ps1
+
+# Agent skills: local issue staging area (not committed)
+.scratch/
