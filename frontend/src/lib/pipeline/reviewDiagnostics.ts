@@ -364,6 +364,51 @@ export function buildReviewItemsForBlock(
   return items
 }
 
+/**
+ * エディタの「要確認」バッジに出してよいレビュー理由。
+ * 翻訳者へ常時見せるのは、自動補正で解消できなかった「測定可能な形式違反」と、
+ * 決定論的に検出された翻訳失敗（未訳）のみに限定する。
+ * under_translated / context_dependent_fragment / over_compressed / 比率のみ verbose /
+ * proportional_ts などの「意味・傾向の推測」は誤検出で信頼を損なうため除外し、
+ * ReportTab 診断側にのみ残す（CONTEXT.md「意味・翻訳傾向の修正は human-in-the-loop」）。
+ */
+const EDITOR_BADGE_REASONS = new Set<string>([
+  'short_duration',
+  'long_segment',
+  'merged_long',
+  'cps_over_limit',
+  'line_length_over_limit',
+  'untranslated',
+])
+
+export function isEditorBadgeReason(reason: string): boolean {
+  return EDITOR_BADGE_REASONS.has(reason)
+}
+
+/**
+ * エディタバッジ用に、コア形式違反（＋未訳）だけを要約する。
+ * 該当が無ければ null（＝バッジを出さない）。具体数値（details の先頭）を要約に含める。
+ */
+export function summarizeFormViolationBadge(items: PipelineReviewItem[]): {
+  priority: PipelineReviewPriority
+  disposition: PipelineReviewDisposition
+  summary: string
+  action: string
+} | null {
+  const formItems = items.filter((item) => isEditorBadgeReason(item.reason))
+  if (formItems.length === 0) return null
+  const sorted = [...formItems].sort((a, b) => priorityWeight(b.priority) - priorityWeight(a.priority))
+  const primary = sorted[0]
+  const extra = sorted.length > 1 ? ` ほか${sorted.length - 1}件` : ''
+  const detail = primary.details?.[0] ? `（${primary.details[0]}）` : ''
+  return {
+    priority: primary.priority,
+    disposition: 'manual_review',
+    summary: `${primary.title ?? primary.reason}${detail}${extra}`,
+    action: primary.action ?? '字幕の形式を確認してください',
+  }
+}
+
 export function summarizeReviewItems(items: PipelineReviewItem[]): {
   priority: PipelineReviewPriority
   disposition: PipelineReviewDisposition

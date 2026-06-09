@@ -225,7 +225,7 @@ async function callOpenAICompatible(
   glossaryTerms: string[],
 ): Promise<string[]> {
   const glossaryInstruction = glossaryTerms.length > 0
-    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
+    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.map(term => `- ${term}`).join('\n')}`
     : ''
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[batch]',
@@ -289,7 +289,7 @@ async function callContextGroupAllocation(
 ): Promise<Map<number, string>> {
   if (groups.length === 0) return new Map()
   const glossaryInstruction = glossaryTerms.length > 0
-    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
+    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.map(term => `- ${term}`).join('\n')}`
     : ''
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[contextGroupAllocation]',
@@ -439,7 +439,7 @@ async function callTranslationOnce(
   glossaryTerms: string[],
 ): Promise<SingleCallResult> {
   const glossaryInstruction = glossaryTerms.length > 0
-    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.slice(0, 120).map(term => `- ${term}`).join('\n')}`
+    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.map(term => `- ${term}`).join('\n')}`
     : ''
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[single]',

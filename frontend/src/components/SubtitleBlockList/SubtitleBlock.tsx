@@ -196,30 +196,14 @@ function cpsBadgeStyle(level: 'ok' | 'warn' | 'error', theme: Theme) {
   return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
 }
 
-function reviewBadgeStyle(block: SubtitleBlockType, theme: Theme) {
-  if (block.reviewDisposition === 'manual_review') {
-    return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
-  }
-  if (block.reviewDisposition === 'proposed') {
-    return block.reviewPriority === 'must_review'
-      ? { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
-      : { background: theme.cpsBadgeWarn[0], color: theme.cpsBadgeWarn[1] }
-  }
-  if (block.reviewDisposition === 'auto_applied') {
-    return { background: theme.cpsBadgeOk[0], color: theme.cpsBadgeOk[1] }
-  }
-  return { background: theme.cpsBadgeOk[0], color: theme.cpsBadgeOk[1] }
-}
-
-function reviewBadgePrefix(disposition: SubtitleBlockType['reviewDisposition']): string {
-  if (disposition === 'manual_review') return '要確認'
-  if (disposition === 'proposed') return '提案'
-  if (disposition === 'auto_applied') return '自動'
-  return '確認'
+// 要確認バッジは「残存する測定形式違反（＋未訳）」のみに付く（reviewDiagnostics 側で限定）。
+// 提案・自動修正済みタグは廃止済み。
+function reviewBadgeStyle(theme: Theme) {
+  return { background: theme.cpsBadgeError[0], color: theme.cpsBadgeError[1] }
 }
 
 function reviewBadgeText(block: SubtitleBlockType): string {
-  const prefix = reviewBadgePrefix(block.reviewDisposition)
+  const prefix = '要確認'
   const summary = block.reviewSummary ?? ''
   return summary === prefix ? summary : `${prefix}: ${summary}`
 }
@@ -1107,12 +1091,11 @@ function SubtitleBlockInner({
           <span
             title={reviewBadgeTitle(block)}
             style={{
-              ...reviewBadgeStyle(block, theme),
+              ...reviewBadgeStyle(theme),
               fontSize: 10,
               padding: '2px 7px',
               borderRadius: 999,
               fontWeight: 700,
-              opacity: block.reviewDisposition === 'auto_applied' ? 0.82 : 1,
             }}
           >
             {reviewBadgeText(block)}

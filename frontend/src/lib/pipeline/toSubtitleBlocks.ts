@@ -1,7 +1,7 @@
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { EnBlock } from './blockTypes'
 import type { PipelineReviewItem } from '@/types/pipeline'
-import { summarizeReviewItems } from './reviewDiagnostics'
+import { summarizeFormViolationBadge } from './reviewDiagnostics'
 
 export function toSubtitleBlocks(
   blocks: EnBlock[],
@@ -10,9 +10,10 @@ export function toSubtitleBlocks(
   return blocks.map((block) => ({
     ...(() => {
       const blockItems = reviewItems.filter(item => item.blockId === block.id)
-      const review = summarizeReviewItems(blockItems)
-      const needsManualStop = review.disposition === 'manual_review'
-        || (review.disposition === 'proposed' && review.priority === 'must_review')
+      // エディタの「要確認」バッジは、信頼できる測定形式違反（＋未訳）のみに限定する。
+      // 意味系の推測は ReportTab 診断に残し、翻訳者の作業面には出さない。
+      const badge = summarizeFormViolationBadge(blockItems)
+      const needsManualStop = badge !== null
       return {
         id: block.id,
         startTime: block.start,
@@ -23,10 +24,10 @@ export function toSubtitleBlocks(
         charCount: block.enChars,
         status: needsManualStop ? 'flagged' as const : 'pending' as const,
         glossaryTerms: [],
-        reviewSummary: review.summary,
-        reviewAction: review.action,
-        reviewPriority: review.priority,
-        reviewDisposition: review.disposition,
+        reviewSummary: badge?.summary,
+        reviewAction: badge?.action,
+        reviewPriority: badge?.priority ?? 'auto_pass',
+        reviewDisposition: badge?.disposition ?? 'auto_pass',
         contextGroupId: block.contextGroupId,
         contextGroupIndex: block.contextGroupIndex,
         contextGroupSize: block.contextGroupSize,
