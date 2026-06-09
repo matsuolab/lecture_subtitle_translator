@@ -70,7 +70,7 @@ export async function probeAll(context: AiGatewayContext): Promise<AiGatewayProb
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: 'Reply with exactly: OK' },
+          { type: 'text', text: 'Return JSON only: {"ok":true}. The image content is irrelevant for this connection check.' },
           { type: 'image_url', image_url: { url: PROBE_IMAGE_DATA_URL, detail: 'low' } },
         ],
       }],
