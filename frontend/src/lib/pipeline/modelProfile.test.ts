@@ -41,15 +41,21 @@ describe('resolveModelProfile', () => {
 
   it('uses capability-specific profile presets before legacy profile settings', () => {
     const configured = settings({
-      modelProfilePreset: 'openai',
+      modelProfilePreset: 'auto',
       chatTextProfilePreset: 'qwen',
       chatVisionProfilePreset: 'gemma',
-      embeddingProfilePreset: 'non_reasoning',
+      embeddingProfilePreset: 'qwen',
     })
 
     expect(resolveModelProfile(configured, 'local-chat', 'chatText')?.id).toBe('qwen')
     expect(resolveModelProfile(configured, 'local-vision', 'chatVision')?.id).toBe('gemma')
-    expect(resolveModelProfile(configured, 'local-embedding', 'embedding')?.id).toBe('non_reasoning')
+    expect(resolveModelProfile(configured, 'local-embedding', 'embedding')?.id).toBe('qwen')
+  })
+
+  it('does not infer model profiles for OpenAI, DeepSeek, or unknown non-reasoning models', () => {
+    expect(resolveModelProfile(settings({ translationProvider: 'openai' }), 'gpt-5.4-mini')).toBeUndefined()
+    expect(resolveModelProfile(settings({ translationProvider: 'local_openai' }), 'deepseek-v4-pro')).toBeUndefined()
+    expect(resolveModelProfile(settings({ translationProvider: 'local_openai' }), 'mistral-small')).toBeUndefined()
   })
 })
 

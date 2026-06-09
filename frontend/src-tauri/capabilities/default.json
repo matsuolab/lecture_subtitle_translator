@@ -49,6 +49,14 @@
         }
       ]
     },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [
+        {
+          "path": "**"
+        }
+      ]
+    },
     "shell:allow-open",
     {
       "identifier": "shell:allow-execute",

@@ -49,6 +49,44 @@ describe('shared admin settings', () => {
     expect(patch.openaiApiKey).toBeUndefined()
     expect(patch.openaiCompatibleBaseUrl).toBe('http://127.0.0.1:11434/v1')
   })
+
+  it('exports and imports API compatibility profile settings without secrets', () => {
+    const apiCompatibilityProfileJson = JSON.stringify({
+      id: 'user:api:my-server',
+      label: 'My Server',
+      schemaVersion: 1,
+      profileVersion: '2026.06.08-user',
+      origin: 'user',
+      requestDialect: {
+        chat: {
+          endpoint: '/chat/completions',
+          tokenLimitParam: 'max_tokens',
+          responseFormat: 'text',
+        },
+        embeddings: { endpoint: '/embeddings' },
+        vision: {
+          endpoint: '/chat/completions',
+          supportsDataUrl: true,
+          supportsRemoteUrl: false,
+        },
+      },
+    })
+    const payload = createSharedAdminSettingsExport({
+      ...getDefaultAdminSettings(),
+      openaiApiKey: 'sk-secret',
+      apiCompatibilityProfilePreset: 'user',
+      apiCompatibilityProfileJson,
+    })
+
+    expect(payload.settings.apiCompatibilityProfilePreset).toBe('user')
+    expect(payload.settings.apiCompatibilityProfileJson).toBe(apiCompatibilityProfileJson)
+    expect(JSON.stringify(payload)).not.toContain('sk-secret')
+
+    const patch = parseSharedAdminSettingsExport(JSON.stringify(payload))
+    expect(patch.apiCompatibilityProfilePreset).toBe('user')
+    expect(patch.apiCompatibilityProfileJson).toBe(apiCompatibilityProfileJson)
+    expect(patch.openaiApiKey).toBeUndefined()
+  })
 })
 
 describe('admin settings model profile migration', () => {
@@ -64,5 +102,19 @@ describe('admin settings model profile migration', () => {
     expect(normalized.chatTextProfileJson).toBe('{"id":"legacy"}')
     expect(normalized.chatVisionProfileJson).toBe('{"id":"legacy"}')
     expect(normalized.embeddingProfileJson).toBe('{"id":"legacy"}')
+  })
+
+  it('drops removed model profile presets back to auto', () => {
+    const normalized = normalizeAdminSettings({
+      modelProfilePreset: 'openai',
+      chatTextProfilePreset: 'deepseek',
+      chatVisionProfilePreset: 'non_reasoning',
+      embeddingProfilePreset: 'qwen',
+    })
+
+    expect(normalized.modelProfilePreset).toBe('auto')
+    expect(normalized.chatTextProfilePreset).toBe('auto')
+    expect(normalized.chatVisionProfilePreset).toBe('auto')
+    expect(normalized.embeddingProfilePreset).toBe('qwen')
   })
 })

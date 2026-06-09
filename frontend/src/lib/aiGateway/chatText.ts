@@ -1,9 +1,10 @@
-import { resolveJsonResponseFormatForProvider } from '@/lib/pipeline/aiProvider'
 import { adaptChatCompletionRequest, type LlmReasoningMode, normalizeChatCompletionContent } from '@/lib/pipeline/modelProfile'
 import type { LlmUsageSink } from '@/lib/pipeline/llmUsageSink'
 import { getCurrentLlmUsageSink, safePush } from '@/lib/pipeline/llmUsageSink'
 import type { AiGatewayContext } from './connection'
 import { requireGatewayConnection } from './connection'
+import { applyChatRequestDialect, resolveApiCompatibilityProfile, resolveChatResponseFormatForDialect } from './apiCompatibilityProfile'
+import { formatAiGatewayHttpError } from './errors'
 
 export type ChatTextContent = string | Array<
   | { type: 'text'; text: string }
@@ -53,12 +54,14 @@ function buildChatTextBody(
   } else if (typeof options.temperature === 'number') {
     body.temperature = options.temperature
   }
-  if (typeof options.maxTokens === 'number') body.max_tokens = options.maxTokens
+  const apiCompatibilityProfile = resolveApiCompatibilityProfile(context.settings)
+  body = applyChatRequestDialect(body, apiCompatibilityProfile, { maxOutputTokens: options.maxTokens })
   if (typeof options.maxCompletionTokens === 'number') body.max_completion_tokens = options.maxCompletionTokens
   if (options.responseFormat !== 'omit') {
-    body.response_format = options.responseFormat === 'json_object' || options.responseFormat === 'text'
+    const responseFormat = options.responseFormat === 'json_object' || options.responseFormat === 'text'
       ? { type: options.responseFormat }
-      : resolveJsonResponseFormatForProvider(context.settings)
+      : resolveChatResponseFormatForDialect(apiCompatibilityProfile)
+    if (responseFormat) body.response_format = responseFormat
   }
 
   if (!options.messages.every((message): message is { role: string; content: string } => typeof message.content === 'string')) {
@@ -117,7 +120,7 @@ export async function chatText(
     return {
       content: '',
       httpStatus: response.status,
-      errorMessage: `http_${response.status}: ${detail.slice(0, 200)}`,
+      errorMessage: formatAiGatewayHttpError({ context, status: response.status, detail }),
     }
   }
 

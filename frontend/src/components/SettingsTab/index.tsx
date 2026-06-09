@@ -5,10 +5,16 @@ import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useToast } from '@/context/ToastContext'
-import type { AdminSettings, ModelProfilePresetId, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ServiceMode, TranslationProvider } from '@/types/adminSettings'
 import { createSharedAdminSettingsExport, parseSharedAdminSettingsExport } from '@/api/adminSettings'
 import { createAiGateway } from '@/lib/aiGateway'
 import type { AiGatewayProbeName } from '@/lib/aiGateway'
+import {
+  createUserApiCompatibilityProfileFromBuiltin,
+  formatApiCompatibilityProfileJson,
+  resolveApiCompatibilityProfile,
+  validateApiCompatibilityProfileJson,
+} from '@/lib/aiGateway/apiCompatibilityProfile'
 import {
   DEFAULT_GEMINI_CHAT_MODEL,
   DEFAULT_OPENAI_CHAT_MODEL,
@@ -50,11 +56,17 @@ const serviceModeOptions: Array<{ value: ServiceMode; label: string }> = [
 
 const modelProfilePresetOptions: Array<{ value: ModelProfilePresetId; label: string }> = [
   { value: 'auto', label: 'Auto' },
-  { value: 'openai', label: 'OpenAI' },
   { value: 'gemma', label: 'Gemma' },
   { value: 'qwen', label: 'Qwen' },
-  { value: 'deepseek', label: 'DeepSeek' },
-  { value: 'non_reasoning', label: 'Non reasoning' },
+]
+
+const apiCompatibilityProfilePresetOptions: Array<{ value: ApiCompatibilityProfilePresetId; label: string }> = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'lmstudio', label: 'LM Studio' },
+  { value: 'ollama', label: 'Ollama' },
+  { value: 'gemini_openai_compatible', label: 'Gemini OpenAI互換' },
+  { value: 'user', label: 'User Profile' },
 ]
 
 export function SettingsTab({
@@ -84,7 +96,30 @@ export function SettingsTab({
   const [aiGatewayProbeItems, setAiGatewayProbeItems] = React.useState<AiGatewayProbeItem[]>([])
   const [aiGatewayProbeRunning, setAiGatewayProbeRunning] = React.useState(false)
   const sharedSettingsImportRef = React.useRef<HTMLInputElement>(null)
+  const apiCompatibilityProfileImportRef = React.useRef<HTMLInputElement>(null)
   const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
+  const resolvedApiCompatibilityProfile = React.useMemo(() => {
+    try {
+      return resolveApiCompatibilityProfile(adminSettings)
+    } catch {
+      return null
+    }
+  }, [adminSettings])
+  const autoResolvedApiCompatibilityProfile = React.useMemo(() => {
+    try {
+      return resolveApiCompatibilityProfile({
+        ...adminSettings,
+        apiCompatibilityProfilePreset: 'auto',
+        apiCompatibilityProfileJson: '',
+      })
+    } catch {
+      return null
+    }
+  }, [adminSettings])
+  const apiCompatibilityProfileValidation = React.useMemo(
+    () => validateApiCompatibilityProfileJson(adminSettings.apiCompatibilityProfileJson),
+    [adminSettings.apiCompatibilityProfileJson],
+  )
   const normalizationValidation = React.useMemo(
     () => validateTextNormalizationRulesJson(normalizationJsonDraft),
     [normalizationJsonDraft],
@@ -282,6 +317,59 @@ export function SettingsTab({
     }
   }
 
+  function duplicateResolvedApiCompatibilityProfile() {
+    const source = resolvedApiCompatibilityProfile?.origin === 'builtin'
+      ? resolvedApiCompatibilityProfile
+      : autoResolvedApiCompatibilityProfile
+    if (!source) {
+      toast.error('apiCompatibilityProfileDuplicateError')
+      return
+    }
+    const userProfile = createUserApiCompatibilityProfileFromBuiltin(source)
+    onAdminSettingsChange({
+      apiCompatibilityProfilePreset: 'user',
+      apiCompatibilityProfileJson: formatApiCompatibilityProfileJson(userProfile),
+    })
+    toast.success('apiCompatibilityProfileDuplicated')
+  }
+
+  function exportApiCompatibilityProfileJson() {
+    const result = validateApiCompatibilityProfileJson(adminSettings.apiCompatibilityProfileJson)
+    if (!result.ok || !result.profile) {
+      toast.error('apiCompatibilityProfileInvalid', { error: result.error ?? '' })
+      return
+    }
+    const blob = new Blob([formatApiCompatibilityProfileJson(result.profile)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${result.profile.id.replace(/[^a-z0-9._-]+/gi, '_')}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success('apiCompatibilityProfileExported')
+  }
+
+  async function importApiCompatibilityProfileJson(file: File | undefined) {
+    if (!file) return
+    try {
+      const text = await file.text()
+      const result = validateApiCompatibilityProfileJson(text)
+      if (!result.ok || !result.profile) {
+        toast.error('apiCompatibilityProfileInvalid', { error: result.error ?? '' })
+        return
+      }
+      onAdminSettingsChange({
+        apiCompatibilityProfilePreset: 'user',
+        apiCompatibilityProfileJson: formatApiCompatibilityProfileJson(result.profile),
+      })
+      toast.success('apiCompatibilityProfileImported')
+    } catch (error) {
+      toast.error('apiCompatibilityProfileInvalid', { error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      if (apiCompatibilityProfileImportRef.current) apiCompatibilityProfileImportRef.current.value = ''
+    }
+  }
+
   function applyNormalizationJsonDraft() {
     const result = validateTextNormalizationRulesJson(normalizationJsonDraft)
     if (!result.ok) {
@@ -379,124 +467,7 @@ export function SettingsTab({
 
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
-      <Section title={t.settingsColorTheme} theme={theme}>
-        {themes.map(th => (
-          <OptionCard
-            key={th.id}
-            isActive={th.id === theme.id}
-            onClick={() => setThemeId(th.id)}
-            theme={theme}
-          >
-            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-              {[th.appBg, th.panelBg, th.accent].map((color, i) => (
-                <div key={i} style={{
-                  width: 14, height: 14, borderRadius: 3,
-                  background: color, border: `1px solid ${theme.panelBorder}`,
-                }} />
-              ))}
-            </div>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: theme.textPrimary }}>{th.label}</div>
-              <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
-                {th.id === 'poc' ? t.pocThemeDesc : t.matsuoThemeDesc}
-              </div>
-            </div>
-          </OptionCard>
-        ))}
-      </Section>
-
-      <Section title={t.settingsLanguage} theme={theme}>
-        {locales.map(locale => (
-          <OptionCard
-            key={locale.id}
-            isActive={locale.id === t.id}
-            onClick={() => setLocaleId(locale.id)}
-            theme={theme}
-          >
-            <div style={{ fontSize: 18, lineHeight: 1, flexShrink: 0 }}>
-              {locale.id === 'ja' ? '🇯🇵' : locale.id === 'en' ? '🇺🇸' : locale.id === 'zh' ? '🇨🇳' : '🌐'}
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: theme.textPrimary }}>
-              {locale.label}
-            </div>
-          </OptionCard>
-        ))}
-      </Section>
-
-      <Section title="アプリ情報" theme={theme}>
-        <FieldCard theme={theme}>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>バージョン</div>
-            <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
-              {currentVersion && currentVersion !== '0.0.0' ? currentVersion : '開発ビルド'}
-            </div>
-          </div>
-        </FieldCard>
-      </Section>
-
-      <Section title="ワークログ（作業データ記録）" theme={theme}>
-        <FieldCard theme={theme}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>保管場所</div>
-          <div style={{
-            padding: '8px 10px',
-            borderRadius: 8,
-            border: `1px solid ${theme.panelBorder}`,
-            background: theme.panelBg,
-            color: theme.textSecondary,
-            fontSize: 11,
-            lineHeight: 1.6,
-            wordBreak: 'break-all',
-          }}>
-            {adminSettings.workLogDir.trim() || '既定（アプリデータ領域内の worklogs フォルダ）'}
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button type="button" onClick={handlePickWorkLogDir} style={smallButtonStyle(theme)}>
-              フォルダを選択
-            </button>
-            {adminSettings.workLogDir.trim() && (
-              <button
-                type="button"
-                onClick={() => onAdminSettingsChange({ workLogDir: '' })}
-                style={smallButtonStyle(theme)}
-              >
-                既定に戻す
-              </button>
-            )}
-            <button type="button" onClick={handleOpenWorkLogDir} style={smallButtonStyle(theme)}>
-              フォルダを開く
-            </button>
-          </div>
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-            書き起こし・AI修正・手動編集の作業履歴をセッションごとの JSONL ファイルに記録します。
-            保管場所を変更すると、変更後の新しいセッションから新フォルダに保存されます（過去のログは移動しません）。
-            {!isWorkLogPersistent() && ' ※ブラウザ実行のため、ワークログはメモリ保持のみ（リロードで消えます）。'}
-          </div>
-        </FieldCard>
-      </Section>
-
-      <Section title={t.settingsAdminTitle} theme={theme}>
-        <FieldCard theme={theme}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>管理者設定の共有</div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button type="button" onClick={exportSharedAdminSettings} style={smallButtonStyle(theme)}>
-              共有用JSONを出力
-            </button>
-            <button type="button" onClick={() => sharedSettingsImportRef.current?.click()} style={smallButtonStyle(theme)}>
-              共有用JSONを読み込む
-            </button>
-            <input
-              ref={sharedSettingsImportRef}
-              type="file"
-              accept=".json,application/json"
-              onChange={(event) => void importSharedAdminSettings(event.target.files?.[0])}
-              style={{ display: 'none' }}
-            />
-          </div>
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-            プロンプト、例文、モデル、プロファイル、閾値を共有します。OpenAI互換 Base URL は出力時に含めるか選択します。
-            Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
-          </div>
-        </FieldCard>
+      <Section title="接続設定" theme={theme}>
         <FieldCard theme={theme}>
           <ModeSelectField
             theme={theme}
@@ -709,6 +680,40 @@ export function SettingsTab({
           ))}
         </datalist>
 
+        <div style={{
+          marginTop: 4,
+          paddingTop: 8,
+          borderTop: `1px solid ${theme.panelBorder}`,
+          fontSize: 12,
+          fontWeight: 700,
+          color: theme.textPrimary,
+        }}>
+          管理者設定
+        </div>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>管理者設定の共有</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={exportSharedAdminSettings} style={smallButtonStyle(theme)}>
+              共有用JSONを出力
+            </button>
+            <button type="button" onClick={() => sharedSettingsImportRef.current?.click()} style={smallButtonStyle(theme)}>
+              共有用JSONを読み込む
+            </button>
+            <input
+              ref={sharedSettingsImportRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => void importSharedAdminSettings(event.target.files?.[0])}
+              style={{ display: 'none' }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            プロンプト、例文、モデル、プロファイル、閾値を共有します。OpenAI互換 Base URL は出力時に含めるか選択します。
+            Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
+          </div>
+        </FieldCard>
+
         <FieldCard theme={theme}>
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
             入力でフィルター・絞り込み。「モデル一覧を更新」で選択肢を取得してから ▼ をクリックすると一覧表示されます。
@@ -781,6 +786,73 @@ export function SettingsTab({
             hint="空欄 = text-embedding-3-small"
             onChange={(value) => onAdminSettingsChange({ embeddingModel: value })}
           />
+          <ApiCompatibilityProfileSelect
+            theme={theme}
+            label="API Compatibility Profile"
+            value={adminSettings.apiCompatibilityProfilePreset}
+            onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfilePreset: value })}
+          />
+          <div style={{
+            padding: '8px 10px',
+            borderRadius: 8,
+            border: `1px solid ${theme.panelBorder}`,
+            background: theme.panelBg,
+            color: theme.textSecondary,
+            fontSize: 11,
+            lineHeight: 1.6,
+          }}>
+            <div style={{ color: theme.textPrimary, fontWeight: 700 }}>
+              Resolved: {resolvedApiCompatibilityProfile
+                ? `${resolvedApiCompatibilityProfile.id} (${resolvedApiCompatibilityProfile.label})`
+                : 'User Profile JSON が不正です'}
+            </div>
+            {resolvedApiCompatibilityProfile && (
+              <div>
+                tokenLimitParam: {resolvedApiCompatibilityProfile.requestDialect.chat.tokenLimitParam}
+                {' / '}
+                responseFormat: {resolvedApiCompatibilityProfile.requestDialect.chat.responseFormat}
+              </div>
+            )}
+            {adminSettings.apiCompatibilityProfilePreset === 'auto' && autoResolvedApiCompatibilityProfile && (
+              <div>Auto は現在 {autoResolvedApiCompatibilityProfile.id} を使用します。</div>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={duplicateResolvedApiCompatibilityProfile} style={smallButtonStyle(theme)}>
+              Built-inをUser JSONへ複製
+            </button>
+            <button type="button" onClick={exportApiCompatibilityProfileJson} style={smallButtonStyle(theme)}>
+              User JSONを出力
+            </button>
+            <button type="button" onClick={() => apiCompatibilityProfileImportRef.current?.click()} style={smallButtonStyle(theme)}>
+              User JSONを読み込む
+            </button>
+            <input
+              ref={apiCompatibilityProfileImportRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => void importApiCompatibilityProfileJson(event.target.files?.[0])}
+              style={{ display: 'none' }}
+            />
+          </div>
+          <TextareaField
+            theme={theme}
+            label="API Compatibility User Profile JSON"
+            value={adminSettings.apiCompatibilityProfileJson}
+            placeholder="User Profile 選択時に使用。Built-inを複製して requestDialect を調整してください"
+            onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfileJson: value })}
+          />
+          <div style={{
+            fontSize: 11,
+            color: apiCompatibilityProfileValidation.ok ? '#22c55e' : '#ef4444',
+            lineHeight: 1.5,
+          }}>
+            {adminSettings.apiCompatibilityProfileJson.trim()
+              ? apiCompatibilityProfileValidation.ok
+                ? `User Profile JSON OK: ${apiCompatibilityProfileValidation.profile?.id ?? 'unknown'}`
+                : `User Profile JSON error: ${apiCompatibilityProfileValidation.error ?? 'invalid profile'}`
+              : 'User Profile JSON は空です。Built-inを複製して外部エディタで編集できます。'}
+          </div>
           <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
             <ModelProfileSelect
               theme={theme}
@@ -924,6 +996,110 @@ export function SettingsTab({
         >
           {t.settingsResetAdmin}
         </button>
+      </Section>
+
+      <Section title="一般設定" theme={theme}>
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{t.settingsColorTheme}</div>
+          <div style={{ display: 'grid', gap: 10 }}>
+            {themes.map(th => (
+              <OptionCard
+                key={th.id}
+                isActive={th.id === theme.id}
+                onClick={() => setThemeId(th.id)}
+                theme={theme}
+              >
+                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                  {[th.appBg, th.panelBg, th.accent].map((color, i) => (
+                    <div key={i} style={{
+                      width: 14, height: 14, borderRadius: 3,
+                      background: color, border: `1px solid ${theme.panelBorder}`,
+                    }} />
+                  ))}
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: theme.textPrimary }}>{th.label}</div>
+                  <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
+                    {th.id === 'poc' ? t.pocThemeDesc : t.matsuoThemeDesc}
+                  </div>
+                </div>
+              </OptionCard>
+            ))}
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{t.settingsLanguage}</div>
+          <div style={{ display: 'grid', gap: 10 }}>
+            {locales.map(locale => (
+              <OptionCard
+                key={locale.id}
+                isActive={locale.id === t.id}
+                onClick={() => setLocaleId(locale.id)}
+                theme={theme}
+              >
+                <div style={{ fontSize: 18, lineHeight: 1, flexShrink: 0 }}>
+                  {locale.id === 'ja' ? 'JP' : locale.id === 'en' ? 'EN' : locale.id === 'zh' ? 'ZH' : 'LANG'}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: theme.textPrimary }}>
+                  {locale.label}
+                </div>
+              </OptionCard>
+            ))}
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>バージョン</div>
+            <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
+              {currentVersion && currentVersion !== '0.0.0' ? currentVersion : '開発ビルド'}
+            </div>
+          </div>
+        </FieldCard>
+      </Section>
+
+      <Section title="詳細設定" theme={theme}>
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>ワークログ（作業データ記録）</div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            失敗調査や作業履歴確認に使うローカル記録です。通常は既定のままで問題ありません。
+          </div>
+          <div style={{
+            padding: '8px 10px',
+            borderRadius: 8,
+            border: `1px solid ${theme.panelBorder}`,
+            background: theme.panelBg,
+            color: theme.textSecondary,
+            fontSize: 11,
+            lineHeight: 1.6,
+            wordBreak: 'break-all',
+          }}>
+            {adminSettings.workLogDir.trim() || '既定（アプリデータ領域内の worklogs フォルダ）'}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={handlePickWorkLogDir} style={smallButtonStyle(theme)}>
+              フォルダを選択
+            </button>
+            {adminSettings.workLogDir.trim() && (
+              <button
+                type="button"
+                onClick={() => onAdminSettingsChange({ workLogDir: '' })}
+                style={smallButtonStyle(theme)}
+              >
+                既定に戻す
+              </button>
+            )}
+            <button type="button" onClick={handleOpenWorkLogDir} style={smallButtonStyle(theme)}>
+              フォルダを開く
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            書き起こし・AI修正・手動編集の作業履歴をセッションごとの JSONL ファイルに記録します。
+            保管場所を変更すると、変更後の新しいセッションから新フォルダに保存されます（過去のログは移動しません）。
+            {!isWorkLogPersistent() && ' ※ブラウザ実行のため、ワークログはメモリ保持のみ（リロードで消えます）。'}
+          </div>
+        </FieldCard>
       </Section>
 
       <Section title={t.settingsSubtitleQualityTitle} theme={theme}>
@@ -1175,7 +1351,7 @@ export function SettingsTab({
               textAlign: 'left',
             }}
           >
-            <span style={{ fontSize: 12, fontWeight: 700 }}>正規化ルール設定</span>
+            <span style={{ fontSize: 12, fontWeight: 700 }}>字幕テキスト正規化</span>
             <span style={{ fontSize: 11, color: theme.textSecondary }}>
               {adminSettings.textNormalizationEnabled ? `ON / ${activeNormalizationRuleCount}件` : 'OFF'} {normalizationOpen ? '▲' : '▼'}
             </span>
@@ -1835,6 +2011,41 @@ function ModelProfileSelect({
         }}
       >
         {modelProfilePresetOptions.map(option => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function ApiCompatibilityProfileSelect({
+  theme,
+  label,
+  value,
+  onChange,
+}: {
+  theme: Theme
+  label: string
+  value: ApiCompatibilityProfilePresetId
+  onChange: (value: ApiCompatibilityProfilePresetId) => void
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as ApiCompatibilityProfilePresetId)}
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: `1px solid ${theme.panelBorder}`,
+          background: theme.panelBg,
+          color: theme.textPrimary,
+          fontSize: 12,
+        }}
+      >
+        {apiCompatibilityProfilePresetOptions.map(option => (
           <option key={option.value} value={option.value}>{option.label}</option>
         ))}
       </select>

@@ -13,7 +13,7 @@ function settings(overrides: Partial<AdminSettings> = {}): AdminSettings {
 }
 
 describe('AI Gateway chatVision', () => {
-  it('sends mixed text and image_url content through Chat Completions', async () => {
+  it('applies the OpenAI request dialect to mixed text and image_url Chat Completions', async () => {
     const calls: Array<{ url: string; init: TauriFetchOptions }> = []
     const gateway = createAiGateway(settings({ translationProvider: 'openai' }), {
       fetch: async (url, init) => {
@@ -61,7 +61,7 @@ describe('AI Gateway chatVision', () => {
           ],
         },
       ],
-      max_tokens: 4096,
+      max_completion_tokens: 4096,
       response_format: { type: 'json_object' },
     })
   })

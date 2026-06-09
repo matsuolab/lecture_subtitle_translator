@@ -13,7 +13,7 @@ function settings(overrides: Partial<AdminSettings> = {}): AdminSettings {
 }
 
 describe('AI Gateway chatText', () => {
-  it('keeps the OpenAI Chat Completions request shape unchanged', async () => {
+  it('applies the OpenAI request dialect to Chat Text requests', async () => {
     const calls: Array<{ url: string; init: TauriFetchOptions }> = []
     const gateway = createAiGateway(settings({ translationProvider: 'openai' }), {
       fetch: async (url, init) => {
@@ -61,8 +61,32 @@ describe('AI Gateway chatText', () => {
         { role: 'user', content: 'Say ok.' },
       ],
       temperature: 0.2,
-      max_tokens: 2048,
+      max_completion_tokens: 2048,
       response_format: { type: 'json_object' },
     })
+  })
+
+  it('classifies local context size errors with an actionable hint', async () => {
+    const gateway = createAiGateway(settings({
+      translationProvider: 'local_openai',
+      openaiCompatibleBaseUrl: 'http://127.0.0.1:1234/v1',
+      translationModel: 'google/gemma-4-12b',
+    }), {
+      fetch: async () => new Response(JSON.stringify({
+        error: 'Context size has been exceeded.',
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } }),
+    })
+
+    const result = await gateway.chatText({
+      nodeName: 'local-context-regression',
+      model: 'google/gemma-4-12b',
+      messages: [{ role: 'user', content: 'Translate this.' }],
+      maxTokens: 2048,
+    })
+
+    expect(result.httpStatus).toBe(400)
+    expect(result.errorMessage).toContain('context_size_exceeded')
+    expect(result.errorMessage).toContain('LM Studio')
+    expect(result.errorMessage).toContain('context length')
   })
 })

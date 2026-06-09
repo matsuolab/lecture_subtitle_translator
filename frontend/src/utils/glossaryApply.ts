@@ -2,8 +2,8 @@
  * 用語辞書の自動適応ユーティリティ
  *
  * アプローチ:
- * 1. 正規表現（単語境界 + 単純複数形）— 技術用語の表記ゆれ修正に有効
- * 2. compromise（英語形態素解析）— 複数形・変化形のより柔軟な検出に使用
+ * 1. 正規表現（単語境界）— 用語の検出と大文字小文字の置換に使用
+ * 2. compromise（英語形態素解析）— 複数形・変化形の検出に使用
  *
  * LLM による翻訳と重複しても構わない。ライブラリ側は決定的（deterministic）
  * なルールベースなので再現性があり、QA として機能する。
@@ -71,11 +71,12 @@ function findWithNlp(text: string, term: string): boolean {
 }
 
 /**
- * 英語テキストに確定済み用語辞書を適用し、表記を正規化する
+ * 英語テキストに確定済み用語辞書を適用し、大文字小文字の違いを辞書表記へ揃える
  *
- * 正規化対象:
+ * 置換対象:
  * - 大文字・小文字の揺れ（"transformer" → "Transformer"）
- * - 単純複数形の正規化（"Transformers" → "Transformer"）
+ *
+ * 複数形・所有格・語形変化は検出には使うが、自動置換では変更しない。
  *
  * 注意: 承認済みブロックへの適用は呼び出し側で制御する
  */
@@ -92,7 +93,7 @@ export function applyGlossaryToText(
     const pattern = buildPatternStrict(entry.en)
 
     result = result.replace(pattern, (match, matchOffset) => {
-      // 既に正規形なら変更しない（所有格・複数形は正規化する）
+      // 既に正規形なら変更しない。
       const isAlreadyCanonical = match === entry.en
       if (isAlreadyCanonical) return match
 

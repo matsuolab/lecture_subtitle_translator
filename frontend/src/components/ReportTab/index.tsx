@@ -79,8 +79,6 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
 
   const totalRuns = runs.length
   const successRate = totalRuns > 0 ? successRuns.length / totalRuns : 0
-  // NOTE: avgCost はコスト改修中のため未使用。
-  // 続き: docs/research/20260527_cost_display_continuation.md 参照
   const avgDurationSec = measuredRuns.length > 0
     ? measuredRuns.reduce((sum, r) => sum + (r.metrics?.cost.durationMs ?? 0), 0) / measuredRuns.length / 1000
     : 0
@@ -177,8 +175,20 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
               <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 10, color: theme.textSecondary }}>
                 <span>CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%</span>
                 <span>{maxCharsPerLine}文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%</span>
-                <span style={{ fontStyle: 'italic', color: theme.textMuted }}>推定コスト: 改修中</span>
                 <span>処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s</span>
+              </div>
+            )}
+            {pipelineRun.status === 'error' && (
+              <div style={{
+                marginTop: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                borderRadius: 6,
+                padding: '7px 8px',
+                background: theme.panelBg,
+                color: theme.textSecondary,
+                lineHeight: 1.6,
+              }}>
+                失敗原因の確認に必要な処理ログと設定スナップショットはJSON保存に含まれます。管理者へ報告する場合は、上部ツールバーのJSON保存で現在のプロジェクトを出力してください。
               </div>
             )}
           </div>
@@ -291,6 +301,23 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                 {JSON.stringify(latestRunWithLogs.debug?.settingsSnapshot ?? {}, null, 2)}
               </pre>
             </details>
+
+            <details>
+              <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontWeight: 700 }}>
+                AI Gateway プロファイル
+              </summary>
+              <pre style={{
+                margin: '8px 0 0',
+                padding: 8,
+                borderRadius: 6,
+                background: theme.panelBg,
+                color: theme.textSecondary,
+                overflowX: 'auto',
+                fontSize: 10,
+              }}>
+                {JSON.stringify(latestRunWithLogs.debug?.aiGatewayProfiles ?? {}, null, 2)}
+              </pre>
+            </details>
           </div>
         )}
       </div>
@@ -308,7 +335,6 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: theme.textSecondary }}>
           <span>{t.reportTotalRuns}: {totalRuns}</span>
           <span>{t.reportSuccessRate}: {(successRate * 100).toFixed(1)}%</span>
-          <span style={{ fontStyle: 'italic', color: theme.textMuted }}>{t.reportAvgCost}: 改修中</span>
           <span>{t.reportAvgDuration}: {avgDurationSec.toFixed(2)}s</span>
         </div>
       </div>
@@ -320,23 +346,24 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
         padding: '10px 12px',
         marginBottom: 10,
       }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
-          {t.reportReviewQueue}
-        </div>
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>
+            {t.reportReviewQueue}
+          </summary>
 
-        {!latestAudit ? (
-          <div style={{ fontSize: 12, color: theme.textMuted }}>{t.reportReviewQueueEmpty}</div>
-        ) : (
-          <>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8, fontSize: 11, color: theme.textSecondary }}>
-              <span>MUST: {latestAudit.mustReviewCount}</span>
-              <span>SHOULD: {latestAudit.shouldReviewCount}</span>
-              <span>AUTO: {latestAudit.autoPassCount}</span>
-              <span>{t.reportNodeTraceCount(latestAudit.nodeTraces.length)}</span>
-            </div>
+          {!latestAudit ? (
+            <div style={{ marginTop: 8, fontSize: 12, color: theme.textMuted }}>{t.reportReviewQueueEmpty}</div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8, marginBottom: 8, fontSize: 11, color: theme.textSecondary }}>
+                <span>MUST: {latestAudit.mustReviewCount}</span>
+                <span>SHOULD: {latestAudit.shouldReviewCount}</span>
+                <span>AUTO: {latestAudit.autoPassCount}</span>
+                <span>{t.reportNodeTraceCount(latestAudit.nodeTraces.length)}</span>
+              </div>
 
-            <div style={{ display: 'grid', gap: 6 }}>
-              {topReviewItems.map(item => (
+              <div style={{ display: 'grid', gap: 6 }}>
+                {topReviewItems.map(item => (
                 <div
                   key={item.id}
                   style={{
@@ -355,8 +382,6 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                     <span style={{ color: theme.textSecondary, fontWeight: 700 }}>
                       {dispositionLabel(item.disposition)}
                     </span>
-                    <span style={{ color: theme.textPrimary }}>{item.nodeId}</span>
-                    <span style={{ color: theme.textMuted }}>score: {item.score.toFixed(2)}</span>
                     {item.blockId !== undefined && <span style={{ color: theme.textMuted }}>block: {item.blockId}</span>}
                   </div>
                   <div style={{ color: theme.textPrimary, fontWeight: 600 }}>
@@ -430,11 +455,18 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                       {categoryLabel(item.category)}
                     </div>
                   )}
+                  <details style={{ marginTop: 4 }}>
+                    <summary style={{ cursor: 'pointer', color: theme.textMuted }}>診断詳細</summary>
+                    <div style={{ marginTop: 3, color: theme.textMuted }}>
+                      node: {item.nodeId} / score: {item.score.toFixed(2)}
+                    </div>
+                  </details>
                 </div>
-              ))}
-            </div>
-          </>
-        )}
+                ))}
+              </div>
+            </>
+          )}
+        </details>
       </div>
 
       <div style={{
@@ -459,7 +491,6 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColSource}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColStatus}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColFinishedAt}</th>
-                  <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColCost}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColDuration}</th>
                   <th style={{ textAlign: 'left', padding: '6px 4px' }}>{t.reportColQuality}</th>
                 </tr>
@@ -470,9 +501,6 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                     <td style={{ padding: '6px 4px', color: theme.textPrimary }}>{run.sourceName ?? '-'}</td>
                     <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{statusLabel(run.status)}</td>
                     <td style={{ padding: '6px 4px', color: theme.textSecondary }}>{formatFinishedAt(run.finishedAt)}</td>
-                    <td style={{ padding: '6px 4px', color: theme.textMuted, fontStyle: 'italic' }}>
-                      改修中
-                    </td>
                     <td style={{ padding: '6px 4px', color: theme.textSecondary }}>
                       {run.metrics ? `${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : '-'}
                     </td>

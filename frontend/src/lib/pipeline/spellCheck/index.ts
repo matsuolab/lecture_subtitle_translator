@@ -1,0 +1,7 @@
+export type { SpellChecker, SpellIssue, SpellIssueReason, ScriptName } from './types'
+export { filterIssues } from './filterIssues'
+export { createHunspellChecker } from './hunspellChecker'
+export { resolveSpellChecker } from './resolveSpellChecker'
+export { loadBundledDictionary } from './dictionaryRegistry'
+export { useSpellChecker } from './useSpellChecker'
+export { spellIssuesToTerms, SPELL_HIGHLIGHT_COLOR } from './toHighlightTerms'

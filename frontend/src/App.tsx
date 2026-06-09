@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useTransition } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef, useTransition } from 'react'
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { readFile, readTextFile } from '@tauri-apps/plugin-fs'
@@ -32,15 +32,16 @@ import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
+import { useSpellChecker, type SpellIssue } from '@/lib/pipeline/spellCheck'
 import type { LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary, type GlossaryEntry, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
 import { useToast } from '@/context/ToastContext'
-import { applyGlossaryToText } from '@/utils/glossaryApply'
 import { useWorkLog } from '@/hooks/useWorkLog'
 import type { WorkLogBaselineOrigin } from '@/lib/worklog/types'
 import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
+import { buildAiGatewayProfileSnapshot } from '@/lib/aiGateway/apiCompatibilityProfile'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving'
@@ -400,6 +401,7 @@ function toUiSafePipelineRun(result: PipelineRunResult): PipelineRunResult {
 function getPipelineClientDebug(error: unknown): {
   transcriptSegments?: TranscriptSegment[]
   transcriptMetadata?: Record<string, unknown>
+  traces?: PipelineNodeTrace[]
   stageSnapshots?: PipelineRunDebug['stageSnapshots']
 } {
   if (!error || typeof error !== 'object') return {}
@@ -411,7 +413,34 @@ function getPipelineClientDebug(error: unknown): {
     transcriptMetadata: row.transcriptMetadata && typeof row.transcriptMetadata === 'object'
       ? row.transcriptMetadata as Record<string, unknown>
       : undefined,
+    traces: Array.isArray(row.traces) ? row.traces as PipelineNodeTrace[] : undefined,
     stageSnapshots: Array.isArray(row.stageSnapshots) ? row.stageSnapshots as PipelineRunDebug['stageSnapshots'] : undefined,
+  }
+}
+
+function stringifyUnknownError(err: unknown): string | undefined {
+  if (err === null || err === undefined) return undefined
+  if (typeof err === 'string') return err
+  try {
+    const json = JSON.stringify(err)
+    return json && json !== '{}' ? json : undefined
+  } catch {
+    return Object.prototype.toString.call(err)
+  }
+}
+
+function buildPipelineErrorInfo(err: unknown): NonNullable<PipelineRunDebug['errorInfo']> {
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: describeError(err),
+      stack: err.stack,
+      raw: stringifyUnknownError(err),
+    }
+  }
+  return {
+    message: describeError(err),
+    raw: stringifyUnknownError(err),
   }
 }
 
@@ -1231,6 +1260,7 @@ export default function App() {
             mode: adminSettings.serviceMode,
           },
           settingsSnapshot: sanitizeAdminSettings(adminSettings),
+          aiGatewayProfiles: buildAiGatewayProfileSnapshot(adminSettings),
           initialBlocks: initialBlocksSnapshot,
           finalBlocks: cloneBlocks(generated),
           progressEvents,
@@ -1260,6 +1290,18 @@ export default function App() {
     } catch (err) {
       const finishedAt = Date.now()
       const pipelineDebug = getPipelineClientDebug(err)
+      const errorMessage = describeError(err)
+      const failureTraces = pipelineDebug.traces ?? traces
+      const pipelineErrorTrace: PipelineNodeTrace = {
+        nodeId: pipelineDebug.traces?.length ? 'pipeline_catch' : 'pipeline',
+        status: 'failure',
+        attempt: 1,
+        durationMs: finishedAt - startedAt,
+        provider: 'app',
+        model: 'n/a',
+        summary: errorMessage,
+      }
+      const nodeTraces = [...failureTraces, pipelineErrorTrace]
       transcriptSegments = transcriptSegments ?? pipelineDebug.transcriptSegments
       transcriptMetadata = transcriptMetadata ?? pipelineDebug.transcriptMetadata
       stageSnapshots = stageSnapshots ?? pipelineDebug.stageSnapshots
@@ -1267,13 +1309,13 @@ export default function App() {
         at: finishedAt,
         status: 'error',
         step: 'done',
-        message: describeError(err),
+        message: errorMessage,
         runId: managedRunId,
       })
       const result: PipelineRunResult = {
         status: 'error',
         step: 'done',
-        message: `パイプライン失敗: ${describeError(err)}`,
+        message: `パイプライン失敗: ${errorMessage}`,
         runId: managedRunId,
         sourceName,
         startedAt,
@@ -1285,13 +1327,13 @@ export default function App() {
           reviewItems: [
             {
               id: 'pipeline-error',
-              nodeId: 'pipeline',
-              reason: describeError(err),
+              nodeId: pipelineDebug.traces?.find(trace => trace.status === 'failure')?.nodeId ?? 'pipeline',
+              reason: errorMessage,
               priority: 'must_review',
               score: 0,
             },
           ],
-          nodeTraces: traces,
+          nodeTraces,
         },
         debug: {
           sourceMedia: {
@@ -1300,12 +1342,14 @@ export default function App() {
             mode: adminSettings.serviceMode,
           },
           settingsSnapshot: sanitizeAdminSettings(adminSettings),
+          aiGatewayProfiles: buildAiGatewayProfileSnapshot(adminSettings),
           initialBlocks: initialBlocksSnapshot,
           finalBlocks: cloneBlocks(blocks),
           progressEvents,
           stageSnapshots,
           transcriptSegments,
           transcriptMetadata,
+          errorInfo: buildPipelineErrorInfo(err),
         },
       }
       latestPipelineDebugRef.current = result.debug
@@ -1344,10 +1388,42 @@ export default function App() {
     },
   }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource, getWorkLogExport])
 
+  // ── 字幕スペル校正（docs/adr/0003-subtitle-spellcheck.md） ──────────────
+  const glossaryEnTerms = useMemo(
+    () => glossary.map(e => e.en).filter((w): w is string => typeof w === 'string' && w.trim().length > 0),
+    [glossary],
+  )
+  const spellChecker = useSpellChecker(adminSettings, glossaryEnTerms)
+  const [spellIssuesByBlock, setSpellIssuesByBlock] = useState<Record<number, SpellIssue[]>>({})
+
+  /** 対象ブロックを「一旦フラグをクリア → 再チェックして反映」する。全トリガ共通。 */
+  const checkBlocksSpelling = useCallback(async (targets: Array<{ id: number; source: string }>): Promise<number> => {
+    // チェック前にまず該当ブロックのフラグを消す（陳腐化した表示を残さない）
+    setSpellIssuesByBlock(prev => {
+      const next = { ...prev }
+      for (const t of targets) delete next[t.id]
+      return next
+    })
+    if (!spellChecker) return 0
+    let total = 0
+    const updates: Record<number, SpellIssue[]> = {}
+    for (const t of targets) {
+      const issues = await spellChecker.check(t.source ?? '')
+      updates[t.id] = issues
+      total += issues.length
+    }
+    setSpellIssuesByBlock(prev => ({ ...prev, ...updates }))
+    return total
+  }, [spellChecker])
+
   const handleExportSrt = useCallback(() => {
     exportSrt(blocks, adminSettings, srtExportFormat)
     toast.success('exportSrt')
-  }, [adminSettings, blocks, srtExportFormat, toast])
+    // 出力時に全ブロックを自動スペルチェック（警告のみ・出力はブロックしない）
+    void checkBlocksSpelling(blocks.map(b => ({ id: b.id, source: b.source }))).then(total => {
+      if (total > 0) toast.error('spellCheckFound', { count: total })
+    })
+  }, [adminSettings, blocks, srtExportFormat, toast, checkBlocksSpelling])
 
   const handleSrtFormatChange = useCallback((next: SrtExportFormat) => {
     setSrtExportFormat(next)
@@ -1715,8 +1791,30 @@ export default function App() {
         { status: nextStatus },
       )
     }))
+    // 承認ボタン押下時は常に当該ブロックを再スペルチェック（編集後の再検証も兼ねる）
+    const target = blocks.find(b => b.id === id)
+    if (target) void checkBlocksSpelling([{ id: target.id, source: target.source }])
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blocks])
+  }, [blocks, checkBlocksSpelling])
+
+  /** 誤検知語をユーザー個人辞書へ登録（全プロジェクトで恒久除外）。即時にハイライトを消す。 */
+  const handleAddToSpellDictionary = useCallback((word: string) => {
+    const trimmed = word.trim()
+    if (!trimmed) return
+    if (!adminSettings.spellUserDictionary.includes(trimmed)) {
+      updateAdminSettings({ spellUserDictionary: [...adminSettings.spellUserDictionary, trimmed] })
+    }
+    // 楽観的に全ブロックから当該語の検出を除去
+    setSpellIssuesByBlock(prev => {
+      const next: Record<number, SpellIssue[]> = {}
+      for (const [id, issues] of Object.entries(prev)) {
+        next[Number(id)] = issues.filter(i => i.word !== trimmed)
+      }
+      return next
+    })
+    toast.success('spellWordAdded', { word: trimmed })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adminSettings.spellUserDictionary, updateAdminSettings, toast])
 
   const handleFlag = useCallback((id: number) => {
     push(blocks.map(b => {
@@ -2021,7 +2119,10 @@ export default function App() {
         { source: text },
       )
     }))
-  }, [blocks, push])
+    // 本文を編集したら、一旦フラグを消してから編集後テキストで再チェック
+    void checkBlocksSpelling([{ id, source: text }])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks, push, checkBlocksSpelling])
 
   const handleBulkReplace = useCallback((updates: Array<{ id: number; source?: string; target?: string }>) => {
     if (updates.length === 0) return
@@ -2076,28 +2177,6 @@ export default function App() {
       }
     }))
   }, [blocks, push])
-
-  const handleApplyGlossary = useCallback(() => {
-    const confirmed = glossary.filter(g => g.confirmed)
-    let totalReplacements = 0
-    let blocksUpdated = 0
-    const updated = blocks.map(block => {
-      if (block.status === 'approved') return block
-      const result = applyGlossaryToText(block.source, confirmed)
-      if (!result.changed) return block
-      const duration = block.endTime - block.startTime
-      totalReplacements += result.replacements.length
-      blocksUpdated++
-      return {
-        ...block,
-        source: result.text,
-        cps: calculateRoundedCps(result.text, Math.max(0.1, duration)),
-        charCount: countCpsChars(result.text),
-      }
-    })
-    if (blocksUpdated > 0) push(updated)
-    return { blocksUpdated, replacements: totalReplacements }
-  }, [blocks, glossary, push])
 
   const currentBlock = blocks.find(b => currentTime >= b.startTime && currentTime < b.endTime)
   const subtitleOverlay = currentBlock
@@ -2338,7 +2417,7 @@ export default function App() {
 
           {/* タブ行 */}
           <div className="flex items-center shrink-0" style={{ borderBottom: `1px solid ${theme.panelBorder}`, background: theme.headerBg }}>
-            {(['subtitles', 'dictionary', 'help', 'report'] as Tab[]).map(tab => (
+            {(['subtitles', 'report', 'dictionary', 'help'] as Tab[]).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -2564,11 +2643,12 @@ export default function App() {
                 onBulkReplace={handleBulkReplace}
                 maxCps={adminSettings.enMaxCps}
                 maxCharsPerLine={adminSettings.enMaxCharsPerLine}
+                spellIssuesByBlock={spellIssuesByBlock}
+                onAddToSpellDictionary={handleAddToSpellDictionary}
               />
             )}
             {!isResizing && activeTab === 'dictionary' && (
               <GlossaryTab
-                onApplyAll={handleApplyGlossary}
                 adminSettings={adminSettings}
                 onAdminSettingsChange={updateAdminSettings}
                 generationLog={glossaryGenerationLog}

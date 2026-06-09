@@ -17,13 +17,20 @@ export const zh: LocaleStrings = {
     unsupportedGlossaryFile: '不支持的格式。请使用 CSV、XLSX 或 PDF。',
     glossaryImportError: ({ error = '' }) => `导入错误：${error}`,
     adminSettingsImportError: ({ error = '' }) => `设置 JSON 导入错误：${error}`,
+    spellCheckFound: ({ count = 0 }) => `拼写待确认：${count} 处（请查看字幕标签中的红色高亮）`,
+    spellWordAdded: ({ word = '' }) => `已将“${word}”加入词典`,
+    apiCompatibilityProfileDuplicated: 'API 兼容配置已复制到用户 JSON',
+    apiCompatibilityProfileDuplicateError: '没有可复制的 API 兼容配置',
+    apiCompatibilityProfileExported: 'API 兼容配置 JSON 已导出',
+    apiCompatibilityProfileImported: 'API 兼容配置 JSON 已导入',
+    apiCompatibilityProfileInvalid: ({ error = '' }) => `API 兼容配置 JSON 无效。${error}`,
   },
 
   videoPlayer: '视频播放器',
-  tabSubtitles: '字幕块',
-  tabDictionary: '词汇表',
+  tabSubtitles: '字幕编辑',
+  tabDictionary: '词典',
   tabHelp: '帮助',
-  tabReport: '报告',
+  tabReport: '字幕生成',
   saving: '保存中…',
   saved: '✓ 已保存',
   loadProject: '加载',
@@ -90,7 +97,7 @@ export const zh: LocaleStrings = {
         '本工具是一款字幕编辑器，用于加载SRT文件和视频，逐块检查和编辑内容，最终导出SRT文件。',
         '① 加载SRT/项目  ② 播放视频逐块确认  ③ 编辑文本和时间  ④ 确认无误后审批  ⑤ 导出SRT',
         '项目会自动保存在浏览器中，也支持JSON格式的导出和导入。',
-        '拖放视频后，可在报告标签页查看质量、成本与运行历史。',
+        '拖放视频后，可在字幕生成标签页查看运行状态、质量指标和失败报告信息。',
       ],
     },
     {
@@ -117,9 +124,9 @@ export const zh: LocaleStrings = {
       ],
     },
     {
-      title: '词汇表的使用',
+      title: '词典的使用',
       paragraphs: [
-        '在词汇表标签页中，可通过按钮或拖放导入 CSV/XLSX。视频、SRT/JSON、词汇表文件需要分别拖到对应区域。',
+        '在词典标签页中，可通过按钮或拖放导入 CSV/XLSX。视频、SRT/JSON、词汇表文件需要分别拖到对应区域。',
         '导入时会显示“读取中...”以避免重复操作。字幕块除了高亮术语外，还会显示术语漏译/拼写候选，误报可用 × 忽略、↩ 恢复。'
       ],
     },
@@ -202,7 +209,7 @@ export const zh: LocaleStrings = {
   aiAskDesc: '未来版本将支持在此面板直接向 AI 询问工具使用方法或提示词调整问题。',
 
 
-  reportReviewQueue: '审阅优先队列（最新执行）',
+  reportReviewQueue: '诊断信息：审阅候选（最新执行）',
   reportReviewQueueEmpty: '无审计数据',
   reportNodeTraceCount: (n) => `追踪: ${n} 节点`,
   reportSummary: '运行摘要',

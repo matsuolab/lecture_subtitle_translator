@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback, Fragment } from 'react'
 import type { SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
 import { getCpsLevel } from '@/types/subtitle'
+import type { SpellIssue } from '@/lib/pipeline/spellCheck'
 import { SubtitleBlock } from './SubtitleBlock'
 import { SubtitleSearchBar, type SubtitleSearchState } from './SubtitleSearchBar'
 import { findMatches, buildReplaceAll, buildReplaceOne, type SearchMatch } from '@/lib/search/subtitleSearch'
@@ -38,6 +39,8 @@ interface SubtitleBlockListProps {
   onBulkReplace: (updates: Array<{ id: number; source?: string; target?: string }>) => void
   maxCps: number
   maxCharsPerLine: number
+  spellIssuesByBlock: Record<number, SpellIssue[]>
+  onAddToSpellDictionary: (word: string) => void
 }
 
 interface BoundaryDrag {
@@ -188,6 +191,8 @@ export function SubtitleBlockList({
   onBulkReplace,
   maxCps,
   maxCharsPerLine,
+  spellIssuesByBlock,
+  onAddToSpellDictionary,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -610,6 +615,8 @@ export function SubtitleBlockList({
               }}
               maxCps={maxCps}
               maxCharsPerLine={maxCharsPerLine}
+              spellIssues={spellIssuesByBlock[block.id]}
+              onAddToSpellDictionary={onAddToSpellDictionary}
               searchRangesTarget={searchRangesByBlock.get(block.id)?.target}
               searchRangesSource={searchRangesByBlock.get(block.id)?.source}
               searchOpen={searchOpen}

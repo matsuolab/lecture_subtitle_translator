@@ -5,6 +5,7 @@ import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
 import { findMissingTranslations, findMatchedGlossaryEntries, toSourceTerms, toTargetTerms, findTypoCandidates } from '@/utils/glossaryApply'
+import { spellIssuesToTerms, type SpellIssue } from '@/lib/pipeline/spellCheck'
 import type { Theme } from '@/themes'
 
 interface SubtitleBlockProps {
@@ -24,6 +25,10 @@ interface SubtitleBlockProps {
   onEqualSplit: (id: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
   onDraftChange: (id: number, text: string | null) => void
+  /** このブロックのスペル校正結果（承認/出力時に算出） */
+  spellIssues?: SpellIssue[]
+  /** 誤検知語をユーザー個人辞書へ登録 */
+  onAddToSpellDictionary: (word: string) => void
   canMergePrevious: boolean
   canMergeNext: boolean
   onMergeWithPrevious: (id: number) => void
@@ -50,6 +55,7 @@ interface WarningBadgeProps {
   textColor: string
   show: boolean
   onToggle: (e: React.MouseEvent) => void
+  onClose: () => void
   cardBg: string
   textSecondary: string
   textMuted: string
@@ -58,13 +64,23 @@ interface WarningBadgeProps {
 
 function WarningBadge({
   activeCount, ignoredCount, label, accentColor, textColor,
-  show, onToggle, cardBg, textSecondary: _textSecondary, textMuted, children,
+  show, onToggle, onClose, cardBg, textSecondary: _textSecondary, textMuted, children,
 }: WarningBadgeProps) {
   const allIgnored = activeCount === 0 && ignoredCount > 0
   const badgeBg = allIgnored ? 'rgba(128,128,128,0.25)' : accentColor
   const badgeColor = allIgnored ? textMuted : textColor
+  const rootRef = useRef<HTMLSpanElement>(null)
+  // 開いている間、バッジ外（他カード含む）をクリックしたら自動で閉じる
+  useEffect(() => {
+    if (!show) return
+    const onDocPointerDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) onClose()
+    }
+    document.addEventListener('mousedown', onDocPointerDown)
+    return () => document.removeEventListener('mousedown', onDocPointerDown)
+  }, [show, onClose])
   return (
-    <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+    <span ref={rootRef} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
       <span
         onClick={onToggle}
         style={{
@@ -124,9 +140,16 @@ interface WarningItemProps {
   onToggle: (e: React.MouseEvent) => void
   textSecondary: string
   textMuted: string
+  /** 任意の追加アクション（例: スペル誤検知を個人辞書へ登録） */
+  extraActionLabel?: string
+  extraActionTitle?: string
+  onExtraAction?: (e: React.MouseEvent) => void
 }
 
-function WarningItem({ label, ignored, onToggle, textSecondary, textMuted }: WarningItemProps) {
+function WarningItem({
+  label, ignored, onToggle, textSecondary, textMuted,
+  extraActionLabel, extraActionTitle, onExtraAction,
+}: WarningItemProps) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 6, fontSize: 11,
@@ -136,6 +159,19 @@ function WarningItem({ label, ignored, onToggle, textSecondary, textMuted }: War
       <span style={{ flex: 1, color: textSecondary, textDecoration: ignored ? 'line-through' : undefined }}>
         {label}
       </span>
+      {extraActionLabel && onExtraAction && !ignored && (
+        <button
+          onClick={onExtraAction}
+          style={{
+            border: 'none', background: 'transparent',
+            color: textMuted, cursor: 'pointer',
+            fontSize: 11, lineHeight: 1, padding: '0 4px', borderRadius: 3,
+          }}
+          title={extraActionTitle}
+        >
+          {extraActionLabel}
+        </button>
+      )}
       <button
         onClick={onToggle}
         style={{
@@ -352,6 +388,8 @@ function SubtitleBlockInner({
   onEqualSplit,
   onIgnoreWarning,
   onDraftChange,
+  spellIssues,
+  onAddToSpellDictionary,
   canMergePrevious,
   canMergeNext,
   onMergeWithPrevious,
@@ -413,13 +451,24 @@ function SubtitleBlockInner({
     })),
     [typoCandidates],
   )
-  // 英語ソース表示用: 辞書マッチ + タイポ候補を合成（タイポを後ろに追加して重複排除）
+  // スペル校正結果（ignoredTypos のキー `${word}::spell` で無視を反映）
+  const spellIgnoreKey = useCallback((word: string) => `${word}::spell`, [])
+  const activeSpellIssues = useMemo(
+    () => (spellIssues ?? []).filter(i => !(block.ignoredTypos ?? []).includes(spellIgnoreKey(i.word))),
+    [spellIssues, block.ignoredTypos, spellIgnoreKey],
+  )
+  const spellTerms = useMemo(() => spellIssuesToTerms(activeSpellIssues), [activeSpellIssues])
+  // 英語ソース表示用: 辞書マッチ + タイポ候補 + スペル誤り を合成（後ろに追加して重複排除）
   const sourceTerms = useMemo(() => {
-    const typoWords = new Set(typoCandidates.map(c => c.found.toLowerCase()))
-    const filtered = matchedTermsEn.filter(t => !typoWords.has(t.word.toLowerCase()))
-    return [...filtered, ...typoTerms]
-  }, [matchedTermsEn, typoTerms, typoCandidates])
+    const taken = new Set([
+      ...typoCandidates.map(c => c.found.toLowerCase()),
+      ...spellTerms.map(t => t.word.toLowerCase()),
+    ])
+    const filtered = matchedTermsEn.filter(t => !taken.has(t.word.toLowerCase()))
+    return [...filtered, ...typoTerms, ...spellTerms]
+  }, [matchedTermsEn, typoTerms, typoCandidates, spellTerms])
   const [showTypoList, setShowTypoList] = useState(false)
+  const [showSpellList, setShowSpellList] = useState(false)
   const [showMissingList, setShowMissingList] = useState(false)
   const [showAutoLog, setShowAutoLog] = useState(false)
   const [showMergeMenu, setShowMergeMenu] = useState(false)
@@ -551,6 +600,16 @@ function SubtitleBlockInner({
     e.stopPropagation()
     onIgnoreWarning(block.id, 'missing', key)
   }, [block.id, onIgnoreWarning])
+
+  const handleIgnoreSpell = useCallback((word: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    onIgnoreWarning(block.id, 'typo', spellIgnoreKey(word))
+  }, [block.id, onIgnoreWarning, spellIgnoreKey])
+
+  const ignoredSpellIssues = useMemo(
+    () => (spellIssues ?? []).filter(i => (block.ignoredTypos ?? []).includes(spellIgnoreKey(i.word))),
+    [spellIssues, block.ignoredTypos, spellIgnoreKey],
+  )
 
   const sourceLines = block.source.split('\n')
   const liveLines = isEditing ? editText.split('\n') : sourceLines
@@ -1035,7 +1094,8 @@ function SubtitleBlockInner({
             textColor={theme.cpsBadgeWarn[1]}
             show={showMissingList}
             onToggle={e => { e.stopPropagation(); setShowMissingList(v => !v) }}
-            cardBg={theme.cardBg}
+            onClose={() => setShowMissingList(false)}
+            cardBg={theme.panelBg}
             textSecondary={theme.textSecondary}
             textMuted={theme.textMuted}
           >
@@ -1075,7 +1135,8 @@ function SubtitleBlockInner({
             textColor={theme.cpsBadgeError[1]}
             show={showTypoList}
             onToggle={e => { e.stopPropagation(); setShowTypoList(v => !v) }}
-            cardBg={theme.cardBg}
+            onClose={() => setShowTypoList(false)}
+            cardBg={theme.panelBg}
             textSecondary={theme.textSecondary}
             textMuted={theme.textMuted}
           >
@@ -1108,6 +1169,55 @@ function SubtitleBlockInner({
                     />
                   )
                 })}
+              </>
+            )}
+          </WarningBadge>
+        )}
+        {(activeSpellIssues.length > 0 || ignoredSpellIssues.length > 0) && (
+          <WarningBadge
+            activeCount={activeSpellIssues.length}
+            ignoredCount={ignoredSpellIssues.length}
+            label="スペル?"
+            accentColor={theme.cpsBadgeError[0]}
+            textColor={theme.cpsBadgeError[1]}
+            show={showSpellList}
+            onToggle={e => { e.stopPropagation(); setShowSpellList(v => !v) }}
+            onClose={() => setShowSpellList(false)}
+            cardBg={theme.panelBg}
+            textSecondary={theme.textSecondary}
+            textMuted={theme.textMuted}
+          >
+            {activeSpellIssues.map(i => {
+              const label = i.reason === 'repeated_word'
+                ? `"${i.word}" 単語の重複?`
+                : i.suggestions.length > 0 ? `"${i.word}" → "${i.suggestions[0]}" ?` : `"${i.word}" 綴り?`
+              return (
+                <WarningItem
+                  key={`${i.word}::spell`}
+                  label={label}
+                  ignored={false}
+                  onToggle={e => handleIgnoreSpell(i.word, e)}
+                  textSecondary={theme.textSecondary}
+                  textMuted={theme.textMuted}
+                  extraActionLabel="＋辞書"
+                  extraActionTitle="この語を個人辞書に登録（今後どこでもフラグしない）"
+                  onExtraAction={e => { e.stopPropagation(); onAddToSpellDictionary(i.word) }}
+                />
+              )
+            })}
+            {ignoredSpellIssues.length > 0 && (
+              <>
+                <div style={{ borderTop: `1px solid ${theme.panelBorder}`, margin: '4px 0' }} />
+                {ignoredSpellIssues.map(i => (
+                  <WarningItem
+                    key={`${i.word}::spell`}
+                    label={`"${i.word}" 綴り?`}
+                    ignored={true}
+                    onToggle={e => handleIgnoreSpell(i.word, e)}
+                    textSecondary={theme.textSecondary}
+                    textMuted={theme.textMuted}
+                  />
+                ))}
               </>
             )}
           </WarningBadge>

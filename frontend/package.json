@@ -24,12 +24,18 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "clsx": "^2.1.1",
     "compromise": "^14.15.0",
+    "dictionary-en": "^4.0.0",
     "lucide-react": "^1.0.1",
     "pdfjs-dist": "^5.7.284",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "retext-english": "^5.0.0",
+    "retext-repeated-words": "^5.0.0",
+    "retext-spell": "^6.1.0",
+    "retext-stringify": "^4.0.0",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.2",
+    "unified": "^11.0.5",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

@@ -19,6 +19,13 @@ export interface LocaleStrings {
     unsupportedGlossaryFile: ToastMessage
     glossaryImportError: ToastMessage
     adminSettingsImportError: ToastMessage
+    spellCheckFound: ToastMessage
+    spellWordAdded: ToastMessage
+    apiCompatibilityProfileDuplicated: ToastMessage
+    apiCompatibilityProfileDuplicateError: ToastMessage
+    apiCompatibilityProfileExported: ToastMessage
+    apiCompatibilityProfileImported: ToastMessage
+    apiCompatibilityProfileInvalid: ToastMessage
   }
 
   videoPlayer: string

@@ -38,4 +38,4 @@ export interface ModelProfile {
   }
 }
 
-export type ModelProfilePresetId = 'auto' | 'openai' | 'gemma' | 'qwen' | 'deepseek' | 'non_reasoning'
+export type ModelProfilePresetId = 'auto' | 'gemma' | 'qwen'

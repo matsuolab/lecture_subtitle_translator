@@ -3,19 +3,6 @@ import type { ModelProfile, ModelProfilePresetId, SamplingParams } from '@/types
 import { resolveAiProvider } from './aiProvider'
 
 export const MODEL_PROFILE_PRESETS: Record<Exclude<ModelProfilePresetId, 'auto'>, ModelProfile> = {
-  openai: {
-    id: 'openai',
-    label: 'OpenAI reasoning-compatible',
-    contextLength: 128000,
-    maxOutputTokens: 32768,
-    supportsSystemRole: true,
-    reasoning: {
-      capability: 'toggleable',
-      enable: { method: 'param', key: 'reasoning_effort', onValue: 'medium', offValue: undefined },
-      output: { style: 'reasoning_content_field' },
-    },
-    sampling: {},
-  },
   gemma: {
     id: 'gemma',
     label: 'Gemma thinking-token compatible',
@@ -47,35 +34,6 @@ export const MODEL_PROFILE_PRESETS: Record<Exclude<ModelProfilePresetId, 'auto'>
       thinking: { temperature: 1.0, topP: 0.95, topK: 20, minP: 0 },
       nonThinking: { temperature: 0.7, topP: 0.8, topK: 20, presencePenalty: 1.5 },
     },
-  },
-  deepseek: {
-    id: 'deepseek',
-    label: 'DeepSeek thinking-mode compatible',
-    contextLength: 1000000,
-    maxOutputTokens: 32768,
-    supportsSystemRole: true,
-    reasoning: {
-      capability: 'toggleable',
-      enable: { method: 'param', key: 'thinking_mode', onValue: 'thinking', offValue: 'non-think' },
-      output: { style: 'reasoning_content_field', openTag: '<think>', closeTag: '</think>' },
-    },
-    sampling: {
-      thinking: { temperature: 1.0, topP: 1.0 },
-      nonThinking: { temperature: 1.0, topP: 1.0 },
-    },
-  },
-  non_reasoning: {
-    id: 'non_reasoning',
-    label: 'Non-reasoning OpenAI-compatible',
-    contextLength: 128000,
-    maxOutputTokens: 8192,
-    supportsSystemRole: true,
-    reasoning: {
-      capability: 'none',
-      enable: { method: 'none' },
-      output: { style: 'reasoning_content_field' },
-    },
-    sampling: {},
   },
 }
 
@@ -192,13 +150,10 @@ export function resolveModelProfile(
   const preset = presetId !== 'auto' ? presetId : settings.modelProfilePreset
   if (preset && preset !== 'auto') return MODEL_PROFILE_PRESETS[preset]
 
-  const provider = resolveAiProvider(settings)
   const normalized = model.toLowerCase()
-  if (provider === 'openai') return MODEL_PROFILE_PRESETS.openai
   if (normalized.includes('gemma')) return MODEL_PROFILE_PRESETS.gemma
   if (normalized.includes('qwen')) return MODEL_PROFILE_PRESETS.qwen
-  if (normalized.includes('deepseek')) return MODEL_PROFILE_PRESETS.deepseek
-  return provider === 'local_openai' ? MODEL_PROFILE_PRESETS.non_reasoning : undefined
+  return undefined
 }
 
 function estimatePromptTokens(messages: Array<{ role: string; content: string }>): number {

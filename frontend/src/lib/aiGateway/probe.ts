@@ -5,6 +5,8 @@ import { chatText } from './chatText'
 import { chatVision } from './chatVision'
 import { embeddings } from './embeddings'
 
+const PROBE_IMAGE_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAASSURBVBhXY/jPwPAfBCAkkAEAcKEN8wkSEoIAAAAASUVORK5CYII='
+
 export type AiGatewayProbeName = 'Connection' | 'Chat Text' | 'Embeddings' | 'Chat Vision'
 export type AiGatewayProbeStatus = 'success' | 'error'
 
@@ -43,7 +45,6 @@ export async function probeAll(context: AiGatewayContext): Promise<AiGatewayProb
       messages: [{ role: 'user', content: 'Return JSON only: {"ok":true}' }],
       temperature: 0,
       maxTokens: 32,
-      responseFormat: 'json_object',
     })
     results.push(result.errorMessage ? { name: 'Chat Text', status: 'error', message: result.errorMessage } : ok('Chat Text', `OK finish=${result.finishReason ?? 'unknown'}`))
   } catch (err) {
@@ -69,13 +70,12 @@ export async function probeAll(context: AiGatewayContext): Promise<AiGatewayProb
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: 'Reply with JSON only: {"ok":true}' },
-          { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', detail: 'low' } },
+          { type: 'text', text: 'Reply with exactly: OK' },
+          { type: 'image_url', image_url: { url: PROBE_IMAGE_DATA_URL, detail: 'low' } },
         ],
       }],
       temperature: 0,
-      maxTokens: 32,
-      responseFormat: 'json_object',
+      maxTokens: 256,
     })
     results.push(result.errorMessage ? { name: 'Chat Vision', status: 'error', message: result.errorMessage } : ok('Chat Vision', `OK finish=${result.finishReason ?? 'unknown'}`))
   } catch (err) {

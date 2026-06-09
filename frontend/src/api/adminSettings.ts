@@ -1,4 +1,4 @@
-import type { AdminSettings, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
 import {
@@ -50,6 +50,8 @@ export function getDefaultAdminSettings(): AdminSettings {
     geminiApiKey: '',
     openaiCompatibleBaseUrl: '',
     translationProvider: DEFAULT_TRANSLATION_PROVIDER,
+    apiCompatibilityProfilePreset: 'auto',
+    apiCompatibilityProfileJson: '',
     modelProfilePreset: 'auto',
     modelProfileJson: '',
     chatTextProfilePreset: 'auto',
@@ -75,6 +77,8 @@ export function getDefaultAdminSettings(): AdminSettings {
     subtitleMinDurationSec: 0.833,
     subtitleMaxDurationSec: 7.0,
     qualityCorrectionThreshold: 0.15,
+    spellUserDictionary: [],
+    spellImportedDictionaryLabels: [],
     pipelineShortDurationSec: 1.5,
     pipelineLongDurationSec: 14.0,
     pipelineMergedLongDurationSec: 12.0,
@@ -145,14 +149,25 @@ function normalizeTranslationProvider(value: unknown): TranslationProvider {
   return DEFAULT_TRANSLATION_PROVIDER
 }
 
-function normalizeModelProfilePreset(value: unknown): ModelProfilePresetId {
+function normalizeApiCompatibilityProfilePreset(value: unknown): ApiCompatibilityProfilePresetId {
   if (
     value === 'auto'
     || value === 'openai'
+    || value === 'lmstudio'
+    || value === 'ollama'
+    || value === 'gemini_openai_compatible'
+    || value === 'user'
+  ) {
+    return value
+  }
+  return 'auto'
+}
+
+function normalizeModelProfilePreset(value: unknown): ModelProfilePresetId {
+  if (
+    value === 'auto'
     || value === 'gemma'
     || value === 'qwen'
-    || value === 'deepseek'
-    || value === 'non_reasoning'
   ) {
     return value
   }
@@ -192,6 +207,8 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     geminiApiKey: typeof raw.geminiApiKey === 'string' ? raw.geminiApiKey : '',
     openaiCompatibleBaseUrl: typeof raw.openaiCompatibleBaseUrl === 'string' ? raw.openaiCompatibleBaseUrl : '',
     translationProvider: normalizeTranslationProvider(raw.translationProvider),
+    apiCompatibilityProfilePreset: normalizeApiCompatibilityProfilePreset(raw.apiCompatibilityProfilePreset),
+    apiCompatibilityProfileJson: typeof raw.apiCompatibilityProfileJson === 'string' ? raw.apiCompatibilityProfileJson : '',
     modelProfilePreset: normalizeModelProfilePreset(raw.modelProfilePreset),
     modelProfileJson: typeof raw.modelProfileJson === 'string' ? raw.modelProfileJson : '',
     chatTextProfilePreset: normalizeModelProfilePreset(raw.chatTextProfilePreset ?? raw.modelProfilePreset),
@@ -217,6 +234,12 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     subtitleMinDurationSec: normalizePositiveNumber(raw.subtitleMinDurationSec, defaults.subtitleMinDurationSec),
     subtitleMaxDurationSec: normalizePositiveNumber(raw.subtitleMaxDurationSec, defaults.subtitleMaxDurationSec),
     qualityCorrectionThreshold: normalizePositiveNumber(raw.qualityCorrectionThreshold, defaults.qualityCorrectionThreshold),
+    spellUserDictionary: Array.isArray(raw.spellUserDictionary)
+      ? raw.spellUserDictionary.filter((w): w is string => typeof w === 'string' && w.trim().length > 0)
+      : defaults.spellUserDictionary,
+    spellImportedDictionaryLabels: Array.isArray(raw.spellImportedDictionaryLabels)
+      ? raw.spellImportedDictionaryLabels.filter((w): w is string => typeof w === 'string' && w.trim().length > 0)
+      : defaults.spellImportedDictionaryLabels,
     pipelineShortDurationSec: normalizePositiveNumber(raw.pipelineShortDurationSec, defaults.pipelineShortDurationSec),
     pipelineLongDurationSec: normalizePositiveNumber(raw.pipelineLongDurationSec, defaults.pipelineLongDurationSec),
     pipelineMergedLongDurationSec: normalizePositiveNumber(raw.pipelineMergedLongDurationSec, defaults.pipelineMergedLongDurationSec),

@@ -4,6 +4,7 @@ export type TranslationProvider = 'openai' | 'gemini' | 'local_openai'
 export type ServiceMode = 'managed_service' | 'legacy_pipeline'
 export type SemanticCheckMode = 'off' | 'log_only' | 'enforce'
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+export type ApiCompatibilityProfilePresetId = 'auto' | 'openai' | 'lmstudio' | 'ollama' | 'gemini_openai_compatible' | 'user'
 export type { ModelProfilePresetId } from './modelProfile'
 
 export interface AdminSettings {
@@ -15,6 +16,8 @@ export interface AdminSettings {
   geminiApiKey: string
   openaiCompatibleBaseUrl: string
   translationProvider: TranslationProvider
+  apiCompatibilityProfilePreset: ApiCompatibilityProfilePresetId
+  apiCompatibilityProfileJson: string
   modelProfilePreset: ModelProfilePresetId
   modelProfileJson: string
   chatTextProfilePreset: ModelProfilePresetId
@@ -41,6 +44,12 @@ export interface AdminSettings {
   subtitleMinDurationSec: number
   subtitleMaxDurationSec: number
   qualityCorrectionThreshold: number
+
+  // 字幕スペル校正（subtitle側）。対応辞書がある言語なら自動チェック。詳細: docs/adr/0003-subtitle-spellcheck.md
+  /** ユーザーが「辞書に登録」した正しい綴り語（誤検知除外・ユーザー全体スコープ） */
+  spellUserDictionary: string[]
+  /** 一般用語辞書インポートで導入済みの言語ラベル一覧（hunspell .aff/.dic はアプリのデータ領域に保存。ユーザー全体スコープ） */
+  spellImportedDictionaryLabels: string[]
 
   // パイプライン閾値（PipelineThresholds に完全マッピング）
   pipelineShortDurationSec: number

@@ -134,6 +134,7 @@ export interface PipelineApiRunResult {
   debug?: {
     transcriptSegments?: TranscriptSegment[]
     transcriptMetadata?: Record<string, unknown>
+    traces?: PipelineNodeTrace[]
     stageSnapshots?: PipelineStageSnapshot[]
     mode: 'managed_service' | 'legacy_pipeline'
   }
@@ -657,7 +658,12 @@ async function runLocalTranscriptPipeline(
 
   const transcriptSegments = result.transcript_segments ?? []
   if (transcriptSegments.length === 0) {
-    throw buildManagedTranscriptError('local-transcript', result)
+    throw attachPipelineClientDebug(buildManagedTranscriptError('local-transcript', result), {
+      transcriptSegments,
+      transcriptMetadata: result.metadata,
+      traces: managedTraces,
+      mode: 'legacy_pipeline',
+    })
   }
 
   onProgress?.({
@@ -690,6 +696,7 @@ async function runLocalTranscriptPipeline(
     throw attachPipelineClientDebug(error, {
       transcriptSegments,
       transcriptMetadata: result.metadata,
+      traces: [...managedTraces, ...(failure.traces ?? [])],
       stageSnapshots: failure.stageSnapshots,
       mode: 'legacy_pipeline',
     })
@@ -827,6 +834,7 @@ async function runManagedPipeline(
       throw attachPipelineClientDebug(error, {
         transcriptSegments,
         transcriptMetadata: result.metadata,
+        traces: [...managedTraces, ...(failure.traces ?? [])],
         stageSnapshots: failure.stageSnapshots,
         mode: 'managed_service',
       })
@@ -848,7 +856,12 @@ async function runManagedPipeline(
     }
   }
 
-  throw buildManagedTranscriptError(jobId, result)
+  throw attachPipelineClientDebug(buildManagedTranscriptError(jobId, result), {
+    transcriptSegments,
+    transcriptMetadata: result.metadata,
+    traces: managedTraces,
+    mode: 'managed_service',
+  })
 }
 
 export async function runPipelineViaService(

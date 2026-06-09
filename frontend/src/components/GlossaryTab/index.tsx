@@ -1,8 +1,9 @@
 import { useRef, useState, useCallback, type Dispatch, type SetStateAction } from 'react'
-import { FileText, Upload, Download, Trash2, Sparkles } from 'lucide-react'
+import { Upload, Download, Trash2, Sparkles } from 'lucide-react'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
+import { GeneralDictionarySection } from './GeneralDictionarySection'
 import { useToast } from '@/context/ToastContext'
 import { parseGlossaryCsv, exportGlossaryCsv } from '@/lib/glossary/csvParser'
 import { generateSelfMadeGlossaryFromPdf, type GlossaryGenerationProgressEvent } from '@/lib/glossary/documentGlossaryGenerator'
@@ -12,7 +13,6 @@ import { describeError } from '@/lib/describeError'
 import type { AdminSettings } from '@/types/adminSettings'
 
 interface GlossaryTabProps {
-  onApplyAll: () => { blocksUpdated: number; replacements: number }
   adminSettings: AdminSettings
   onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
   generationLog: string[]
@@ -24,7 +24,6 @@ interface GlossaryTabProps {
 type PendingDeleteTarget = 'formal' | 'self-made'
 
 export function GlossaryTab({
-  onApplyAll,
   adminSettings,
   onAdminSettingsChange,
   generationLog,
@@ -43,9 +42,7 @@ export function GlossaryTab({
     selfMadeGlossary,
     importEntries,
     importSelfMadeEntries,
-    importGlossaryIntoSelfMade,
     updateSelfMadeEntry,
-    promoteSelfMadeEntry,
     clearGlossary,
     clearSelfMadeGlossary,
   } = useGlossary()
@@ -53,6 +50,9 @@ export function GlossaryTab({
   const importRef = useRef<HTMLInputElement>(null)
   const createRef = useRef<HTMLInputElement>(null)
   const [isDragOver, setIsDragOver] = useState(false)
+  const [dictSubTab, setDictSubTab] = useState<'specialized' | 'general'>('specialized')
+  const [registeredOpen, setRegisteredOpen] = useState(false)
+  const [glossaryListOpen, setGlossaryListOpen] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [importMsg, setImportMsg] = useState<string | null>(null)
   const [selfMadeFilter, setSelfMadeFilter] = useState<'enabled' | 'term' | 'proper_noun' | 'formula' | 'abbreviation' | 'reference' | 'disabled' | 'all'>('enabled')
@@ -262,10 +262,11 @@ export function GlossaryTab({
     toast.success('exportCsv')
   }, [glossary, toast])
 
-  const handleExportSelfMadeConfirmed = useCallback(() => {
+  // 専門用語候補を共有辞書と同じCSV形式（出典付き）で出力。後で人手チェック→共有辞書へ登録する用。
+  const handleExportSelfMadeCsv = useCallback(() => {
     if (isBusy) return
     const entries = selfMadeGlossary
-      .filter(entry => entry.formalEligible && entry.jaConfirmed && entry.enConfirmed && entry.ja.trim() && entry.en.trim() && !entry.disabled)
+      .filter(entry => !entry.disabled && (entry.ja.trim() || entry.en.trim()))
       .map(entry => ({
         id: entry.id,
         ja: entry.ja,
@@ -276,47 +277,18 @@ export function GlossaryTab({
         desc: entry.desc,
         source: entry.source.name,
         sourceUrl: entry.children.find(child => child.url)?.url ?? null,
-        confirmed: true,
+        confirmed: !entry.disabled,
       }))
     const csv = exportGlossaryCsv(entries)
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'self-made-glossary-confirmed.csv'
+    a.download = 'term-candidates.csv'
     a.click()
     URL.revokeObjectURL(url)
     toast.success('exportCsv')
   }, [isBusy, selfMadeGlossary, toast])
-
-  const handleExportSelfMadeAll = useCallback(() => {
-    if (isBusy) return
-    const blob = new Blob([JSON.stringify(selfMadeGlossary, null, 2)], { type: 'application/json;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'self-made-glossary.json'
-    a.click()
-    URL.revokeObjectURL(url)
-    toast.success('exportJson')
-  }, [isBusy, selfMadeGlossary, toast])
-
-  const handleToggleConfirmed = useCallback((entry: SelfMadeGlossaryEntry, field: 'jaConfirmed' | 'enConfirmed') => {
-    if (isBusy) return
-    const nextValue = !entry[field]
-    const nextJaConfirmed = field === 'jaConfirmed' ? nextValue : entry.jaConfirmed
-    const nextEnConfirmed = field === 'enConfirmed' ? nextValue : entry.enConfirmed
-    updateSelfMadeEntry(entry.id, {
-      [field]: nextValue,
-      provisional: !(nextJaConfirmed && nextEnConfirmed),
-    })
-    if (nextJaConfirmed && nextEnConfirmed && entry.ja.trim() && entry.en.trim()) {
-      setTimeout(() => {
-        const result = promoteSelfMadeEntry(entry.id)
-        if (result.promoted) showMsg('日英確認済みのため正式辞書へ昇格しました')
-      }, 0)
-    }
-  }, [isBusy, promoteSelfMadeEntry, updateSelfMadeEntry])
 
   const primarySourceLabel = (entry: SelfMadeGlossaryEntry) => {
     const page = entry.children.find(child => child.page)?.page
@@ -408,6 +380,32 @@ export function GlossaryTab({
         </div>
       )}
 
+      {/* 辞書タブ内サブタブ（専門用語 / 一般用語） */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 12, borderBottom: `1px solid ${theme.panelBorder}` }}>
+        {([['specialized', '専門用語'], ['general', '一般用語']] as const).map(([key, name]) => (
+          <button
+            key={key}
+            onClick={() => setDictSubTab(key)}
+            style={{
+              border: 'none', background: 'transparent', cursor: 'pointer',
+              padding: '7px 14px', fontSize: 12,
+              fontWeight: dictSubTab === key ? 700 : 500,
+              color: dictSubTab === key ? theme.textPrimary : theme.textSecondary,
+              borderBottom: dictSubTab === key ? `2px solid ${theme.accent}` : '2px solid transparent',
+              marginBottom: -1,
+            }}
+          >
+            {name}
+          </button>
+        ))}
+      </div>
+
+      {dictSubTab === 'general' && (
+        <GeneralDictionarySection adminSettings={adminSettings} onAdminSettingsChange={onAdminSettingsChange} />
+      )}
+
+      {dictSubTab === 'specialized' && (<>
+
       {/* ツールバー */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
         <input
@@ -424,6 +422,12 @@ export function GlossaryTab({
           onChange={handleCreateFileChange}
           style={{ display: 'none' }}
         />
+
+        {/* 共有辞書（チームでCSV/XLSXとして共有する用語集） */}
+        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>共有辞書</div>
+        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+          この分野の専門用語集（日本語⇄英語）。<strong>書きおこしの修正・英訳の用語統一</strong>に使われ、<strong>字幕のスペルチェックでも「正しい語」として扱われます</strong>（誤検出から除外）。CSV/XLSX でチームと共有できます。
+        </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           <button
             onClick={() => importRef.current?.click()}
@@ -486,6 +490,69 @@ export function GlossaryTab({
           >
             <Trash2 size={11} style={{ flexShrink: 0 }} />
           </button>
+        </div>
+
+        {/* 共有辞書の中身（登録済み用語）— 折り畳み（既定は畳む） */}
+        <div style={{ border: `1px solid ${theme.panelBorder}`, borderRadius: 8, overflow: 'hidden' }}>
+          <button
+            onClick={() => setRegisteredOpen(v => !v)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              background: theme.cardBg, color: theme.textPrimary,
+              border: 'none', cursor: 'pointer', padding: '8px 12px', fontSize: 12, fontWeight: 700,
+            }}
+          >
+            <span>{t.registeredTerms(glossary.length)}</span>
+            <span style={{ fontSize: 11, color: theme.textSecondary }}>{registeredOpen ? '▲' : '▼'}</span>
+          </button>
+          {registeredOpen && (
+            <div style={{ padding: '8px 10px', borderTop: `1px solid ${theme.panelBorder}`, maxHeight: 360, overflowY: 'auto' }}>
+              {glossary.length === 0 && (
+                <div style={{ textAlign: 'center', padding: '20px 16px', fontSize: 12, color: theme.textMuted, lineHeight: 1.8 }}>
+                  用語辞書が空です。<br />
+                  CSVまたはXLSXファイルをドロップしてインポートしてください。
+                </div>
+              )}
+              {glossary.map((g) => (
+                <div key={g.id} style={{
+                  border: `1px solid ${theme.glossaryCardBorderDefault}`,
+                  borderRadius: 8, padding: '10px 12px', marginBottom: 8,
+                  background: theme.glossaryCardBgDefault,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: g.desc ? 6 : 0, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: theme.textPrimary }}>{g.ja}</span>
+                    <span style={{ color: theme.textSecondary, fontSize: 13 }}>→</span>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: theme.glossaryEnTermColor }}>{g.en}</span>
+                    {g.abbr && (
+                      <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: theme.videoBtnBg, color: theme.textSecondary, border: `1px solid ${theme.panelBorder}` }}>
+                        {g.abbr}
+                      </span>
+                    )}
+                    {g.domain && (
+                      <span style={{ fontSize: 11, color: theme.textMuted, marginLeft: 'auto' }}>#{g.domain}</span>
+                    )}
+                  </div>
+                  {g.desc && (
+                    <div style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, marginTop: 4 }}>{g.desc}</div>
+                  )}
+                  {g.source && (
+                    <div style={{ marginTop: 6 }}>
+                      {g.sourceUrl
+                        ? <a href={g.sourceUrl} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: theme.glossaryLinkColor }}>{t.source} {g.source}</a>
+                        : <span style={{ fontSize: 11, color: theme.textSecondary }}>{t.source} {g.source}</span>
+                      }
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 用語集作成（PDFから専門用語を抽出） */}
+        <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginTop: 4 }}>用語集作成</div>
+        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+          PDF（スライド等）を LLM で読み込み、<strong>専門用語や人物名を自動抽出</strong>します。抽出した用語は<strong>書きおこしの補正に利用</strong>されます（不要なものは無効化で個別に除外できます）。
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', paddingTop: 2 }}>
           <button
@@ -555,51 +622,6 @@ export function GlossaryTab({
         </div>
       </div>
 
-      {/* 全ブロック適用ボタン */}
-      {glossary.length > 0 && (
-        <div style={{
-          marginBottom: 12,
-          padding: '10px 12px',
-          borderRadius: 8,
-          border: `1px solid ${theme.accent}33`,
-          background: theme.cardBgActive,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-        }}>
-          <div style={{ flex: 1, fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
-            用語 {glossary.length} 件を全ブロックに適用
-            <br />
-            <span style={{ color: theme.textMuted }}>
-              表記ゆれ（大文字・複数形）を正規化します
-            </span>
-          </div>
-          <button
-            onClick={() => {
-              const result = onApplyAll()
-              if (result.replacements === 0) {
-                alert('修正が必要な表記ゆれは見つかりませんでした')
-              } else {
-                alert(`${result.blocksUpdated} ブロックを更新、${result.replacements} 件修正しました（Ctrl+Z で元に戻せます）`)
-              }
-            }}
-            style={{
-              border: `1px solid ${theme.accent}`,
-              background: theme.accent,
-              color: '#fff',
-              borderRadius: 6,
-              padding: '6px 14px',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            全ブロックに適用
-          </button>
-        </div>
-      )}
-
       {(generationLog.length > 0 || isBusy) && (
         <div style={{
           marginBottom: 12,
@@ -659,7 +681,7 @@ export function GlossaryTab({
         </div>
       )}
 
-      {sectionHeader(`専門用語候補 (${filteredSelfMadeGlossary.length}/${selfMadeGlossary.length})`, theme.textSecondary)}
+      <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginTop: 8, marginBottom: 8 }}>用語集</div>
 
       <div style={{
         marginBottom: 12,
@@ -673,31 +695,9 @@ export function GlossaryTab({
         flexWrap: 'wrap',
       }}>
         <button
-          onClick={() => {
-            if (isBusy) return
-            const { added, updated } = importGlossaryIntoSelfMade()
-            showMsg(`正式辞書を自作辞書へ取り込みました: ${added} 件追加、${updated} 件更新`)
-          }}
-          disabled={glossary.length === 0 || isBusy}
-          title="正式辞書の内容を自作辞書へ作業用データとして取り込む"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            border: `1px solid ${theme.btnBorder}`,
-            background: theme.btnBg,
-            color: glossary.length > 0 && !isBusy ? theme.btnText : theme.textDisabled,
-            borderRadius: 6,
-            padding: '5px 10px',
-            fontSize: 11,
-            cursor: glossary.length > 0 && !isBusy ? 'pointer' : 'not-allowed',
-          }}
-        >
-          <FileText size={11} />
-          正式辞書を取り込む
-        </button>
-        <button
-          onClick={handleExportSelfMadeConfirmed}
+          onClick={handleExportSelfMadeCsv}
           disabled={selfMadeGlossary.length === 0 || isBusy}
-          title="日英両方が確認済みの自作辞書だけCSV出力"
+          title="抽出用語集を共有辞書形式（出典付き）でCSV出力します"
           style={{
             display: 'flex', alignItems: 'center', gap: 5,
             border: `1px solid ${theme.btnBorder}`,
@@ -710,25 +710,7 @@ export function GlossaryTab({
           }}
         >
           <Download size={11} />
-          確認済みCSV
-        </button>
-        <button
-          onClick={handleExportSelfMadeAll}
-          disabled={selfMadeGlossary.length === 0 || isBusy}
-          title="自作辞書全体をJSON出力"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            border: `1px solid ${theme.btnBorder}`,
-            background: theme.btnBg,
-            color: selfMadeGlossary.length > 0 && !isBusy ? theme.btnText : theme.textDisabled,
-            borderRadius: 6,
-            padding: '5px 10px',
-            fontSize: 11,
-            cursor: selfMadeGlossary.length > 0 && !isBusy ? 'pointer' : 'not-allowed',
-          }}
-        >
-          <Download size={11} />
-          全体JSON
+          エクスポート (CSV)
         </button>
         <button
           onClick={() => {
@@ -753,6 +735,25 @@ export function GlossaryTab({
         </button>
       </div>
 
+      <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6, marginTop: -4, marginBottom: 10 }}>
+        書きおこし補正に利用する抽出用語集です。<strong>エクスポート (CSV)</strong> は抽出用語集を<strong>共有辞書形式（出典つき）</strong>で出力します。
+      </div>
+
+      {/* 用語一覧（書きおこし補正用の抽出用語集）— 共有辞書と同様に折り畳み（既定は畳む） */}
+      <div style={{ border: `1px solid ${theme.panelBorder}`, borderRadius: 8, overflow: 'hidden', marginBottom: 12 }}>
+        <button
+          onClick={() => setGlossaryListOpen(v => !v)}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            background: theme.cardBg, color: theme.textPrimary,
+            border: 'none', cursor: 'pointer', padding: '8px 12px', fontSize: 12, fontWeight: 700,
+          }}
+        >
+          <span>用語一覧 ({filteredSelfMadeGlossary.length}/{selfMadeGlossary.length})</span>
+          <span style={{ fontSize: 11, color: theme.textSecondary }}>{glossaryListOpen ? '▲' : '▼'}</span>
+        </button>
+        {glossaryListOpen && (
+          <div style={{ padding: '8px 10px', borderTop: `1px solid ${theme.panelBorder}`, maxHeight: 420, overflowY: 'auto' }}>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
         {selfMadeFilterOptions.map(option => (
           <button
@@ -829,46 +830,13 @@ export function GlossaryTab({
             {entry.origin === 'formal_import' && (
               <span style={{ fontSize: 11, color: theme.textMuted }}>正式辞書由来</span>
             )}
-            {entry.promoted && (
-              <span style={{ fontSize: 11, color: theme.savedColor }}>正式辞書へ昇格済み</span>
-            )}
-            <button
-              onClick={() => handleToggleConfirmed(entry, 'jaConfirmed')}
-              disabled={isBusy}
-              style={{
-                marginLeft: 'auto',
-                border: `1px solid ${entry.jaConfirmed ? theme.accent : theme.btnBorder}`,
-                background: entry.jaConfirmed ? theme.cardBgActive : theme.btnBg,
-                color: entry.jaConfirmed ? theme.accent : theme.btnText,
-                borderRadius: 6,
-                padding: '3px 8px',
-                fontSize: 11,
-                cursor: isBusy ? 'not-allowed' : 'pointer',
-              }}
-            >
-              ソース{entry.jaConfirmed ? '確認済み' : '未確認'}
-            </button>
-            <button
-              onClick={() => handleToggleConfirmed(entry, 'enConfirmed')}
-              disabled={isBusy}
-              style={{
-                border: `1px solid ${entry.enConfirmed ? theme.accent : theme.btnBorder}`,
-                background: entry.enConfirmed ? theme.cardBgActive : theme.btnBg,
-                color: entry.enConfirmed ? theme.accent : theme.btnText,
-                borderRadius: 6,
-                padding: '3px 8px',
-                fontSize: 11,
-                cursor: isBusy ? 'not-allowed' : 'pointer',
-              }}
-            >
-              ターゲット{entry.enConfirmed ? '確認済み' : '未確認'}
-            </button>
             <button
               onClick={() => {
                 if (!isBusy) updateSelfMadeEntry(entry.id, { disabled: !entry.disabled })
               }}
               disabled={isBusy}
               style={{
+                marginLeft: 'auto',
                 border: `1px solid ${theme.btnBorder}`,
                 background: 'none',
                 color: theme.textSecondary,
@@ -883,57 +851,9 @@ export function GlossaryTab({
           </div>
         </div>
       ))}
-
-      {sectionHeader(t.registeredTerms(glossary.length), theme.textSecondary)}
-
-      {glossary.length === 0 && (
-        <div style={{
-          textAlign: 'center', padding: '24px 16px',
-          fontSize: 12, color: theme.textMuted, lineHeight: 1.8,
-        }}>
-          用語辞書が空です。<br />
-          CSVまたはXLSXファイルをドロップしてインポートしてください。
-        </div>
-      )}
-
-      {glossary.map((g) => (
-        <div key={g.id} style={{
-          border: `1px solid ${theme.glossaryCardBorderDefault}`,
-          borderRadius: 8,
-          padding: '10px 12px',
-          marginBottom: 8,
-          background: theme.glossaryCardBgDefault,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: g.desc ? 6 : 0, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: theme.textPrimary }}>{g.ja}</span>
-            <span style={{ color: theme.textSecondary, fontSize: 13 }}>→</span>
-            <span style={{ fontSize: 15, fontWeight: 700, color: theme.glossaryEnTermColor }}>{g.en}</span>
-            {g.abbr && (
-              <span style={{
-                fontSize: 11, padding: '1px 6px', borderRadius: 4,
-                background: theme.videoBtnBg, color: theme.textSecondary,
-                border: `1px solid ${theme.panelBorder}`,
-              }}>
-                {g.abbr}
-              </span>
-            )}
-            {g.domain && (
-              <span style={{ fontSize: 11, color: theme.textMuted, marginLeft: 'auto' }}>#{g.domain}</span>
-            )}
           </div>
-          {g.desc && (
-            <div style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, marginTop: 4 }}>{g.desc}</div>
-          )}
-          {g.source && (
-            <div style={{ marginTop: 6 }}>
-              {g.sourceUrl
-                ? <a href={g.sourceUrl} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: theme.glossaryLinkColor }}>{t.source} {g.source}</a>
-                : <span style={{ fontSize: 11, color: theme.textSecondary }}>{t.source} {g.source}</span>
-              }
-            </div>
-          )}
-        </div>
-      ))}
+        )}
+      </div>
 
       {/* 自動抽出候補（将来機能・現在はモックデータ表示） */}
       {extracted.length > 0 && (
@@ -1042,6 +962,8 @@ export function GlossaryTab({
           </div>
         </div>
       )}
+
+      </>)}
     </div>
   )
 }

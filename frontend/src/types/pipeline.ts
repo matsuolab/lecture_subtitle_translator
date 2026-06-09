@@ -1,5 +1,6 @@
 import type { SubtitleBlock } from './subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
+import type { AiGatewayProfileSnapshot } from '@/lib/aiGateway/apiCompatibilityProfile'
 
 export type PipelineStep = 'idle' | 'transcribe' | 'correct' | 'translate' | 'subtitle' | 'done'
 
@@ -127,6 +128,13 @@ export interface PipelineStageSnapshot {
   items: Record<string, unknown>[]
 }
 
+export interface PipelineErrorInfo {
+  message: string
+  name?: string
+  stack?: string
+  raw?: string
+}
+
 /**
  * 1 回の LLM API 呼び出しに対応する usage 記録。
  * pipeline 実行中に各 LLM 呼出点が `pushLlmUsage` で 1 件ずつ push する。
@@ -157,12 +165,14 @@ export interface PipelineRunDebug {
     mode?: string
   }
   settingsSnapshot?: Record<string, unknown>
+  aiGatewayProfiles?: AiGatewayProfileSnapshot
   initialBlocks?: SubtitleBlock[]
   finalBlocks?: SubtitleBlock[]
   stageSnapshots?: PipelineStageSnapshot[]
   progressEvents: PipelineProgressEvent[]
   transcriptSegments?: TranscriptSegment[]
   transcriptMetadata?: Record<string, unknown>
+  errorInfo?: PipelineErrorInfo
   /**
    * 各 LLM API 呼出の usage 記録。コスト・トークン集計の単一情報源。
    * 既存の per-node trace / agent entry の usage と重複しても問題ない（こちらは集計用、
