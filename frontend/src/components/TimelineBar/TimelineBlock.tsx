@@ -59,7 +59,7 @@ function TimelineBlockInner({
       )}
       style={{ left, width: Math.max(width - 2, 2) }}
       onClick={onClick}
-      title={`#${block.id}: ${block.source.slice(0, 40)}...`}
+      title={`#${block.id}: ${block.subtitle.slice(0, 40)}...`}
     >
       {/* fill animation */}
       {isActive && (

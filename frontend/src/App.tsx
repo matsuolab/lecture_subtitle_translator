@@ -518,17 +518,20 @@ export default function App() {
   const [srtExportFormat, setSrtExportFormat] = useState<SrtExportFormat>(() => {
     try {
       const saved = localStorage.getItem('srtExportFormat')
-      if (saved === 'source' || saved === 'target' || saved === 'both') return saved
-      // 旧スキーマ ('en' | 'ja' | 'both') からのマイグレーション
-      if (saved === 'en' || saved === 'ja') {
-        const migrated: SrtExportFormat = saved === 'ja' ? 'target' : 'source'
-        try { localStorage.setItem('srtExportFormat', migrated) } catch { /* ignore */ }
-        return migrated
+      if (saved === 'subtitle' || saved === 'transcript' || saved === 'both') return saved
+      // 旧スキーマ ('source'/'target' および最古 'en'/'ja') からのマイグレーション
+      if (saved === 'source' || saved === 'en') {
+        try { localStorage.setItem('srtExportFormat', 'subtitle') } catch { /* ignore */ }
+        return 'subtitle'
+      }
+      if (saved === 'target' || saved === 'ja') {
+        try { localStorage.setItem('srtExportFormat', 'transcript') } catch { /* ignore */ }
+        return 'transcript'
       }
     } catch {
       // ignore (e.g. SSR / private mode)
     }
-    return 'source'
+    return 'subtitle'
   })
   const [glossaryGenerationLog, setGlossaryGenerationLog] = useState<string[]>([])
   const [glossaryGenerationBusy, setGlossaryGenerationBusy] = useState(false)
@@ -865,7 +868,7 @@ export default function App() {
   const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
     const totalBlocks = Math.max(1, generated.length)
     const cpsViolationCount = generated.filter(b => b.cps > adminSettings.enMaxCps).length
-    const overLengthCount = generated.filter(b => b.source.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)).length
+    const overLengthCount = generated.filter(b => b.subtitle.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)).length
     const flaggedCount = generated.filter(b => b.status === 'flagged').length
 
     // NOTE: トークン数・コスト推定は誤った文字数ベース計算を停止中（2026-05-27）。
@@ -901,7 +904,7 @@ export default function App() {
           blockId: block.id,
         })
       }
-      const overLen = block.source.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)
+      const overLen = block.subtitle.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)
       if (overLen) {
         items.push({
           id: `len-${block.id}`,
@@ -1280,7 +1283,7 @@ export default function App() {
   const [spellIssuesByBlock, setSpellIssuesByBlock] = useState<Record<number, SpellIssue[]>>({})
 
   /** 対象ブロックを「一旦フラグをクリア → 再チェックして反映」する。全トリガ共通。 */
-  const checkBlocksSpelling = useCallback(async (targets: Array<{ id: number; source: string }>): Promise<number> => {
+  const checkBlocksSpelling = useCallback(async (targets: Array<{ id: number; subtitle: string }>): Promise<number> => {
     // チェック前にまず該当ブロックのフラグを消す（陳腐化した表示を残さない）
     setSpellIssuesByBlock(prev => {
       const next = { ...prev }
@@ -1291,7 +1294,7 @@ export default function App() {
     let total = 0
     const updates: Record<number, SpellIssue[]> = {}
     for (const t of targets) {
-      const issues = await spellChecker.check(t.source ?? '')
+      const issues = await spellChecker.check(t.subtitle ?? '')
       updates[t.id] = issues
       total += issues.length
     }
@@ -1303,7 +1306,7 @@ export default function App() {
     exportSrt(blocks, adminSettings, srtExportFormat)
     toast.success('exportSrt')
     // 出力時に全ブロックを自動スペルチェック（警告のみ・出力はブロックしない）
-    void checkBlocksSpelling(blocks.map(b => ({ id: b.id, source: b.source }))).then(total => {
+    void checkBlocksSpelling(blocks.map(b => ({ id: b.id, subtitle: b.subtitle }))).then(total => {
       if (total > 0) toast.error('spellCheckFound', { count: total })
     })
   }, [adminSettings, blocks, srtExportFormat, toast, checkBlocksSpelling])
@@ -1676,7 +1679,7 @@ export default function App() {
     }))
     // 承認ボタン押下時は常に当該ブロックを再スペルチェック（編集後の再検証も兼ねる）
     const target = blocks.find(b => b.id === id)
-    if (target) void checkBlocksSpelling([{ id: target.id, source: target.source }])
+    if (target) void checkBlocksSpelling([{ id: target.id, subtitle: target.subtitle }])
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blocks, checkBlocksSpelling])
 
@@ -1742,7 +1745,7 @@ export default function App() {
     const b1: SubtitleBlock = {
       ...block,
       endTime: splitTime,
-      source: textBefore,
+      subtitle: textBefore,
       cps: calculateRoundedCps(textBefore, dur1),
       charCount: countCpsChars(textBefore),
     }
@@ -1750,7 +1753,7 @@ export default function App() {
       ...block,
       id: newId,
       startTime: splitTime,
-      source: textAfter,
+      subtitle: textAfter,
       cps: calculateRoundedCps(textAfter, dur2),
       charCount: countCpsChars(textAfter),
       status: 'pending' as const,
@@ -1766,9 +1769,9 @@ export default function App() {
     const ratio = countCpsChars(textBefore) / Math.max(1, countCpsChars(textBefore) + countCpsChars(textAfter))
     const splitTime = block.startTime + (block.endTime - block.startTime) * ratio
     const [rawB1, rawB2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
-    const before = { id: block.id, source: block.source, startTime: block.startTime, endTime: block.endTime }
-    const b1 = withEditHistory(rawB1, 'split', before, { part: 'first', source: rawB1.source, startTime: rawB1.startTime, endTime: rawB1.endTime })
-    const b2 = withEditHistory(rawB2, 'split', before, { part: 'second', source: rawB2.source, startTime: rawB2.startTime, endTime: rawB2.endTime })
+    const before = { id: block.id, subtitle: block.subtitle, startTime: block.startTime, endTime: block.endTime }
+    const b1 = withEditHistory(rawB1, 'split', before, { part: 'first', subtitle: rawB1.subtitle, startTime: rawB1.startTime, endTime: rawB1.endTime })
+    const b2 = withEditHistory(rawB2, 'split', before, { part: 'second', subtitle: rawB2.subtitle, startTime: rawB2.startTime, endTime: rawB2.endTime })
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
@@ -1782,11 +1785,11 @@ export default function App() {
     const splitTime = currentTimeRef.current
     if (splitTime <= block.startTime || splitTime >= block.endTime) return
     const ratio = (splitTime - block.startTime) / (block.endTime - block.startTime)
-    const [textBefore, textAfter] = splitAtWordBoundary(block.source, Math.round(block.source.length * ratio))
+    const [textBefore, textAfter] = splitAtWordBoundary(block.subtitle, Math.round(block.subtitle.length * ratio))
     const [rawB1, rawB2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
-    const before = { id: block.id, source: block.source, startTime: block.startTime, endTime: block.endTime }
-    const b1 = withEditHistory(rawB1, 'split', before, { method: 'playhead', part: 'first', source: rawB1.source, startTime: rawB1.startTime, endTime: rawB1.endTime })
-    const b2 = withEditHistory(rawB2, 'split', before, { method: 'playhead', part: 'second', source: rawB2.source, startTime: rawB2.startTime, endTime: rawB2.endTime })
+    const before = { id: block.id, subtitle: block.subtitle, startTime: block.startTime, endTime: block.endTime }
+    const b1 = withEditHistory(rawB1, 'split', before, { method: 'playhead', part: 'first', subtitle: rawB1.subtitle, startTime: rawB1.startTime, endTime: rawB1.endTime })
+    const b2 = withEditHistory(rawB2, 'split', before, { method: 'playhead', part: 'second', subtitle: rawB2.subtitle, startTime: rawB2.startTime, endTime: rawB2.endTime })
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
@@ -1798,11 +1801,11 @@ export default function App() {
     if (idx === -1) return
     const block = blocks[idx]
     const splitTime = (block.startTime + block.endTime) / 2
-    const [textBefore, textAfter] = splitAtWordBoundary(block.source, Math.round(block.source.length / 2))
+    const [textBefore, textAfter] = splitAtWordBoundary(block.subtitle, Math.round(block.subtitle.length / 2))
     const [rawB1, rawB2] = makeSplitBlocks(block, splitTime, textBefore, textAfter)
-    const before = { id: block.id, source: block.source, startTime: block.startTime, endTime: block.endTime }
-    const b1 = withEditHistory(rawB1, 'split', before, { method: 'equal', part: 'first', source: rawB1.source, startTime: rawB1.startTime, endTime: rawB1.endTime })
-    const b2 = withEditHistory(rawB2, 'split', before, { method: 'equal', part: 'second', source: rawB2.source, startTime: rawB2.startTime, endTime: rawB2.endTime })
+    const before = { id: block.id, subtitle: block.subtitle, startTime: block.startTime, endTime: block.endTime }
+    const b1 = withEditHistory(rawB1, 'split', before, { method: 'equal', part: 'first', subtitle: rawB1.subtitle, startTime: rawB1.startTime, endTime: rawB1.endTime })
+    const b2 = withEditHistory(rawB2, 'split', before, { method: 'equal', part: 'second', subtitle: rawB2.subtitle, startTime: rawB2.startTime, endTime: rawB2.endTime })
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
@@ -1818,15 +1821,15 @@ export default function App() {
     const secondIdx = Math.max(dragIdx, dropIdx)
     const first = blocks[firstIdx]
     const second = blocks[secondIdx]
-    const mergedText = joinTextParts([first.source, second.source], '\n')
-    const mergedTarget = joinTextParts([first.target, second.target], '\n')
+    const mergedText = joinTextParts([first.subtitle, second.subtitle], '\n')
+    const mergedTranscript = joinTextParts([first.transcript, second.transcript], '\n')
     const duration = second.endTime - first.startTime
     const merged: SubtitleBlock = withEditHistory(
       {
         ...first,
         endTime: second.endTime,
-        target: mergedTarget,
-        source: mergedText,
+        transcript: mergedTranscript,
+        subtitle: mergedText,
         cps: duration > 0 ? calculateRoundedCps(mergedText, duration) : 0,
         charCount: countCpsChars(mergedText),
         status: 'pending',
@@ -1843,13 +1846,13 @@ export default function App() {
       'merge',
       {
         method: dragIdx < dropIdx ? 'manual_merge_next' : 'manual_merge_previous',
-        first: { id: first.id, source: first.source, target: first.target, startTime: first.startTime, endTime: first.endTime },
-        second: { id: second.id, source: second.source, target: second.target, startTime: second.startTime, endTime: second.endTime },
+        first: { id: first.id, subtitle: first.subtitle, transcript: first.transcript, startTime: first.startTime, endTime: first.endTime },
+        second: { id: second.id, subtitle: second.subtitle, transcript: second.transcript, startTime: second.startTime, endTime: second.endTime },
       },
       {
         id: first.id,
-        source: mergedText,
-        target: mergedTarget,
+        subtitle: mergedText,
+        transcript: mergedTranscript,
         startTime: first.startTime,
         endTime: second.endTime,
       },
@@ -1939,96 +1942,96 @@ export default function App() {
     }))
   }, [blocks, push])
 
-  const handleUpdateTarget = useCallback((id: number, text: string) => {
+  const handleUpdateTranscript = useCallback((id: number, text: string) => {
     push(blocks.map(b => b.id !== id ? b : withEditHistory(
-      { ...b, target: text },
-      'target_edit',
-      { target: b.target },
-      { target: text },
+      { ...b, transcript: text },
+      'transcript_edit',
+      { transcript: b.transcript },
+      { transcript: text },
     )))
   }, [blocks, push])
 
-  /** ターゲット分割: targetBefore/After で2ブロックに分割。sourceは両方コピー */
-  const handleSplitFromTarget = useCallback((id: number, targetBefore: string, targetAfter: string) => {
+  /** 書きおこし分割: transcriptBefore/After で2ブロックに分割。字幕(subtitle)は両方コピー */
+  const handleSplitFromTranscript = useCallback((id: number, transcriptBefore: string, transcriptAfter: string) => {
     const idx = blocks.findIndex(b => b.id === id)
     if (idx === -1) return
     const block = blocks[idx]
-    const ratio = targetBefore.length / Math.max(1, targetBefore.length + targetAfter.length)
+    const ratio = transcriptBefore.length / Math.max(1, transcriptBefore.length + transcriptAfter.length)
     const splitTime = block.startTime + (block.endTime - block.startTime) * ratio
     const dur1 = Math.max(0.01, splitTime - block.startTime)
     const dur2 = Math.max(0.01, block.endTime - splitTime)
     const newId = Math.max(...blocks.map(b => b.id)) + 1
-    const before = { id: block.id, target: block.target, startTime: block.startTime, endTime: block.endTime }
+    const before = { id: block.id, transcript: block.transcript, startTime: block.startTime, endTime: block.endTime }
     const b1: SubtitleBlock = withEditHistory(
       {
         ...block,
         endTime: splitTime,
-        target: targetBefore,
-        // source はそのままコピー（言語が違うため比率分割しない）
-        cps: calculateRoundedCps(block.source, dur1),
+        transcript: transcriptBefore,
+        // subtitle はそのままコピー（言語が違うため比率分割しない）
+        cps: calculateRoundedCps(block.subtitle, dur1),
       },
       'split',
       before,
-      { part: 'first', target: targetBefore, startTime: block.startTime, endTime: splitTime },
+      { part: 'first', transcript: transcriptBefore, startTime: block.startTime, endTime: splitTime },
     )
     const b2: SubtitleBlock = withEditHistory(
       {
         ...block,
         id: newId,
         startTime: splitTime,
-        target: targetAfter,
-        // source はそのままコピー
-        cps: calculateRoundedCps(block.source, dur2),
+        transcript: transcriptAfter,
+        // subtitle はそのままコピー
+        cps: calculateRoundedCps(block.subtitle, dur2),
         status: 'pending' as const,
         glossaryTerms: [],
       },
       'split',
       before,
-      { part: 'second', target: targetAfter, startTime: splitTime, endTime: block.endTime },
+      { part: 'second', transcript: transcriptAfter, startTime: splitTime, endTime: block.endTime },
     )
     const next = [...blocks]
     next.splice(idx, 1, b1, b2)
     push(next)
   }, [blocks, push])
 
-  const handleUpdateSource = useCallback((id: number, text: string) => {
+  const handleUpdateSubtitle = useCallback((id: number, text: string) => {
     push(blocks.map(b => {
       if (b.id !== id) return b
       const duration = b.endTime - b.startTime
       return withEditHistory(
-        { ...b, source: text, cps: calculateRoundedCps(text, Math.max(0.1, duration)), charCount: countCpsChars(text) },
-        'source_edit',
-        { source: b.source },
-        { source: text },
+        { ...b, subtitle: text, cps: calculateRoundedCps(text, Math.max(0.1, duration)), charCount: countCpsChars(text) },
+        'subtitle_edit',
+        { subtitle: b.subtitle },
+        { subtitle: text },
       )
     }))
     // 本文を編集したら、一旦フラグを消してから編集後テキストで再チェック
-    void checkBlocksSpelling([{ id, source: text }])
+    void checkBlocksSpelling([{ id, subtitle: text }])
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blocks, push, checkBlocksSpelling])
 
-  const handleBulkReplace = useCallback((updates: Array<{ id: number; source?: string; target?: string }>) => {
+  const handleBulkReplace = useCallback((updates: Array<{ id: number; subtitle?: string; transcript?: string }>) => {
     if (updates.length === 0) return
     const byId = new Map(updates.map(u => [u.id, u]))
     const next = blocks.map(b => {
       const u = byId.get(b.id)
       if (!u) return b
       let block = b
-      if (u.source !== undefined && u.source !== b.source) {
+      if (u.subtitle !== undefined && u.subtitle !== b.subtitle) {
         const duration = b.endTime - b.startTime
         block = withEditHistory(
-          { ...block, source: u.source, cps: calculateRoundedCps(u.source, Math.max(0.1, duration)), charCount: countCpsChars(u.source) },
-          'source_edit',
-          { source: b.source },
-          { source: u.source },
+          { ...block, subtitle: u.subtitle, cps: calculateRoundedCps(u.subtitle, Math.max(0.1, duration)), charCount: countCpsChars(u.subtitle) },
+          'subtitle_edit',
+          { subtitle: b.subtitle },
+          { subtitle: u.subtitle },
         )
       }
-      if (u.target !== undefined && u.target !== block.target) {
+      if (u.transcript !== undefined && u.transcript !== block.transcript) {
         block = withEditHistory(
-          { ...block, target: u.target },
-          'target_edit',
-          { target: b.target },
-          { target: u.target },
+          { ...block, transcript: u.transcript },
+          'transcript_edit',
+          { transcript: b.transcript },
+          { transcript: u.transcript },
         )
       }
       return block
@@ -2064,7 +2067,7 @@ export default function App() {
   const currentBlock = blocks.find(b => currentTime >= b.startTime && currentTime < b.endTime)
   const subtitleOverlay = currentBlock
     ? {
-        text: draftSource?.id === currentBlock.id ? draftSource.text : currentBlock.source,
+        text: draftSource?.id === currentBlock.id ? draftSource.text : currentBlock.subtitle,
         progress: ((currentTime - currentBlock.startTime) / Math.max(0.01, currentBlock.endTime - currentBlock.startTime)) * 100,
       }
     : null
@@ -2366,8 +2369,8 @@ export default function App() {
                 title={t.srtFormatSelectTitle}
                 aria-label={t.srtFormatLabel}
                 style={{ fontSize: 11, whiteSpace: 'nowrap', color: theme.textSecondary, padding: '3px 6px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, cursor: 'pointer' }}>
-                <option value="source">{t.srtFormatSource}</option>
-                <option value="target">{t.srtFormatTarget}</option>
+                <option value="subtitle">{t.srtFormatSource}</option>
+                <option value="transcript">{t.srtFormatTarget}</option>
                 <option value="both">{t.srtFormatBoth}</option>
               </select>
               <div style={{ width: 1, background: theme.panelBorder, alignSelf: 'stretch', margin: '2px 2px' }} />
@@ -2509,10 +2512,10 @@ export default function App() {
                 onBlockSelect={handleBlockSelect}
                 onApprove={handleApprove}
                 onFlag={handleFlag}
-                onUpdateSource={handleUpdateSource}
-                onUpdateTarget={handleUpdateTarget}
+                onUpdateSubtitle={handleUpdateSubtitle}
+                onUpdateTranscript={handleUpdateTranscript}
                 onManualSplit={handleManualSplit}
-                onSplitFromTarget={handleSplitFromTarget}
+                onSplitFromTranscript={handleSplitFromTranscript}
                 onSplitAtPlayhead={handleSplitAtPlayhead}
                 onEqualSplit={handleEqualSplit}
                 onMerge={handleMerge}

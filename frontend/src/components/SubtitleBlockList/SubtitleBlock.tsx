@@ -16,11 +16,11 @@ interface SubtitleBlockProps {
   onSelect: (id: number) => void
   onApprove: (id: number) => void
   onFlag: (id: number) => void
-  onUpdateSource: (id: number, text: string) => void
-  onUpdateTarget: (id: number, text: string) => void
+  onUpdateSubtitle: (id: number, text: string) => void
+  onUpdateTranscript: (id: number, text: string) => void
   onUpdateTimes: (id: number, startTime: number, endTime: number) => void
   onManualSplit: (id: number, textBefore: string, textAfter: string) => void
-  onSplitFromTarget: (id: number, targetBefore: string, targetAfter: string) => void
+  onSplitFromTranscript: (id: number, targetBefore: string, targetAfter: string) => void
   onSplitAtPlayhead: (id: number) => void
   onEqualSplit: (id: number) => void
   onIgnoreWarning: (id: number, type: 'typo' | 'missing', key: string) => void
@@ -35,10 +35,10 @@ interface SubtitleBlockProps {
   onMergeWithNext: (id: number) => void
   maxCps: number
   maxCharsPerLine: number
-  /** 検索ヒット位置（target用） */
-  searchRangesTarget?: SearchHighlightRange[]
-  /** 検索ヒット位置（source用） */
-  searchRangesSource?: SearchHighlightRange[]
+  /** 検索ヒット位置（書きおこし=transcript用） */
+  searchRangesTranscript?: SearchHighlightRange[]
+  /** 検索ヒット位置（字幕=subtitle用） */
+  searchRangesSubtitle?: SearchHighlightRange[]
   /** 検索バーが開いているか（編集ツールバーの🔍ボタン表示用） */
   searchOpen?: boolean
   /** 編集ツールバーの🔍ボタンクリック時 */
@@ -245,11 +245,11 @@ function SubtitleBlockInner({
   onSelect,
   onApprove,
   onFlag,
-  onUpdateSource,
-  onUpdateTarget,
+  onUpdateSubtitle,
+  onUpdateTranscript,
   onUpdateTimes,
   onManualSplit,
-  onSplitFromTarget,
+  onSplitFromTranscript,
   onSplitAtPlayhead,
   onEqualSplit,
   onIgnoreWarning,
@@ -262,8 +262,8 @@ function SubtitleBlockInner({
   onMergeWithNext,
   maxCps,
   maxCharsPerLine,
-  searchRangesTarget,
-  searchRangesSource,
+  searchRangesTranscript,
+  searchRangesSubtitle,
   searchOpen,
   onToggleSearch,
 }: SubtitleBlockProps) {
@@ -274,17 +274,17 @@ function SubtitleBlockInner({
 
   // ライブ用語集からマッチエントリを色付きで取得（色は日英共通）
   const matchedWithColors = useMemo(
-    () => findMatchedGlossaryEntries(block.source, block.target, deferredGlossary),
-    [block.source, block.target, deferredGlossary],
+    () => findMatchedGlossaryEntries(block.subtitle, block.transcript, deferredGlossary),
+    [block.subtitle, block.transcript, deferredGlossary],
   )
   const matchedTermsEn = useMemo(() => toSourceTerms(matchedWithColors), [matchedWithColors])
   const matchedTermsJa = useMemo(() => toTargetTerms(matchedWithColors), [matchedWithColors])
   const shouldEvaluateMissing = isActive || (block.ignoredMissing?.length ?? 0) > 0
   const allMissingTerms = useMemo(
     () => shouldEvaluateMissing
-      ? findMissingTranslations(block.target, block.source, deferredGlossary)
+      ? findMissingTranslations(block.transcript, block.subtitle, deferredGlossary)
       : [],
-    [shouldEvaluateMissing, block.target, block.source, deferredGlossary],
+    [shouldEvaluateMissing, block.transcript, block.subtitle, deferredGlossary],
   )
   const missingTerms = useMemo(
     () => allMissingTerms.filter(m => !(block.ignoredMissing ?? []).includes(m.entry.id)),
@@ -295,8 +295,8 @@ function SubtitleBlockInner({
     [allMissingTerms, block.ignoredMissing],
   )
   const allTypoCandidates = useMemo(
-    () => isActive ? findTypoCandidates(block.source, deferredGlossary) : [],
-    [isActive, block.source, deferredGlossary],
+    () => isActive ? findTypoCandidates(block.subtitle, deferredGlossary) : [],
+    [isActive, block.subtitle, deferredGlossary],
   )
   const typoCandidates = useMemo(
     () => allTypoCandidates.filter(c => !(block.ignoredTypos ?? []).includes(`${c.found}::${c.entry.en}`)),
@@ -325,7 +325,7 @@ function SubtitleBlockInner({
   )
   const spellTerms = useMemo(() => spellIssuesToTerms(activeSpellIssues), [activeSpellIssues])
   // 英語ソース表示用: 辞書マッチ + タイポ候補 + スペル誤り を合成（後ろに追加して重複排除）
-  const sourceTerms = useMemo(() => {
+  const subtitleTerms = useMemo(() => {
     const taken = new Set([
       ...typoCandidates.map(c => c.found.toLowerCase()),
       ...spellTerms.map(t => t.word.toLowerCase()),
@@ -338,14 +338,14 @@ function SubtitleBlockInner({
   const [showMissingList, setShowMissingList] = useState(false)
   const [showMergeMenu, setShowMergeMenu] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
-  const [editText, setEditText] = useState(block.source)
+  const [editText, setEditText] = useState(block.subtitle)
   // 編集中のタイポ候補（editText に対してライブ計算）
   const editTypoCandidates = useMemo(
     () => isEditing ? findTypoCandidates(editText, deferredGlossary) : [],
     [isEditing, editText, deferredGlossary],
   )
-  const [isEditingTarget, setIsEditingTarget] = useState(false)
-  const [editTargetText, setEditTargetText] = useState(block.target)
+  const [isEditingTranscript, setIsEditingTranscript] = useState(false)
+  const [editTranscriptText, setEditTranscriptText] = useState(block.transcript)
   const [isEditingTime, setIsEditingTime] = useState(false)
   const [editStart, setEditStart] = useState(formatTime(block.startTime))
   const [editEnd, setEditEnd] = useState(formatTime(block.endTime))
@@ -353,7 +353,7 @@ function SubtitleBlockInner({
   const startInputRef = useRef<HTMLInputElement>(null)
   const timeEditorRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const targetTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const transcriptTextareaRef = useRef<HTMLTextAreaElement>(null)
   // 編集中はeditTextベースでCPS・文字数をライブ計算する
   const liveCps = isEditing
     ? Math.round((editText.length / Math.max(0.01, block.endTime - block.startTime)) * 10) / 10
@@ -405,40 +405,40 @@ function SubtitleBlockInner({
   }, [isEditing])
 
   useEffect(() => {
-    if (isEditingTarget && targetTextareaRef.current) {
-      targetTextareaRef.current.focus()
-      targetTextareaRef.current.selectionStart = targetTextareaRef.current.value.length
+    if (isEditingTranscript && transcriptTextareaRef.current) {
+      transcriptTextareaRef.current.focus()
+      transcriptTextareaRef.current.selectionStart = transcriptTextareaRef.current.value.length
     }
-  }, [isEditingTarget])
+  }, [isEditingTranscript])
 
-  const handleTargetSave = () => {
-    onUpdateTarget(block.id, editTargetText)
-    setIsEditingTarget(false)
+  const handleTranscriptSave = () => {
+    onUpdateTranscript(block.id, editTranscriptText)
+    setIsEditingTranscript(false)
   }
 
-  const handleTargetKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Escape') { setEditTargetText(block.target); setIsEditingTarget(false) }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleTargetSave() }
+  const handleTranscriptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Escape') { setEditTranscriptText(block.transcript); setIsEditingTranscript(false) }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleTranscriptSave() }
     if (e.key === 'Enter' && e.shiftKey) {
       e.preventDefault()
-      const cursor = targetTextareaRef.current?.selectionStart ?? editTargetText.length
-      const before = editTargetText.slice(0, cursor).trimEnd()
-      const after = editTargetText.slice(cursor).trimStart()
+      const cursor = transcriptTextareaRef.current?.selectionStart ?? editTranscriptText.length
+      const before = editTranscriptText.slice(0, cursor).trimEnd()
+      const after = editTranscriptText.slice(cursor).trimStart()
       if (before && after) {
-        onSplitFromTarget(block.id, before, after)
-        setIsEditingTarget(false)
+        onSplitFromTranscript(block.id, before, after)
+        setIsEditingTranscript(false)
       }
     }
   }
 
   const handleEditSave = () => {
-    onUpdateSource(block.id, editText)
+    onUpdateSubtitle(block.id, editText)
     onDraftChange(block.id, null)
     setIsEditing(false)
   }
 
   const handleEditKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Escape') { setEditText(block.source); onDraftChange(block.id, null); setIsEditing(false) }
+    if (e.key === 'Escape') { setEditText(block.subtitle); onDraftChange(block.id, null); setIsEditing(false) }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleEditSave()
     if (e.key === 'Enter' && e.shiftKey) {
       e.preventDefault()
@@ -476,8 +476,8 @@ function SubtitleBlockInner({
     [spellIssues, block.ignoredTypos, spellIgnoreKey],
   )
 
-  const sourceLines = block.source.split('\n')
-  const liveLines = isEditing ? editText.split('\n') : sourceLines
+  const subtitleLines = block.subtitle.split('\n')
+  const liveLines = isEditing ? editText.split('\n') : subtitleLines
   const charLevel = getLineLengthLevel(liveLines.map(l => l.length), maxCharsPerLine)
   const lineLengthColor = (length: number) => {
     const level = getLineLengthLevel([length], maxCharsPerLine)
@@ -629,18 +629,18 @@ function SubtitleBlockInner({
         </div>
       )}
       {/* 訳文テキスト（編集可能） */}
-      {isEditingTarget ? (
+      {isEditingTranscript ? (
         <>
           <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
             <button
               onMouseDown={e => e.preventDefault()}
               onClick={() => {
-                const cursor = targetTextareaRef.current?.selectionStart ?? editTargetText.length
-                const before = editTargetText.slice(0, cursor).trimEnd()
-                const after = editTargetText.slice(cursor).trimStart()
+                const cursor = transcriptTextareaRef.current?.selectionStart ?? editTranscriptText.length
+                const before = editTranscriptText.slice(0, cursor).trimEnd()
+                const after = editTranscriptText.slice(cursor).trimStart()
                 if (before && after) {
-                  onSplitFromTarget(block.id, before, after)
-                  setIsEditingTarget(false)
+                  onSplitFromTranscript(block.id, before, after)
+                  setIsEditingTranscript(false)
                 }
               }}
               title="カーソル位置でブロックを2分割し、文字数比でタイムコードを再割り付けします"
@@ -658,13 +658,13 @@ function SubtitleBlockInner({
             )}
           </div>
           <textarea
-            ref={targetTextareaRef}
-            value={editTargetText}
-            onChange={e => setEditTargetText(e.target.value)}
-            onKeyDown={handleTargetKeyDown}
-            onBlur={handleTargetSave}
+            ref={transcriptTextareaRef}
+            value={editTranscriptText}
+            onChange={e => setEditTranscriptText(e.target.value)}
+            onKeyDown={handleTranscriptKeyDown}
+            onBlur={handleTranscriptSave}
             onClick={e => { e.stopPropagation(); onSelect(block.id) }}
-            rows={Math.max(2, editTargetText.split('\n').length)}
+            rows={Math.max(2, editTranscriptText.split('\n').length)}
             style={{
               width: '100%',
               background: theme.inputBg,
@@ -682,7 +682,7 @@ function SubtitleBlockInner({
           />
           {/* 行ごとのリアルタイム文字数プレビュー */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 2, flexWrap: 'wrap' }}>
-            {editTargetText.split('\n').map((line, i) => (
+            {editTranscriptText.split('\n').map((line, i) => (
               <span key={i} style={{
                 fontSize: 10,
                 fontFamily: 'monospace',
@@ -698,7 +698,7 @@ function SubtitleBlockInner({
         </>
       ) : (
         <div
-          onClick={e => { if (isApproved) return; e.stopPropagation(); onSelect(block.id); setEditTargetText(block.target); setIsEditingTarget(true) }}
+          onClick={e => { if (isApproved) return; e.stopPropagation(); onSelect(block.id); setEditTranscriptText(block.transcript); setIsEditingTranscript(true) }}
           style={{
             color: theme.textJapanese,
             fontSize: 12,
@@ -712,8 +712,8 @@ function SubtitleBlockInner({
           }}
           title={isApproved ? undefined : 'クリックで訳文を編集'}
         >
-          {block.target
-            ? <TermHighlight text={block.target} terms={matchedTermsJa} searchRanges={searchRangesTarget} />
+          {block.transcript
+            ? <TermHighlight text={block.transcript} terms={matchedTermsJa} searchRanges={searchRangesTranscript} />
             : <span style={{ color: theme.textDisabled, fontStyle: 'italic' }}>（訳文なし）</span>
           }
         </div>
@@ -809,7 +809,7 @@ function SubtitleBlockInner({
         </>
       ) : (
         <div
-          onClick={e => { if (isApproved) return; e.stopPropagation(); onSelect(block.id); setEditText(block.source); setIsEditing(true) }}
+          onClick={e => { if (isApproved) return; e.stopPropagation(); onSelect(block.id); setEditText(block.subtitle); setIsEditing(true) }}
           style={{
             fontSize: 15,
             lineHeight: 1.45,
@@ -822,7 +822,7 @@ function SubtitleBlockInner({
             color: theme.inputText,
           }}
         >
-          <TermHighlight text={block.source} terms={sourceTerms} searchRanges={searchRangesSource} />
+          <TermHighlight text={block.subtitle} terms={subtitleTerms} searchRanges={searchRangesSubtitle} />
         </div>
       )}
 

@@ -1,7 +1,7 @@
 import type { SubtitleBlock } from '@/types/subtitle'
 
-export type SearchScope = 'all' | 'target' | 'source'
-export type SearchField = 'target' | 'source'
+export type SearchScope = 'all' | 'transcript' | 'subtitle'
+export type SearchField = 'transcript' | 'subtitle'
 
 export interface SearchOptions {
   query: string
@@ -59,14 +59,14 @@ export function findMatches(blocks: SubtitleBlock[], opts: SearchOptions): Searc
   if (!opts.query) return out
   for (const block of blocks) {
     if (!opts.includeApproved && block.status === 'approved') continue
-    if (opts.scope === 'all' || opts.scope === 'target') {
-      for (const r of findMatchesInText(block.target, opts.query, opts.caseSensitive, opts.wholeWord)) {
-        out.push({ blockId: block.id, field: 'target', start: r.start, end: r.end })
+    if (opts.scope === 'all' || opts.scope === 'transcript') {
+      for (const r of findMatchesInText(block.transcript, opts.query, opts.caseSensitive, opts.wholeWord)) {
+        out.push({ blockId: block.id, field: 'transcript', start: r.start, end: r.end })
       }
     }
-    if (opts.scope === 'all' || opts.scope === 'source') {
-      for (const r of findMatchesInText(block.source, opts.query, opts.caseSensitive, opts.wholeWord)) {
-        out.push({ blockId: block.id, field: 'source', start: r.start, end: r.end })
+    if (opts.scope === 'all' || opts.scope === 'subtitle') {
+      for (const r of findMatchesInText(block.subtitle, opts.query, opts.caseSensitive, opts.wholeWord)) {
+        out.push({ blockId: block.id, field: 'subtitle', start: r.start, end: r.end })
       }
     }
   }
@@ -89,8 +89,8 @@ export function matchesForField(
 }
 
 export interface ReplaceResult {
-  /** ブロックID → 更新後の source/target */
-  updates: Array<{ id: number; source?: string; target?: string }>
+  /** ブロックID → 更新後の subtitle/transcript */
+  updates: Array<{ id: number; subtitle?: string; transcript?: string }>
   replacedCount: number
 }
 
@@ -100,43 +100,43 @@ export function buildReplaceAll(
   opts: SearchOptions,
   replacement: string,
 ): ReplaceResult {
-  const updates: Array<{ id: number; source?: string; target?: string }> = []
+  const updates: Array<{ id: number; subtitle?: string; transcript?: string }> = []
   let total = 0
   for (const block of blocks) {
     if (!opts.includeApproved && block.status === 'approved') continue
-    let nextSource: string | undefined
-    let nextTarget: string | undefined
-    if (opts.scope === 'all' || opts.scope === 'target') {
-      const ranges = findMatchesInText(block.target, opts.query, opts.caseSensitive, opts.wholeWord)
+    let nextSubtitle: string | undefined
+    let nextTranscript: string | undefined
+    if (opts.scope === 'all' || opts.scope === 'transcript') {
+      const ranges = findMatchesInText(block.transcript, opts.query, opts.caseSensitive, opts.wholeWord)
       if (ranges.length > 0) {
-        nextTarget = applyReplacements(block.target, ranges, replacement)
+        nextTranscript = applyReplacements(block.transcript, ranges, replacement)
         total += ranges.length
       }
     }
-    if (opts.scope === 'all' || opts.scope === 'source') {
-      const ranges = findMatchesInText(block.source, opts.query, opts.caseSensitive, opts.wholeWord)
+    if (opts.scope === 'all' || opts.scope === 'subtitle') {
+      const ranges = findMatchesInText(block.subtitle, opts.query, opts.caseSensitive, opts.wholeWord)
       if (ranges.length > 0) {
-        nextSource = applyReplacements(block.source, ranges, replacement)
+        nextSubtitle = applyReplacements(block.subtitle, ranges, replacement)
         total += ranges.length
       }
     }
-    if (nextSource !== undefined || nextTarget !== undefined) {
-      updates.push({ id: block.id, source: nextSource, target: nextTarget })
+    if (nextSubtitle !== undefined || nextTranscript !== undefined) {
+      updates.push({ id: block.id, subtitle: nextSubtitle, transcript: nextTranscript })
     }
   }
   return { updates, replacedCount: total }
 }
 
-/** 単一マッチを置換した結果（source/target どちらか） */
+/** 単一マッチを置換した結果（subtitle/transcript どちらか） */
 export function buildReplaceOne(
   block: SubtitleBlock,
   match: SearchMatch,
   replacement: string,
-): { source?: string; target?: string } {
-  if (match.field === 'target') {
-    return { target: replaceRange(block.target, match.start, match.end, replacement) }
+): { subtitle?: string; transcript?: string } {
+  if (match.field === 'transcript') {
+    return { transcript: replaceRange(block.transcript, match.start, match.end, replacement) }
   }
-  return { source: replaceRange(block.source, match.start, match.end, replacement) }
+  return { subtitle: replaceRange(block.subtitle, match.start, match.end, replacement) }
 }
 
 function applyReplacements(

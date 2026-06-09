@@ -67,13 +67,19 @@ export function loadSessionSnapshotFromLocalStorage(): SessionExportData | null 
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed.blocks)) return null
-    // english→source / japanese→target フィールド名変更のマイグレーション
+    // フィールド名変更のマイグレーション（新しい順に解決）:
+    //   字幕本文（英語）  : subtitle ← 旧 source ← 最古 english
+    //   書きおこし（日本語）: transcript ← 旧 target ← 最古 japanese
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const blocks = parsed.blocks.map((b: any) => ({
-      ...b,
-      source: b.source ?? b.english ?? '',
-      target: b.target ?? b.japanese ?? '',
-    })) as SubtitleBlock[]
+    const blocks = parsed.blocks.map((b: any) => {
+      // 旧フィールド名（source/target, english/japanese）は新スキーマへ畳んで破棄する
+      const { source, target, english, japanese, ...rest } = b
+      return {
+        ...rest,
+        subtitle: b.subtitle ?? source ?? english ?? '',
+        transcript: b.transcript ?? target ?? japanese ?? '',
+      }
+    }) as SubtitleBlock[]
     return {
       version: Number(parsed.version ?? 2),
       savedAt: String(parsed.savedAt ?? new Date(0).toISOString()),
@@ -204,21 +210,21 @@ function parseSrt(text: string): SubtitleBlock[] {
     if (textLines.length === 0) continue
 
     // canonical:
-    // - source: subtitle text shown/exported by the app (usually English)
-    // - target: reference/source-language text (usually Japanese)
-    // 2行SRT は 1行目=source, 2行目以降=target として読む
-    const source = textLines[0]
-    const target = textLines.length >= 2 ? textLines.slice(1).join('\n') : ''
+    // - subtitle:   字幕本文（アプリが表示・SRT出力する英語字幕。gold）
+    // - transcript: 参照用の元言語テキスト（日本語書きおこし）
+    // 2行SRT は 1行目=subtitle, 2行目以降=transcript として読む
+    const subtitle = textLines[0]
+    const transcript = textLines.length >= 2 ? textLines.slice(1).join('\n') : ''
 
     const duration = Math.max(0.01, endTime - startTime)
-    const charCount = countCpsChars(source)
+    const charCount = countCpsChars(subtitle)
     blocks.push({
       id: idCounter++,
       startTime,
       endTime,
-      source,
-      target,
-      cps: calculateRoundedCps(source, duration),
+      subtitle,
+      transcript,
+      cps: calculateRoundedCps(subtitle, duration),
       charCount,
       status: 'pending',
       glossaryTerms: [],
@@ -231,12 +237,12 @@ function parseSrt(text: string): SubtitleBlock[] {
 
 // ─── SRT エクスポート ──────────────────────────────────────────────────────
 
-export type SrtExportFormat = 'source' | 'target' | 'both'
+export type SrtExportFormat = 'subtitle' | 'transcript' | 'both'
 
 export function exportSrt(
   blocks: SubtitleBlock[],
   settings: AdminSettings,
-  format: SrtExportFormat = 'source',
+  format: SrtExportFormat = 'subtitle',
 ): void {
   let normalizeSource = (text: string) => text
   if (settings.textNormalizationEnabled) {
@@ -253,18 +259,18 @@ export function exportSrt(
   }
 
   const renderBody = (block: SubtitleBlock): string => {
-    const source = normalizeSource(block.source ?? '').trim()
-    const target = (block.target ?? '').trim()
-    if (format === 'target') return target
+    const subtitle = normalizeSource(block.subtitle ?? '').trim()
+    const transcript = (block.transcript ?? '').trim()
+    if (format === 'transcript') return transcript
     if (format === 'both') {
-      if (source && target) return `${source}\n${target}`
-      return source || target
+      if (subtitle && transcript) return `${subtitle}\n${transcript}`
+      return subtitle || transcript
     }
-    return source
+    return subtitle
   }
 
   const filename =
-    format === 'target' ? 'subtitles.target.srt'
+    format === 'transcript' ? 'subtitles.transcript.srt'
     : format === 'both' ? 'subtitles.bilingual.srt'
     : 'subtitles.srt'
 

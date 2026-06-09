@@ -262,16 +262,16 @@ function toSubtitleBlocks(result: LegacyPipelineResult): SubtitleBlock[] {
     const sub = subtitleRows[idx]
     const startTime = Number(sub?.start ?? row.start ?? 0)
     const endTime = Number(sub?.end ?? row.end ?? startTime + 2)
-    const source = String(row.en ?? row.translated_text ?? '')
+    const subtitle = String(row.en ?? row.translated_text ?? '')
     const duration = Math.max(0.1, endTime - startTime)
-    const charCount = countCpsChars(source)
+    const charCount = countCpsChars(subtitle)
     return {
       id: Number(row.id ?? idx + 1),
       startTime,
       endTime,
-      source,
-      target: String(row.ja_corrected ?? row.text ?? ''),
-      cps: calculateRoundedCps(source, duration),
+      subtitle,
+      transcript: String(row.ja_corrected ?? row.text ?? ''),
+      cps: calculateRoundedCps(subtitle, duration),
       charCount,
       status: row.translation_flagged ? 'flagged' : 'pending',
       glossaryTerms: [],

@@ -1,10 +1,10 @@
 export type BlockStatus = 'pending' | 'approved' | 'flagged'
 
-export type SubtitleField = 'source' | 'target'
+export type SubtitleField = 'subtitle' | 'transcript'
 
 export const SUBTITLE_FIELD_LABELS: Record<SubtitleField, string> = {
-  source: '字幕',
-  target: '書きおこし',
+  subtitle: '字幕',
+  transcript: '書きおこし',
 }
 
 
@@ -25,8 +25,10 @@ export interface SubtitleBlock {
   id: number
   startTime: number   // 秒
   endTime: number     // 秒
-  target: string
-  source: string
+  /** 英語字幕（出力・表示・SRT出力・gold）。UI表記「字幕」 */
+  subtitle: string
+  /** 日本語書きおこし（入力・参照）。UI表記「書きおこし」 */
+  transcript: string
   cps: number
   charCount: number
   status: BlockStatus
@@ -69,8 +71,8 @@ export interface SubtitleBlock {
     type:
       | 'approve'
       | 'flag'
-      | 'source_edit'
-      | 'target_edit'
+      | 'subtitle_edit'
+      | 'transcript_edit'
       | 'time_edit'
       | 'split'
       | 'merge'

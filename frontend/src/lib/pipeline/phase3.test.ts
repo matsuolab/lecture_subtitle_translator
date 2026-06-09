@@ -69,7 +69,7 @@ describe('runPhase3', () => {
     )
 
     expect(visited).toContain('finalFormatLines')
-    expect(result.blocks[0].source).toContain('\n')
-    expect(Math.max(...result.blocks[0].source.split('\n').map(line => line.length))).toBeLessThanOrEqual(30)
+    expect(result.blocks[0].subtitle).toContain('\n')
+    expect(Math.max(...result.blocks[0].subtitle.split('\n').map(line => line.length))).toBeLessThanOrEqual(30)
   })
 })

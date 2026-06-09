@@ -25,10 +25,10 @@ interface SubtitleBlockListProps {
   onBlockSelect: (id: number) => void
   onApprove: (id: number) => void
   onFlag: (id: number) => void
-  onUpdateSource: (id: number, text: string) => void
-  onUpdateTarget: (id: number, text: string) => void
+  onUpdateSubtitle: (id: number, text: string) => void
+  onUpdateTranscript: (id: number, text: string) => void
   onManualSplit: (id: number, textBefore: string, textAfter: string) => void
-  onSplitFromTarget: (id: number, targetBefore: string, targetAfter: string) => void
+  onSplitFromTranscript: (id: number, targetBefore: string, targetAfter: string) => void
   onSplitAtPlayhead: (id: number) => void
   onEqualSplit: (id: number) => void
   onMerge: (dragId: number, dropId: number) => void
@@ -177,10 +177,10 @@ export function SubtitleBlockList({
   onBlockSelect,
   onApprove,
   onFlag,
-  onUpdateSource,
-  onUpdateTarget,
+  onUpdateSubtitle,
+  onUpdateTranscript,
   onManualSplit,
-  onSplitFromTarget,
+  onSplitFromTranscript,
   onSplitAtPlayhead,
   onEqualSplit,
   onMerge,
@@ -428,19 +428,19 @@ export function SubtitleBlockList({
 
   // ブロックごとの searchRanges を事前計算（メモ化）
   const searchRangesByBlock = useMemo(() => {
-    const map = new Map<number, { target: { start: number; end: number; current?: boolean }[]; source: { start: number; end: number; current?: boolean }[] }>()
+    const map = new Map<number, { transcript: { start: number; end: number; current?: boolean }[]; subtitle: { start: number; end: number; current?: boolean }[] }>()
     if (!searchOpen || matches.length === 0) return map
     const currentMatch = matches[currentMatchIdx]
     for (const m of matches) {
-      const entry = map.get(m.blockId) ?? { target: [], source: [] }
+      const entry = map.get(m.blockId) ?? { transcript: [], subtitle: [] }
       const range = {
         start: m.start,
         end: m.end,
         current: currentMatch && currentMatch.blockId === m.blockId && currentMatch.field === m.field
           && currentMatch.start === m.start && currentMatch.end === m.end,
       }
-      if (m.field === 'target') entry.target.push(range)
-      else entry.source.push(range)
+      if (m.field === 'transcript') entry.transcript.push(range)
+      else entry.subtitle.push(range)
       map.set(m.blockId, entry)
     }
     return map
@@ -592,10 +592,10 @@ export function SubtitleBlockList({
               onSelect={onBlockSelect}
               onApprove={handleApprove}
               onFlag={onFlag}
-              onUpdateSource={onUpdateSource}
-              onUpdateTarget={onUpdateTarget}
+              onUpdateSubtitle={onUpdateSubtitle}
+              onUpdateTranscript={onUpdateTranscript}
               onManualSplit={onManualSplit}
-              onSplitFromTarget={onSplitFromTarget}
+              onSplitFromTranscript={onSplitFromTranscript}
               onSplitAtPlayhead={onSplitAtPlayhead}
               onEqualSplit={onEqualSplit}
               onUpdateTimes={onUpdateTimes}
@@ -617,8 +617,8 @@ export function SubtitleBlockList({
               maxCharsPerLine={maxCharsPerLine}
               spellIssues={spellIssuesByBlock[block.id]}
               onAddToSpellDictionary={onAddToSpellDictionary}
-              searchRangesTarget={searchRangesByBlock.get(block.id)?.target}
-              searchRangesSource={searchRangesByBlock.get(block.id)?.source}
+              searchRangesTranscript={searchRangesByBlock.get(block.id)?.transcript}
+              searchRangesSubtitle={searchRangesByBlock.get(block.id)?.subtitle}
               searchOpen={searchOpen}
               onToggleSearch={handleToggleSearch}
             />

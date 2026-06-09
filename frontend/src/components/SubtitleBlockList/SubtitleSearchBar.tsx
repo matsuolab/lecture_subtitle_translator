@@ -28,8 +28,8 @@ interface SubtitleSearchBarProps {
 
 const SCOPE_OPTIONS: Array<{ value: SearchScope; label: string }> = [
   { value: 'all', label: 'すべて' },
-  { value: 'source', label: `${SUBTITLE_FIELD_LABELS.source}のみ` },
-  { value: 'target', label: `${SUBTITLE_FIELD_LABELS.target}のみ` },
+  { value: 'subtitle', label: `${SUBTITLE_FIELD_LABELS.subtitle}のみ` },
+  { value: 'transcript', label: `${SUBTITLE_FIELD_LABELS.transcript}のみ` },
 ]
 
 export function SubtitleSearchBar({
