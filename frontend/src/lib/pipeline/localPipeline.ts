@@ -174,7 +174,6 @@ function buildPipelineThresholds(settings: AdminSettings): PipelineThresholds {
     slowCps: settings.pipelineSlowCps,
     maxExpandPerBlock: settings.pipelineMaxExpandPerBlock,
     maxCompressPerBlock: settings.pipelineMaxCompressPerBlock,
-    maxPhase2Retries: settings.pipelineMaxPhase2Retries,
   }
 }
 

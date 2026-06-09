@@ -225,125 +225,7 @@ function reviewBadgeText(block: SubtitleBlockType): string {
 }
 
 function reviewBadgeTitle(block: SubtitleBlockType): string | undefined {
-  const attempts = block.correctionAttempts ?? []
-  if (attempts.length === 0) return block.reviewAction
-  const latest = attempts.slice(-3).map((attempt) => {
-    const result = attempt.changed ? '適用' : '不採用'
-    return `${attempt.strategy}: ${result} (${attempt.beforeViolation} → ${attempt.afterViolation})`
-  }).join('\n')
-  return `${block.reviewAction ?? ''}\n\n自動修正履歴:\n${latest}`.trim()
-}
-
-type CorrectionAttempt = NonNullable<SubtitleBlockType['correctionAttempts']>[number]
-
-function correctionStrategyLabel(strategy: string): string {
-  if (strategy === 'split_block') return '分割'
-  if (strategy === 'merge_window') return '前後との結合'
-  if (strategy === 'compress_core') return '要点を残した短縮'
-  if (strategy === 'compress_rephrase') return '言い換えによる短縮'
-  if (strategy === 'compress_trim') return '余分な表現の削除'
-  if (strategy === 'borrow_gap') return '表示時間の調整'
-  return strategy
-}
-
-function correctionResultLabel(attempt: CorrectionAttempt): string {
-  if (attempt.changed) return '適用されました'
-  if (attempt.rationale?.includes('LLM chose keep') || attempt.rationale?.includes('no merge')) {
-    return '不要と判断されました'
-  }
-  return '見送られました'
-}
-
-function correctionAttemptSummary(attempt: CorrectionAttempt): string {
-  const delta = attempt.beforeChars - attempt.afterChars
-  const deltaText = delta > 0
-    ? `英文を${delta}文字短くしました`
-    : delta < 0
-      ? `英文を${Math.abs(delta)}文字広げました`
-      : '文字数は変わっていません'
-  return `${correctionStrategyLabel(attempt.strategy)}: ${correctionResultLabel(attempt)}。${deltaText}。`
-}
-
-function correctionAttemptReason(attempt: CorrectionAttempt): string | undefined {
-  if (!attempt.rationale) return undefined
-  if (attempt.rationale.startsWith('context merge rejected large inter-block gap')) {
-    return '前後の字幕との間隔が大きいため、結合しませんでした。'
-  }
-  if (attempt.rationale.startsWith('context merge rejected long merged duration')) {
-    return '結合後の表示時間が長すぎるため、結合しませんでした。'
-  }
-  if (attempt.rationale.includes('returned fewer than 2 usable units')) {
-    return '自然に分けられる候補が足りなかったため、分割しませんでした。'
-  }
-  if (attempt.rationale.includes('incomplete') || attempt.rationale.includes('未完結') || attempt.rationale.includes('断片')) {
-    return '独立した字幕として成立しにくい候補だったため、自動分割を避けました。'
-  }
-  if (attempt.rationale.length > 120) return `${attempt.rationale.slice(0, 120)}...`
-  return attempt.rationale
-}
-
-function hasAttemptTextFlow(attempt: CorrectionAttempt): boolean {
-  return Boolean(
-    attempt.beforeTranscriptText ||
-    attempt.beforeSubtitleText ||
-    attempt.afterTranscriptText ||
-    attempt.afterSubtitleText,
-  )
-}
-
-function AttemptTextFlow({ attempt, theme }: { attempt: CorrectionAttempt; theme: Theme }) {
-  if (!hasAttemptTextFlow(attempt)) return null
-  const rowStyle: React.CSSProperties = {
-    display: 'grid',
-    gridTemplateColumns: '52px 1fr',
-    gap: 6,
-    alignItems: 'start',
-    minWidth: 0,
-  }
-  const labelStyle: React.CSSProperties = {
-    color: theme.textMuted,
-    fontWeight: 700,
-    whiteSpace: 'nowrap',
-  }
-  const textStyle: React.CSSProperties = {
-    color: theme.textSecondary,
-    overflowWrap: 'anywhere',
-    whiteSpace: 'pre-wrap',
-  }
-  return (
-    <div style={{
-      marginTop: 5,
-      display: 'grid',
-      gap: 4,
-      padding: '6px 8px',
-      borderRadius: 6,
-      background: theme.cardBg,
-      border: `1px solid ${theme.panelBorder}`,
-    }}>
-      {(attempt.beforeTranscriptText || attempt.afterTranscriptText) && (
-        <div style={rowStyle}>
-          <span style={labelStyle}>書き起こし</span>
-          <span style={textStyle}>
-            {attempt.beforeTranscriptText || '（なし）'}
-            {attempt.afterTranscriptText && attempt.afterTranscriptText !== attempt.beforeTranscriptText
-              ? `\n→ ${attempt.afterTranscriptText}`
-              : ''}
-          </span>
-        </div>
-      )}
-      {(attempt.beforeSubtitleText || attempt.afterSubtitleText) && (
-        <div style={rowStyle}>
-          <span style={labelStyle}>字幕</span>
-          <span style={textStyle}>
-            {attempt.beforeSubtitleText || '（なし）'}
-            {attempt.afterSubtitleText && attempt.afterSubtitleText !== attempt.beforeSubtitleText
-              ? `\n→ ${attempt.afterSubtitleText}`
-              : ''}
-          </span>
-        </div>
-      )}
-    </div>
-  )
+  return block.reviewAction
 }
 
 const splitBtnStyle: React.CSSProperties = {
@@ -470,7 +352,6 @@ function SubtitleBlockInner({
   const [showTypoList, setShowTypoList] = useState(false)
   const [showSpellList, setShowSpellList] = useState(false)
   const [showMissingList, setShowMissingList] = useState(false)
-  const [showAutoLog, setShowAutoLog] = useState(false)
   const [showMergeMenu, setShowMergeMenu] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState(block.source)
@@ -1237,77 +1118,7 @@ function SubtitleBlockInner({
             {reviewBadgeText(block)}
           </span>
         )}
-        {(block.correctionAttempts?.length ?? 0) > 0 && (
-          <span style={{ display: 'inline-flex', alignItems: 'center' }}>
-            <button
-              onClick={e => { e.stopPropagation(); setShowAutoLog(v => !v) }}
-              title="この字幕に対する自動処理ログ"
-              aria-expanded={showAutoLog}
-              style={{
-                border: `1px solid ${theme.panelBorder}`,
-                background: showAutoLog ? theme.cardBg : theme.panelBg,
-                color: showAutoLog ? theme.textPrimary : theme.textSecondary,
-                borderRadius: 999,
-                padding: '2px 7px',
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: 'pointer',
-              }}
-            >
-              自動処理 {block.correctionAttempts?.length ?? 0}
-            </button>
-          </span>
-        )}
       </div>
-
-      {showAutoLog && (block.correctionAttempts?.length ?? 0) > 0 && (
-        <div
-          onClick={e => e.stopPropagation()}
-          style={{
-            marginTop: 8,
-            background: theme.panelBg,
-            border: `1px solid ${theme.panelBorder}`,
-            borderRadius: 6,
-            padding: '8px 10px',
-            display: 'grid',
-            gap: 7,
-            width: '100%',
-            boxSizing: 'border-box',
-            overflow: 'hidden',
-          }}
-        >
-          <div style={{ fontSize: 11, fontWeight: 700, color: theme.textPrimary }}>
-            この字幕で試した自動処理
-          </div>
-          {block.correctionAttempts!.slice(-6).map((attempt, index) => (
-            <div
-              key={`${attempt.strategy}-${index}`}
-              style={{
-                borderTop: index === 0 ? 'none' : `1px solid ${theme.panelBorder}`,
-                paddingTop: index === 0 ? 0 : 6,
-                fontSize: 11,
-                color: theme.textSecondary,
-                lineHeight: 1.45,
-                minWidth: 0,
-              }}
-            >
-              <div style={{
-                color: attempt.changed ? theme.textPrimary : theme.textMuted,
-                fontWeight: 600,
-                overflowWrap: 'anywhere',
-              }}>
-                {correctionAttemptSummary(attempt)}
-              </div>
-              {correctionAttemptReason(attempt) && (
-                <div style={{ marginTop: 2, color: theme.textMuted, overflowWrap: 'anywhere' }}>
-                  理由: {correctionAttemptReason(attempt)}
-                </div>
-              )}
-              <AttemptTextFlow attempt={attempt} theme={theme} />
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* アクションボタン */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>

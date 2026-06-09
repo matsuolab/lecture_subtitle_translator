@@ -143,7 +143,7 @@ export function HelpTab() {
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
                 <strong style={{ color: theme.textPrimary }}>① 動画を読み込む</strong>（左パネルにドロップ、またはボタンから選択）→
-                <strong style={{ color: theme.textPrimary }}> ② レポートタブでパイプラインを実行</strong> →
+                <strong style={{ color: theme.textPrimary }}> ② 字幕生成タブで字幕生成を実行</strong> →
                 <strong style={{ color: theme.textPrimary }}> ③ 提案・要確認・用語警告を確認</strong> →
                 <strong style={{ color: theme.textPrimary }}> ④ 問題なければ承認</strong> →
                 <strong style={{ color: theme.textPrimary }}> ⑤ JSONまたはSRTとして書き出す</strong>
@@ -157,7 +157,7 @@ export function HelpTab() {
           <SectionCard title="パイプライン（自動書き起こし・翻訳）">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                <strong style={{ color: theme.textPrimary }}>レポートタブ</strong>からパイプラインを実行できます。動画を読み込んだ状態で「パイプラインを実行」ボタンを押すと、書き起こし → 日本語補正 → 英語翻訳 → 字幕ブロック生成を自動で行います。
+                <strong style={{ color: theme.textPrimary }}>字幕生成タブ</strong>から字幕生成パイプラインを実行できます。動画を読み込んだ状態で「字幕生成を実行」ボタンを押すと、書き起こし → 日本語補正 → 英語翻訳 → 字幕ブロック生成を自動で行います。
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
                 初回は設定タブで実行先と接続先AIプロバイダを設定します。リモート実行する場合は Service URL と Service Auth Token を入力し、接続テストで OK が表示されることを確認してから実行します。

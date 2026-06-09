@@ -55,7 +55,6 @@ function normalizeThresholds(thresholds: PipelineThresholds): PipelineThresholds
     slowCps: finiteOrDefault(thresholds.slowCps, DEFAULT_PIPELINE_THRESHOLDS.slowCps),
     maxExpandPerBlock: finiteOrDefault(thresholds.maxExpandPerBlock, DEFAULT_PIPELINE_THRESHOLDS.maxExpandPerBlock),
     maxCompressPerBlock: finiteOrDefault(thresholds.maxCompressPerBlock, DEFAULT_PIPELINE_THRESHOLDS.maxCompressPerBlock),
-    maxPhase2Retries: finiteOrDefault(thresholds.maxPhase2Retries, DEFAULT_PIPELINE_THRESHOLDS.maxPhase2Retries),
   }
 }
 

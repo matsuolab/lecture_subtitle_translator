@@ -115,7 +115,7 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
         marginBottom: 10,
       }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, marginBottom: 8 }}>
-          パイプライン実行
+          字幕生成パイプライン操作
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <button
@@ -137,7 +137,7 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
             }}
           >
             <Play size={11} />
-            {isRunning ? '実行中...' : 'パイプラインを実行'}
+            {isRunning ? '実行中...' : '字幕生成を実行'}
           </button>
           <span style={{ fontSize: 11, color: theme.textSecondary }}>
             {videoSourceName ? `対象: ${videoSourceName}` : '動画プレイヤーに動画を読み込んでください'}

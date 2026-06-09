@@ -145,10 +145,8 @@ export interface LocaleStrings {
   settingsSubtitleQualityTitle: string
   settingsEnMaxCharsPerLine: string
   settingsEnMaxLines: string
-  settingsEnMaxTotalChars: string
   settingsEnMaxCps: string
   settingsSubtitleMinDuration: string
-  settingsSubtitleMaxDuration: string
   settingsQualityCorrectionThreshold: string
   settingsPipelineThresholdsTitle: string
   settingsPipelineShortDurationSec: string
@@ -160,7 +158,6 @@ export interface LocaleStrings {
   settingsPipelineSlowCps: string
   settingsPipelineMaxExpandPerBlock: string
   settingsPipelineMaxCompressPerBlock: string
-  settingsPipelineMaxPhase2Retries: string
   settingsPipelineMergeContinuationEnabled: string
   settingsPipelineMergeContinuationMaxGapSec: string
   settingsPipelineMergeContinuationMaxDurationSec: string

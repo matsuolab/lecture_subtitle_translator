@@ -35,3 +35,33 @@ https://www.gnu.org/licenses/lgpl-3.0.html
 ### FFmpeg バイナリの差し替え
 
 ユーザーは、配布物に含まれる FFmpeg 実行ファイル（Windows: `ffmpeg.exe`、macOS/Linux: バンドル内の `ffmpeg`）を、互換性のある別の LGPL ビルドへ差し替えることができます。本アプリは、起動時に同階層の `ffmpeg`(.exe) を呼び出します。
+
+---
+
+## 字幕スペル校正
+
+本アプリは、英語字幕のスペル校正と重複語検出のため、以下の第三者ソフトウェアおよび辞書データを利用しています。
+
+### JavaScript / NPM 依存
+
+| パッケージ | 用途 | ライセンス |
+|---|---|---|
+| `retext-spell` | スペルチェック連携 | MIT |
+| `nspell` | Hunspell 辞書の実行エンジン | MIT |
+| `retext-english` | 英語テキスト解析 | MIT |
+| `retext-repeated-words` | 重複語検出 | MIT |
+| `dictionary-en` | 英語 Hunspell 辞書パッケージ | MIT AND BSD |
+
+正確なバージョンと依存関係は `frontend/package-lock.json` を参照してください。
+
+### 同梱英語 Hunspell 辞書
+
+本アプリは、英語字幕の初期スペルチェック用に `en.aff` / `en.dic` を同梱しています。
+
+- **配置**: `frontend/src/lib/pipeline/spellCheck/dictionaries/en.aff`, `frontend/src/lib/pipeline/spellCheck/dictionaries/en.dic`
+- **告知ファイル**: `frontend/src/lib/pipeline/spellCheck/dictionaries/en.LICENSE`
+- **由来**: SCOWL / Ispell 由来の英語 Hunspell 辞書
+- **版**: `en_US Hunspell Dictionary Version 2020.12.07`
+- **参照元**: http://wordlist.sourceforge.net
+
+英語以外の Hunspell 辞書は、言語ごとにライセンスが異なるため、本アプリの配布物には同梱していません。利用者が一般用語辞書インポート機能で `.aff` / `.dic` を追加する場合は、各辞書のライセンスを利用者側で確認してください。

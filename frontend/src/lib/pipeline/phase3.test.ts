@@ -17,7 +17,6 @@ const thresholds: PipelineThresholds = {
   slowCps: 3,
   maxExpandPerBlock: 3,
   maxCompressPerBlock: 5,
-  maxPhase2Retries: 3,
 }
 
 const settings = {

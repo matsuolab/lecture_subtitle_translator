@@ -46,6 +46,11 @@ export interface SubtitleBlock {
   contextGroupReason?: string
   contextGroupText?: string
   contextGroupSourceIds?: number[]
+  /**
+   * 自動補正の試行履歴。診断・改善サイクル向けのデータで、ReportTab（自動処理履歴）が参照する。
+   * 翻訳者のリリース画面ではプロセス詳細を見せない方針のため、字幕エディタには表示しない。
+   * 詳細は CONTEXT.md「正式リリース画面 / 診断設定」を参照。
+   */
   correctionAttempts?: Array<{
     strategy: string
     changed: boolean

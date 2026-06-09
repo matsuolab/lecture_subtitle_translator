@@ -39,10 +39,8 @@ export interface AdminSettings {
   semanticCheckMode: SemanticCheckMode
   enMaxCharsPerLine: number
   enMaxLines: number
-  enMaxTotalChars: number
   enMaxCps: number
   subtitleMinDurationSec: number
-  subtitleMaxDurationSec: number
   qualityCorrectionThreshold: number
 
   // 字幕スペル校正（subtitle側）。対応辞書がある言語なら自動チェック。詳細: docs/adr/0003-subtitle-spellcheck.md
@@ -61,7 +59,6 @@ export interface AdminSettings {
   pipelineSlowCps: number
   pipelineMaxExpandPerBlock: number
   pipelineMaxCompressPerBlock: number
-  pipelineMaxPhase2Retries: number
 
   // Phase1: 継続助詞（mid-sentence cut）で終わる JA ブロックを次と結合する前処理
   // semanticSplitJa が「〜が」「〜の」「〜まで」等で切れたブロックを生むと、後段 translateEn が

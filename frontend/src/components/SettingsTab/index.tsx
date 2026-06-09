@@ -45,7 +45,6 @@ type SettingsTabProps = {
   adminSettings: AdminSettings
   serviceCheck: ServiceCheckState
   onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
-  onAdminSettingsReset: () => void
   onServiceCheck: () => void
 }
 
@@ -73,7 +72,6 @@ export function SettingsTab({
   adminSettings,
   serviceCheck,
   onAdminSettingsChange,
-  onAdminSettingsReset,
   onServiceCheck,
 }: SettingsTabProps) {
   const { theme, setThemeId } = useTheme()
@@ -679,323 +677,6 @@ export function SettingsTab({
             <option key={id} value={id} />
           ))}
         </datalist>
-
-        <div style={{
-          marginTop: 4,
-          paddingTop: 8,
-          borderTop: `1px solid ${theme.panelBorder}`,
-          fontSize: 12,
-          fontWeight: 700,
-          color: theme.textPrimary,
-        }}>
-          管理者設定
-        </div>
-
-        <FieldCard theme={theme}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>管理者設定の共有</div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button type="button" onClick={exportSharedAdminSettings} style={smallButtonStyle(theme)}>
-              共有用JSONを出力
-            </button>
-            <button type="button" onClick={() => sharedSettingsImportRef.current?.click()} style={smallButtonStyle(theme)}>
-              共有用JSONを読み込む
-            </button>
-            <input
-              ref={sharedSettingsImportRef}
-              type="file"
-              accept=".json,application/json"
-              onChange={(event) => void importSharedAdminSettings(event.target.files?.[0])}
-              style={{ display: 'none' }}
-            />
-          </div>
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-            プロンプト、例文、モデル、プロファイル、閾値を共有します。OpenAI互換 Base URL は出力時に含めるか選択します。
-            Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
-          </div>
-        </FieldCard>
-
-        <FieldCard theme={theme}>
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
-            入力でフィルター・絞り込み。「モデル一覧を更新」で選択肢を取得してから ▼ をクリックすると一覧表示されます。
-          </div>
-          <ComboField
-            theme={theme}
-            label="補正モデル (Correction)"
-            value={adminSettings.correctionModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
-            listId="available-models-list"
-            hint="接続先AIプロバイダに対応するモデルIDを指定します"
-            onChange={(value) => onAdminSettingsChange({ correctionModel: value })}
-          />
-          <ComboField
-            theme={theme}
-            label="翻訳モデル (Translation)"
-            value={adminSettings.translationModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
-            listId="available-models-list"
-            hint="圧縮・展開モデルが空欄の場合もこのモデルを流用します"
-            onChange={(value) => onAdminSettingsChange({ translationModel: value })}
-          />
-          <ComboField
-            theme={theme}
-            label="PDF抽出Visionモデル"
-            value={adminSettings.pdfExtractionVisionModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
-            listId="available-models-list"
-            hint="辞書作成でVision LLMを有効にした場合だけ使います。テキスト専用モデルでは失敗します"
-            onChange={(value) => onAdminSettingsChange({ pdfExtractionVisionModel: value })}
-          />
-          <ComboField
-            theme={theme}
-            label="PDF数式確認モデル"
-            value={adminSettings.pdfFormulaMiniModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
-            listId="available-models-list"
-            hint="辞書作成で数式・画像文字の追加確認に使います。空欄の場合はPDF抽出Visionモデルにフォールバックします"
-            onChange={(value) => onAdminSettingsChange({ pdfFormulaMiniModel: value })}
-          />
-          <NumberField
-            theme={theme}
-            label="辞書生成: 出力トークン上限 (max_tokens)"
-            value={adminSettings.glossaryMaxOutputTokens}
-            min={256}
-            step={256}
-            onChange={(value) => onAdminSettingsChange({ glossaryMaxOutputTokens: Math.trunc(value) })}
-          />
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
-            辞書候補抽出・詳細展開で 1 リクエストあたりに生成できる最大トークン数。256〜16384。
-            上限到達 (finish_reason=length) で停止する場合は増やします。gpt-5.4-mini は 128K まで対応。
-          </div>
-          <NumberField
-            theme={theme}
-            label="並列リクエスト数"
-            value={adminSettings.apiRequestConcurrency}
-            min={1}
-            step={1}
-            onChange={(value) => onAdminSettingsChange({ apiRequestConcurrency: Math.trunc(value) })}
-          />
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
-            APIの並列処理限界設定。エラーが出る場合は下げてください。
-          </div>
-          <ComboField
-            theme={theme}
-            label="Embedding モデル"
-            value={adminSettings.embeddingModel}
-            placeholder="text-embedding-3-small"
-            listId="available-models-list"
-            hint="空欄 = text-embedding-3-small"
-            onChange={(value) => onAdminSettingsChange({ embeddingModel: value })}
-          />
-          <ApiCompatibilityProfileSelect
-            theme={theme}
-            label="API Compatibility Profile"
-            value={adminSettings.apiCompatibilityProfilePreset}
-            onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfilePreset: value })}
-          />
-          <div style={{
-            padding: '8px 10px',
-            borderRadius: 8,
-            border: `1px solid ${theme.panelBorder}`,
-            background: theme.panelBg,
-            color: theme.textSecondary,
-            fontSize: 11,
-            lineHeight: 1.6,
-          }}>
-            <div style={{ color: theme.textPrimary, fontWeight: 700 }}>
-              Resolved: {resolvedApiCompatibilityProfile
-                ? `${resolvedApiCompatibilityProfile.id} (${resolvedApiCompatibilityProfile.label})`
-                : 'User Profile JSON が不正です'}
-            </div>
-            {resolvedApiCompatibilityProfile && (
-              <div>
-                tokenLimitParam: {resolvedApiCompatibilityProfile.requestDialect.chat.tokenLimitParam}
-                {' / '}
-                responseFormat: {resolvedApiCompatibilityProfile.requestDialect.chat.responseFormat}
-              </div>
-            )}
-            {adminSettings.apiCompatibilityProfilePreset === 'auto' && autoResolvedApiCompatibilityProfile && (
-              <div>Auto は現在 {autoResolvedApiCompatibilityProfile.id} を使用します。</div>
-            )}
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button type="button" onClick={duplicateResolvedApiCompatibilityProfile} style={smallButtonStyle(theme)}>
-              Built-inをUser JSONへ複製
-            </button>
-            <button type="button" onClick={exportApiCompatibilityProfileJson} style={smallButtonStyle(theme)}>
-              User JSONを出力
-            </button>
-            <button type="button" onClick={() => apiCompatibilityProfileImportRef.current?.click()} style={smallButtonStyle(theme)}>
-              User JSONを読み込む
-            </button>
-            <input
-              ref={apiCompatibilityProfileImportRef}
-              type="file"
-              accept=".json,application/json"
-              onChange={(event) => void importApiCompatibilityProfileJson(event.target.files?.[0])}
-              style={{ display: 'none' }}
-            />
-          </div>
-          <TextareaField
-            theme={theme}
-            label="API Compatibility User Profile JSON"
-            value={adminSettings.apiCompatibilityProfileJson}
-            placeholder="User Profile 選択時に使用。Built-inを複製して requestDialect を調整してください"
-            onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfileJson: value })}
-          />
-          <div style={{
-            fontSize: 11,
-            color: apiCompatibilityProfileValidation.ok ? '#22c55e' : '#ef4444',
-            lineHeight: 1.5,
-          }}>
-            {adminSettings.apiCompatibilityProfileJson.trim()
-              ? apiCompatibilityProfileValidation.ok
-                ? `User Profile JSON OK: ${apiCompatibilityProfileValidation.profile?.id ?? 'unknown'}`
-                : `User Profile JSON error: ${apiCompatibilityProfileValidation.error ?? 'invalid profile'}`
-              : 'User Profile JSON は空です。Built-inを複製して外部エディタで編集できます。'}
-          </div>
-          <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-            <ModelProfileSelect
-              theme={theme}
-              label="Chat Text プロファイル"
-              value={adminSettings.chatTextProfilePreset}
-              onChange={(value) => onAdminSettingsChange({ chatTextProfilePreset: value })}
-            />
-            <ModelProfileSelect
-              theme={theme}
-              label="Chat Vision プロファイル"
-              value={adminSettings.chatVisionProfilePreset}
-              onChange={(value) => onAdminSettingsChange({ chatVisionProfilePreset: value })}
-            />
-            <ModelProfileSelect
-              theme={theme}
-              label="Embedding プロファイル"
-              value={adminSettings.embeddingProfilePreset}
-              onChange={(value) => onAdminSettingsChange({ embeddingProfilePreset: value })}
-            />
-          </div>
-          <TextareaField
-            theme={theme}
-            label="Chat Text カスタムプロファイルJSON"
-            value={adminSettings.chatTextProfileJson}
-            placeholder="空欄 = プリセットまたはモデルIDから自動推定"
-            onChange={(value) => onAdminSettingsChange({ chatTextProfileJson: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label="Chat Vision カスタムプロファイルJSON"
-            value={adminSettings.chatVisionProfileJson}
-            placeholder="空欄 = プリセットまたはモデルIDから自動推定"
-            onChange={(value) => onAdminSettingsChange({ chatVisionProfileJson: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label="Embedding カスタムプロファイルJSON"
-            value={adminSettings.embeddingProfileJson}
-            placeholder="空欄 = プリセットまたはモデルIDから自動推定"
-            onChange={(value) => onAdminSettingsChange({ embeddingProfileJson: value })}
-          />
-          <ComboField
-            theme={theme}
-            label={t.settingsCompressModel}
-            value={adminSettings.compressModel}
-            placeholder="（翻訳モデルと同じ）"
-            listId="available-models-list"
-            hint="空欄 = 翻訳モデルと同じ"
-            onChange={(value) => onAdminSettingsChange({ compressModel: value })}
-          />
-          <ComboField
-            theme={theme}
-            label={t.settingsMicroModel}
-            value={adminSettings.microModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
-            listId="available-models-list"
-            hint="1単語ずつ削るマイクロ圧縮用。タスクが極めて単純なので nano で十分（default: gpt-5.4-nano）。空欄 = 圧縮モデルと同じにフォールバック"
-            onChange={(value) => onAdminSettingsChange({ microModel: value })}
-          />
-          <ComboField
-            theme={theme}
-            label={t.settingsExpandModel}
-            value={adminSettings.expandModel}
-            placeholder="（翻訳モデルと同じ）"
-            listId="available-models-list"
-            hint="空欄 = 翻訳モデルと同じ"
-            onChange={(value) => onAdminSettingsChange({ expandModel: value })}
-          />
-          <ComboField
-            theme={theme}
-            label="文脈統合モデル (Context Merge)"
-            value={adminSettings.contextMergeModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-mini')}
-            listId="available-models-list"
-            hint="文脈依存の短い断片を前後どちらに統合するか判断するモデル（前/後の二択なので mini で十分・以前は 5.5 が default だった）"
-            onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
-          />
-          <ComboField
-            theme={theme}
-            label="日本語分割モデル (splitJa)"
-            value={adminSettings.splitJaModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
-            listId="available-models-list"
-            hint="日本語を意味単位に分割する用途。翻訳生成は不要なので小型モデル（nano）で十分。空欄 = マイクロ圧縮モデルと同じ"
-            onChange={(value) => onAdminSettingsChange({ splitJaModel: value })}
-          />
-          <Field
-            theme={theme}
-            label="字幕言語ラベル"
-            value={adminSettings.subtitleLanguageLabel}
-            placeholder="English"
-            onChange={(value) => onAdminSettingsChange({ subtitleLanguageLabel: value })}
-          />
-          <Field
-            theme={theme}
-            label="書き起こし言語ラベル"
-            value={adminSettings.transcriptLanguageLabel}
-            placeholder="Japanese"
-            onChange={(value) => onAdminSettingsChange({ transcriptLanguageLabel: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label="言語プロファイルJSON"
-            value={adminSettings.languageProfileConfigJson}
-            placeholder='{"subtitle":{"label":"English","script":"latin"},"transcript":{"label":"Japanese","script":"japanese"}}'
-            onChange={(value) => onAdminSettingsChange({ languageProfileConfigJson: value })}
-          />
-          <button
-            onClick={handleRefreshModels}
-            disabled={modelRefreshState === 'loading'}
-            style={{
-              padding: '8px 12px',
-              borderRadius: 8,
-              border: `1px solid ${theme.panelBorder}`,
-              background: theme.panelBg,
-              color: modelRefreshState === 'error' ? '#ef4444' : theme.textPrimary,
-              cursor: modelRefreshState === 'loading' ? 'wait' : 'pointer',
-              fontSize: 12,
-              fontWeight: 600,
-            }}
-          >
-            {refreshLabel}
-          </button>
-        </FieldCard>
-
-        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-          {t.settingsStorageNotice}
-        </div>
-
-        <button
-          onClick={onAdminSettingsReset}
-          style={{
-            marginTop: 10,
-            padding: '8px 12px',
-            borderRadius: 8,
-            border: `1px solid ${theme.panelBorder}`,
-            background: theme.cardBg,
-            color: theme.textPrimary,
-            cursor: 'pointer',
-          }}
-        >
-          {t.settingsResetAdmin}
-        </button>
       </Section>
 
       <Section title="一般設定" theme={theme}>
@@ -1057,9 +738,7 @@ export function SettingsTab({
             </div>
           </div>
         </FieldCard>
-      </Section>
 
-      <Section title="詳細設定" theme={theme}>
         <FieldCard theme={theme}>
           <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>ワークログ（作業データ記録）</div>
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
@@ -1102,7 +781,347 @@ export function SettingsTab({
         </FieldCard>
       </Section>
 
-      <Section title={t.settingsSubtitleQualityTitle} theme={theme}>
+      <Section title="上級者向け設定" theme={theme}>
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>設定の共有</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={exportSharedAdminSettings} style={smallButtonStyle(theme)}>
+              共有用JSONを出力
+            </button>
+            <button type="button" onClick={() => sharedSettingsImportRef.current?.click()} style={smallButtonStyle(theme)}>
+              共有用JSONを読み込む
+            </button>
+            <input
+              ref={sharedSettingsImportRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => void importSharedAdminSettings(event.target.files?.[0])}
+              style={{ display: 'none' }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            プロンプト、例文、モデル、プロファイル、閾値を共有します。OpenAI互換 Base URL は出力時に含めるか選択します。
+            Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label="並列リクエスト数"
+            value={adminSettings.apiRequestConcurrency}
+            min={1}
+            step={1}
+            onChange={(value) => onAdminSettingsChange({ apiRequestConcurrency: Math.trunc(value) })}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+            APIの並列処理上限。エラーが出る場合は下げてください。
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>モデル設定</div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+            処理段階ごとに使うモデルを指定します。まず「モデル一覧を更新」で選択肢を取得し、各欄は入力でフィルター、▼ で一覧から選択できます。空欄の欄は記載のフォールバック先を使います。
+          </div>
+          <button
+            onClick={handleRefreshModels}
+            disabled={modelRefreshState === 'loading'}
+            style={{
+              alignSelf: 'flex-start',
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.panelBg,
+              color: modelRefreshState === 'error' ? '#ef4444' : theme.textPrimary,
+              cursor: modelRefreshState === 'loading' ? 'wait' : 'pointer',
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {refreshLabel}
+          </button>
+
+          <SettingsGroupLabel
+            theme={theme}
+            title="基本モデル"
+            hint="日本語書き起こしの補正と、英語字幕への翻訳に使う主モデルです。高品質な処理が必要な段階です。"
+          />
+          <ComboField
+            theme={theme}
+            label="補正モデル (Correction)"
+            value={adminSettings.correctionModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
+            listId="available-models-list"
+            hint="接続先AIプロバイダに対応するモデルIDを指定します"
+            onChange={(value) => onAdminSettingsChange({ correctionModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label="翻訳モデル (Translation)"
+            value={adminSettings.translationModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
+            listId="available-models-list"
+            hint="圧縮・展開モデルが空欄の場合もこのモデルを流用します"
+            onChange={(value) => onAdminSettingsChange({ translationModel: value })}
+          />
+
+          <SettingsGroupLabel
+            theme={theme}
+            title="字幕整形・修復モデル"
+            hint="字幕の長さ調整（短縮・展開）、文脈統合、日本語分割に使います。判断が単純な処理が多く、軽量・低コストのモデルで十分です。"
+          />
+          <ComboField
+            theme={theme}
+            label={t.settingsCompressModel}
+            value={adminSettings.compressModel}
+            placeholder="（翻訳モデルと同じ）"
+            listId="available-models-list"
+            hint="空欄 = 翻訳モデルと同じ"
+            onChange={(value) => onAdminSettingsChange({ compressModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label={t.settingsExpandModel}
+            value={adminSettings.expandModel}
+            placeholder="（翻訳モデルと同じ）"
+            listId="available-models-list"
+            hint="空欄 = 翻訳モデルと同じ"
+            onChange={(value) => onAdminSettingsChange({ expandModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label={t.settingsMicroModel}
+            value={adminSettings.microModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
+            listId="available-models-list"
+            hint="1単語ずつ削るマイクロ圧縮用。処理が極めて単純なので、軽量・低コストのモデルで十分です（default: gpt-5.4-nano）。空欄 = 圧縮モデルと同じにフォールバック"
+            onChange={(value) => onAdminSettingsChange({ microModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label="文脈統合モデル (Context Merge)"
+            value={adminSettings.contextMergeModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-mini')}
+            listId="available-models-list"
+            hint="文脈依存の短い断片を前後どちらに統合するか判断するモデル。前/後の二択なので、軽量なモデルで十分です"
+            onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label="日本語分割モデル (splitJa)"
+            value={adminSettings.splitJaModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
+            listId="available-models-list"
+            hint="日本語を意味単位に分割する用途。翻訳生成は不要なので、軽量・小型のモデルで十分です（default: gpt-5.4-nano）。空欄 = マイクロ圧縮モデルと同じ"
+            onChange={(value) => onAdminSettingsChange({ splitJaModel: value })}
+          />
+
+          <SettingsGroupLabel
+            theme={theme}
+            title="検証モデル"
+            hint="字幕生成ではなく、意味の近さチェックに使う Embedding モデルです。"
+          />
+          <ComboField
+            theme={theme}
+            label="Embedding モデル"
+            value={adminSettings.embeddingModel}
+            placeholder="text-embedding-3-small"
+            listId="available-models-list"
+            hint="空欄 = text-embedding-3-small"
+            onChange={(value) => onAdminSettingsChange({ embeddingModel: value })}
+          />
+
+          <SettingsGroupLabel
+            theme={theme}
+            title="辞書生成モデル"
+            hint="PDF教材から専門用語を抽出する辞書作成機能で使います。辞書作成を使わない場合は変更不要です。"
+          />
+          <ComboField
+            theme={theme}
+            label="PDF抽出Visionモデル"
+            value={adminSettings.pdfExtractionVisionModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
+            listId="available-models-list"
+            hint="辞書作成でVision LLMを有効にした場合だけ使います。テキスト専用モデルでは失敗します"
+            onChange={(value) => onAdminSettingsChange({ pdfExtractionVisionModel: value })}
+          />
+          <ComboField
+            theme={theme}
+            label="PDF数式確認モデル"
+            value={adminSettings.pdfFormulaMiniModel}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
+            listId="available-models-list"
+            hint="辞書作成で数式・画像文字の追加確認に使います。空欄の場合はPDF抽出Visionモデルにフォールバックします"
+            onChange={(value) => onAdminSettingsChange({ pdfFormulaMiniModel: value })}
+          />
+          <NumberField
+            theme={theme}
+            label="辞書生成: 出力トークン上限 (max_tokens)"
+            value={adminSettings.glossaryMaxOutputTokens}
+            min={256}
+            step={256}
+            onChange={(value) => onAdminSettingsChange({ glossaryMaxOutputTokens: Math.trunc(value) })}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+            辞書候補抽出・詳細展開で 1 リクエストあたりに生成できる最大トークン数。256〜16384。
+            上限到達 (finish_reason=length) で停止する場合は増やします。
+          </div>
+
+          <SettingsGroupLabel
+            theme={theme}
+            title="言語ラベル"
+            hint="AIへのプロンプトで使う、書き起こし（翻訳元）と字幕（翻訳先）の言語名です。どの言語からどの言語へ変換するかをモデルに伝えます。"
+          />
+          <Field
+            theme={theme}
+            label="字幕言語ラベル"
+            value={adminSettings.subtitleLanguageLabel}
+            placeholder="English"
+            onChange={(value) => onAdminSettingsChange({ subtitleLanguageLabel: value })}
+          />
+          <Field
+            theme={theme}
+            label="書き起こし言語ラベル"
+            value={adminSettings.transcriptLanguageLabel}
+            placeholder="Japanese"
+            onChange={(value) => onAdminSettingsChange({ transcriptLanguageLabel: value })}
+          />
+
+          <details style={{
+            border: `1px solid ${theme.panelBorder}`,
+            borderRadius: 8,
+            background: theme.panelBg,
+            padding: '10px 12px',
+          }}>
+            <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontSize: 12, fontWeight: 700 }}>
+              診断設定: API互換 / Profile JSON
+            </summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+              <ApiCompatibilityProfileSelect
+                theme={theme}
+                label="API Compatibility Profile"
+                value={adminSettings.apiCompatibilityProfilePreset}
+                onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfilePreset: value })}
+              />
+              <div style={{
+                padding: '8px 10px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.cardBg,
+                color: theme.textSecondary,
+                fontSize: 11,
+                lineHeight: 1.6,
+              }}>
+                <div style={{ color: theme.textPrimary, fontWeight: 700 }}>
+                  Resolved: {resolvedApiCompatibilityProfile
+                    ? `${resolvedApiCompatibilityProfile.id} (${resolvedApiCompatibilityProfile.label})`
+                    : 'User Profile JSON が不正です'}
+                </div>
+                {resolvedApiCompatibilityProfile && (
+                  <div>
+                    tokenLimitParam: {resolvedApiCompatibilityProfile.requestDialect.chat.tokenLimitParam}
+                    {' / '}
+                    responseFormat: {resolvedApiCompatibilityProfile.requestDialect.chat.responseFormat}
+                  </div>
+                )}
+                {adminSettings.apiCompatibilityProfilePreset === 'auto' && autoResolvedApiCompatibilityProfile && (
+                  <div>Auto は現在 {autoResolvedApiCompatibilityProfile.id} を使用します。</div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button type="button" onClick={duplicateResolvedApiCompatibilityProfile} style={smallButtonStyle(theme)}>
+                  Built-inをUser JSONへ複製
+                </button>
+                <button type="button" onClick={exportApiCompatibilityProfileJson} style={smallButtonStyle(theme)}>
+                  User JSONを出力
+                </button>
+                <button type="button" onClick={() => apiCompatibilityProfileImportRef.current?.click()} style={smallButtonStyle(theme)}>
+                  User JSONを読み込む
+                </button>
+                <input
+                  ref={apiCompatibilityProfileImportRef}
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(event) => void importApiCompatibilityProfileJson(event.target.files?.[0])}
+                  style={{ display: 'none' }}
+                />
+              </div>
+              <TextareaField
+                theme={theme}
+                label="API Compatibility User Profile JSON"
+                value={adminSettings.apiCompatibilityProfileJson}
+                placeholder="User Profile 選択時に使用。Built-inを複製して requestDialect を調整してください"
+                onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfileJson: value })}
+              />
+              <div style={{
+                fontSize: 11,
+                color: apiCompatibilityProfileValidation.ok ? '#22c55e' : '#ef4444',
+                lineHeight: 1.5,
+              }}>
+                {adminSettings.apiCompatibilityProfileJson.trim()
+                  ? apiCompatibilityProfileValidation.ok
+                    ? `User Profile JSON OK: ${apiCompatibilityProfileValidation.profile?.id ?? 'unknown'}`
+                    : `User Profile JSON error: ${apiCompatibilityProfileValidation.error ?? 'invalid profile'}`
+                  : 'User Profile JSON は空です。Built-inを複製して外部エディタで編集できます。'}
+              </div>
+              <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+                <ModelProfileSelect
+                  theme={theme}
+                  label="Chat Text プロファイル"
+                  value={adminSettings.chatTextProfilePreset}
+                  onChange={(value) => onAdminSettingsChange({ chatTextProfilePreset: value })}
+                />
+                <ModelProfileSelect
+                  theme={theme}
+                  label="Chat Vision プロファイル"
+                  value={adminSettings.chatVisionProfilePreset}
+                  onChange={(value) => onAdminSettingsChange({ chatVisionProfilePreset: value })}
+                />
+                <ModelProfileSelect
+                  theme={theme}
+                  label="Embedding プロファイル"
+                  value={adminSettings.embeddingProfilePreset}
+                  onChange={(value) => onAdminSettingsChange({ embeddingProfilePreset: value })}
+                />
+              </div>
+              <TextareaField
+                theme={theme}
+                label="Chat Text カスタムプロファイルJSON"
+                value={adminSettings.chatTextProfileJson}
+                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+                onChange={(value) => onAdminSettingsChange({ chatTextProfileJson: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="Chat Vision カスタムプロファイルJSON"
+                value={adminSettings.chatVisionProfileJson}
+                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+                onChange={(value) => onAdminSettingsChange({ chatVisionProfileJson: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="Embedding カスタムプロファイルJSON"
+                value={adminSettings.embeddingProfileJson}
+                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+                onChange={(value) => onAdminSettingsChange({ embeddingProfileJson: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="言語プロファイルJSON"
+                value={adminSettings.languageProfileConfigJson}
+                placeholder='{"subtitle":{"label":"English","script":"latin"},"transcript":{"label":"Japanese","script":"japanese"}}'
+                onChange={(value) => onAdminSettingsChange({ languageProfileConfigJson: value })}
+              />
+            </div>
+          </details>
+        </FieldCard>
+
+        <SettingsGroupLabel
+          theme={theme}
+          title="字幕品質・修復"
+          hint="字幕の品質基準（行長・CPS・表示時間など）と、違反を自動修復するエージェントの設定です。チームの共有設定として配布する値です。"
+        />
         <FieldCard theme={theme}>
           <NumberField
             theme={theme}
@@ -1117,13 +1136,6 @@ export function SettingsTab({
             value={adminSettings.enMaxLines}
             min={1}
             onChange={(value) => onAdminSettingsChange({ enMaxLines: value })}
-          />
-          <NumberField
-            theme={theme}
-            label={t.settingsEnMaxTotalChars}
-            value={adminSettings.enMaxTotalChars}
-            min={10}
-            onChange={(value) => onAdminSettingsChange({ enMaxTotalChars: value })}
           />
           <NumberField
             theme={theme}
@@ -1143,14 +1155,6 @@ export function SettingsTab({
             min={0.1}
             step={0.001}
             onChange={(value) => onAdminSettingsChange({ subtitleMinDurationSec: value })}
-          />
-          <NumberField
-            theme={theme}
-            label={t.settingsSubtitleMaxDuration}
-            value={adminSettings.subtitleMaxDurationSec}
-            min={1}
-            step={0.1}
-            onChange={(value) => onAdminSettingsChange({ subtitleMaxDurationSec: value })}
           />
         </FieldCard>
 
@@ -1291,7 +1295,11 @@ export function SettingsTab({
         </FieldCard>
 
         <FieldCard theme={theme}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>デバッグモード</div>
+          <details>
+            <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontSize: 12, fontWeight: 700 }}>
+              診断設定: デバッグモード
+            </summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="checkbox"
@@ -1331,6 +1339,8 @@ export function SettingsTab({
               <br />※ デバッグモード OFF の間は機能しない。
             </div>
           </div>
+            </div>
+          </details>
         </FieldCard>
 
         <FieldCard theme={theme}>
@@ -1484,9 +1494,12 @@ export function SettingsTab({
             </div>
           )}
         </FieldCard>
-      </Section>
 
-      <Section title={t.settingsPipelineThresholdsTitle} theme={theme}>
+        <SettingsGroupLabel
+          theme={theme}
+          title="字幕の自動分割・結合（表示時間）"
+          hint="自動処理が字幕を分割・結合する秒数のしきい値です。長い字幕は分割、短い字幕は前後と結合します。"
+        />
         <FieldCard theme={theme}>
           <NumberField
             theme={theme}
@@ -1513,6 +1526,11 @@ export function SettingsTab({
             onChange={(value) => onAdminSettingsChange({ pipelineMergedLongDurationSec: value })}
           />
         </FieldCard>
+        <SettingsGroupLabel
+          theme={theme}
+          title="字幕の自動調整（文字量・速度）"
+          hint="英訳の文字量や読む速さを判定し、短縮・展開する基準です。英日文字比やCPSのしきい値で制御します。"
+        />
         <FieldCard theme={theme}>
           <NumberField
             theme={theme}
@@ -1546,6 +1564,11 @@ export function SettingsTab({
             onChange={(value) => onAdminSettingsChange({ pipelineSlowCps: value })}
           />
         </FieldCard>
+        <SettingsGroupLabel
+          theme={theme}
+          title="自動修正のリトライ上限"
+          hint="1ブロックを基準に合わせるための、短縮・展開の最大試行回数です。"
+        />
         <FieldCard theme={theme}>
           <NumberField
             theme={theme}
@@ -1561,14 +1584,13 @@ export function SettingsTab({
             min={0}
             onChange={(value) => onAdminSettingsChange({ pipelineMaxCompressPerBlock: value })}
           />
-          <NumberField
-            theme={theme}
-            label={t.settingsPipelineMaxPhase2Retries}
-            value={adminSettings.pipelineMaxPhase2Retries}
-            min={0}
-            onChange={(value) => onAdminSettingsChange({ pipelineMaxPhase2Retries: value })}
-          />
         </FieldCard>
+
+        <SettingsGroupLabel
+          theme={theme}
+          title="未完結な文の結合（前処理）"
+          hint="文の途中で切れた字幕を次の字幕と結合してから翻訳し、英訳のあふれやCPS違反を防ぎます。"
+        />
         <FieldCard theme={theme}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
@@ -1625,49 +1647,60 @@ export function SettingsTab({
           />
         </FieldCard>
         <FieldCard theme={theme}>
-          <TextareaField
-            theme={theme}
-            label="書き起こし補正 追加指示"
-            value={adminSettings.correctionAdditionalInstructions}
-            placeholder="空欄にすると追加指示なし"
-            onChange={(value) => onAdminSettingsChange({ correctionAdditionalInstructions: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label="書き起こし補正 例文JSON"
-            value={adminSettings.correctionFewShotJson}
-            placeholder='{"segments":[{"id":1,"text":"..."}],"corrections":[{"id":1,"text":"..."}]}'
-            onChange={(value) => onAdminSettingsChange({ correctionFewShotJson: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label="翻訳 追加指示"
-            value={adminSettings.translationAdditionalInstructions}
-            placeholder="空欄にすると追加指示なし"
-            onChange={(value) => onAdminSettingsChange({ translationAdditionalInstructions: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label="翻訳 例文JSON"
-            value={adminSettings.translationFewShotJson}
-            placeholder='{"segments":["..."],"translations":["..."]}'
-            onChange={(value) => onAdminSettingsChange({ translationFewShotJson: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label={t.settingsCompressPromptOverride}
-            value={adminSettings.compressPromptOverride}
-            placeholder="(empty = use default)"
-            onChange={(value) => onAdminSettingsChange({ compressPromptOverride: value })}
-          />
-          <TextareaField
-            theme={theme}
-            label={t.settingsExpandPromptOverride}
-            value={adminSettings.expandPromptOverride}
-            placeholder="(empty = use default)"
-            onChange={(value) => onAdminSettingsChange({ expandPromptOverride: value })}
-          />
+          <details>
+            <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontSize: 12, fontWeight: 700 }}>
+プロンプト / few-shot 上書き
+            </summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+              <TextareaField
+                theme={theme}
+                label="書き起こし補正 追加指示"
+                value={adminSettings.correctionAdditionalInstructions}
+                placeholder="空欄にすると追加指示なし"
+                onChange={(value) => onAdminSettingsChange({ correctionAdditionalInstructions: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="書き起こし補正 例文JSON"
+                value={adminSettings.correctionFewShotJson}
+                placeholder='{"segments":[{"id":1,"text":"..."}],"corrections":[{"id":1,"text":"..."}]}'
+                onChange={(value) => onAdminSettingsChange({ correctionFewShotJson: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="翻訳 追加指示"
+                value={adminSettings.translationAdditionalInstructions}
+                placeholder="空欄にすると追加指示なし"
+                onChange={(value) => onAdminSettingsChange({ translationAdditionalInstructions: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="翻訳 例文JSON"
+                value={adminSettings.translationFewShotJson}
+                placeholder='{"segments":["..."],"translations":["..."]}'
+                onChange={(value) => onAdminSettingsChange({ translationFewShotJson: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label={t.settingsCompressPromptOverride}
+                value={adminSettings.compressPromptOverride}
+                placeholder="(empty = use default)"
+                onChange={(value) => onAdminSettingsChange({ compressPromptOverride: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label={t.settingsExpandPromptOverride}
+                value={adminSettings.expandPromptOverride}
+                placeholder="(empty = use default)"
+                onChange={(value) => onAdminSettingsChange({ expandPromptOverride: value })}
+              />
+            </div>
+          </details>
         </FieldCard>
+
+        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+          {t.settingsStorageNotice}
+        </div>
       </Section>
     </div>
   )
@@ -1727,6 +1760,17 @@ function FieldCard({ theme, children }: { theme: Theme; children: React.ReactNod
       background: theme.cardBg,
     }}>
       {children}
+    </div>
+  )
+}
+
+function SettingsGroupLabel({ theme, title, hint }: { theme: Theme; title: string; hint?: string }) {
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>{title}</div>
+      {hint && (
+        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5, marginTop: 2 }}>{hint}</div>
+      )}
     </div>
   )
 }

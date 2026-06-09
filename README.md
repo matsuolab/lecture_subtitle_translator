@@ -101,6 +101,7 @@ SRT は英語字幕の出力用です。日本語原文、処理ログ、レビ�
 - レポートタブでのモジュール別ログ、進行イベント、設定スナップショット確認
 - 用語辞書 CSV / XLSX の読み込み
 - 用語ハイライト、用語漏れ、タイポ候補表示
+- 字幕スペル校正（英語 Hunspell 辞書を同梱、ユーザー辞書追加対応）
 - SRT / プロジェクト JSON の入出力
 - 日本語 / English / 中文 UI
 
@@ -152,6 +153,9 @@ SRT は英語字幕の出力用です。日本語原文、処理ログ、レビ�
   - OpenAI API / Google GenAI SDK - 字幕の翻訳・補正・整形用 LLM
 - **メディア処理**:
   - FFmpeg - 音声抽出用（LGPL ビルドを sidecar として同梱）
+- **字幕校正**:
+  - Hunspell / nspell / retext - 英語字幕のスペル校正・重複語検出
+  - SCOWL/Ispell 由来の英語 Hunspell 辞書 - 詳細は `frontend/src/lib/pipeline/spellCheck/dictionaries/en.LICENSE` と `THIRD_PARTY_NOTICES.md`
 
 ## License
 

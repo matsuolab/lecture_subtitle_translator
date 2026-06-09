@@ -91,7 +91,6 @@ export interface PipelineThresholds {
   slowCps: number
   maxExpandPerBlock: number
   maxCompressPerBlock: number
-  maxPhase2Retries: number
 }
 
 export interface BlockMetrics {
@@ -115,5 +114,4 @@ export const DEFAULT_PIPELINE_THRESHOLDS: PipelineThresholds = {
   slowCps: 3.0,
   maxExpandPerBlock: 3,
   maxCompressPerBlock: 5,
-  maxPhase2Retries: 3,
 }

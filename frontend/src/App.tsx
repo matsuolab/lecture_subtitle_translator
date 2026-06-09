@@ -24,7 +24,7 @@ import {
   type SessionExportData,
   type SrtExportFormat,
 } from '@/api/persistence'
-import { loadAdminSettings, saveAdminSettings, getDefaultAdminSettings } from '@/api/adminSettings'
+import { loadAdminSettings, saveAdminSettings } from '@/api/adminSettings'
 import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/pipelineClient'
 import { describeError } from '@/lib/describeError'
 import { buildMacAssetUrl } from '@/lib/video/macAssetUrl'
@@ -821,19 +821,12 @@ export default function App() {
   }, [])
 
 
-  const sleep = useCallback((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)), [])
-
   useEffect(() => {
     saveAdminSettings(adminSettings)
   }, [adminSettings])
 
   const updateAdminSettings = useCallback((patch: Partial<AdminSettings>) => {
     setAdminSettings(prev => ({ ...prev, ...patch }))
-  }, [])
-
-  const resetAdminSettings = useCallback(() => {
-    setAdminSettings(getDefaultAdminSettings())
-    setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
   }, [])
 
   // ref で最新の adminSettings を保持し、handleServiceCheck の closure 経由ではなく
@@ -1006,45 +999,6 @@ export default function App() {
     }, adminSettings.workLogDir)
   }, [adminSettings, videoSource, workLog, seedWorkLogSeen])
 
-  const buildPipelineStubBlocks = useCallback((videoName: string): SubtitleBlock[] => {
-    const rows: Array<{ start: number; end: number; source: string; target: string }> = [
-      {
-        start: 0,
-        end: 3.2,
-        source: '本動画を自動で文字起こしし、英語字幕を生成します。',
-        target: `This file (${videoName}) was transcribed and translated automatically.`,
-      },
-      {
-        start: 3.2,
-        end: 7.1,
-        source: '現在は開発途中のため、ここにはスタブ結果を表示しています。',
-        target: 'This is a development-stage pipeline preview result.',
-      },
-      {
-        start: 7.1,
-        end: 11.4,
-        source: '次のステップで WhisperX と翻訳APIの実処理をこの導線に接続します。',
-        target: 'WhisperX and real translation APIs will be connected in this same flow.',
-      },
-    ]
-
-    return rows.map((row, idx) => {
-      const charCount = countCpsChars(row.target)
-      const durationSec = Math.max(0.1, row.end - row.start)
-      return {
-        id: idx + 1,
-        startTime: row.start,
-        endTime: row.end,
-        source: row.source,
-        target: row.target,
-        cps: calculateRoundedCps(row.target, durationSec),
-        charCount,
-        status: 'pending',
-        glossaryTerms: [],
-      }
-    })
-  }, [])
-
   const runDropPipeline = useCallback(async (source: VideoSource) => {
     const sourceName = source.name
     const startedAt = Date.now()
@@ -1078,49 +1032,16 @@ export default function App() {
       }
     }
 
-    const runStep = async (
-      nodeId: string,
-      step: PipelineRunResult['step'],
-      message: string,
-      waitMs: number,
-      summary: string,
-      provider = 'stub',
-      model = 'stub-v1',
-    ) => {
-      progressEvents.push({
-        at: Date.now(),
-        status: 'running',
-        step,
-        message,
-        runId: managedRunId,
-        currentNode: nodeId,
-      })
-      const runningState: PipelineRunResult = { status: 'running', step, message, sourceName, startedAt, runId: managedRunId }
-      setPipelineRun(runningState)
-      persistSessionSnapshot({
-        pipelineRun: runningState,
-        videoSource: source,
-      })
-      const t0 = Date.now()
-      await sleep(waitMs)
-      const t1 = Date.now()
-      traces.push({
-        nodeId,
-        status: 'success',
-        attempt: 1,
-        durationMs: Math.max(1, t1 - t0),
-        provider,
-        model,
-        summary,
-      })
-    }
-
     setActiveTab('subtitles')
     try {
       let generated: SubtitleBlock[] = []
       let audit: PipelineAuditReport | undefined
 
-      if (hasPipelineApi(adminSettings)) {
+      if (!hasPipelineApi(adminSettings)) {
+        throw new Error('字幕生成の実行先が利用できません。デスクトップアプリで「このPCで実行」を使うか、接続設定でService URLを設定してください。')
+      }
+
+      {
         const startingState: PipelineRunResult = {
           status: 'running',
           step: 'transcribe',
@@ -1198,44 +1119,6 @@ export default function App() {
         transcriptSegments = apiResult.debug?.transcriptSegments
         transcriptMetadata = apiResult.debug?.transcriptMetadata
         stageSnapshots = apiResult.debug?.stageSnapshots
-      } else {
-        await runStep('transcribe', 'transcribe', '文字起こしを実行中...', 350, 'WhisperXでセグメント生成')
-        await runStep('correct', 'correct', '日本語テキストを補正中...', 300, 'LLMで補正と正規化')
-        await runStep('translate', 'translate', '英訳を生成中...', 350, 'LLMで字幕翻訳')
-        await runStep('subtitle_format', 'subtitle', '字幕ブロックを生成中...', 260, '字幕ブロック整形とCPS計算')
-
-        traces.push(
-          {
-            nodeId: 'semantic_check',
-            status: 'success',
-            attempt: 1,
-            durationMs: 22,
-            provider: 'embedding',
-            model: 'text-embedding-3-small',
-            summary: '意味近似スコアを算出',
-          },
-          {
-            nodeId: 'terminology_check',
-            status: 'success',
-            attempt: 1,
-            durationMs: 9,
-            provider: 'rule-based',
-            model: 'glossary-v1',
-            summary: '用語漏れ検出',
-          },
-          {
-            nodeId: 'cps_guard',
-            status: 'success',
-            attempt: 1,
-            durationMs: 5,
-            provider: 'rule-based',
-            model: 'cps-v1',
-            summary: 'CPSと42文字制約チェック',
-          },
-        )
-
-        generated = buildPipelineStubBlocks(sourceName)
-        audit = buildAuditReport(generated, traces)
       }
 
       reset(generated)
@@ -1363,7 +1246,7 @@ export default function App() {
         videoSource: source,
       })
     }
-  }, [adminSettings, beginWorkLogSession, blocks, buildAuditReport, buildPipelineStubBlocks, calcPipelineMetrics, glossary, persistSessionSnapshot, pipelineHistory, reset, selfMadeGlossary, sleep])
+  }, [adminSettings, beginWorkLogSession, blocks, buildAuditReport, calcPipelineMetrics, glossary, persistSessionSnapshot, pipelineHistory, reset, selfMadeGlossary])
 
   const buildSessionExport = useCallback((): SessionExportData => ({
     version: 2,
@@ -2592,9 +2475,6 @@ export default function App() {
                   <span>
                     要確認: {pipelineRun.metrics.quality.flaggedCount}件
                   </span>
-                  <span style={{ color: theme.textMuted, fontStyle: 'italic' }}>
-                    トークン数・コスト: 改修中（モデル別表示＆ユーザー単価入力に置き換え予定）
-                  </span>
                   <span>
                     処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s
                   </span>
@@ -2672,7 +2552,6 @@ export default function App() {
                 adminSettings={adminSettings}
                 serviceCheck={serviceCheck}
                 onAdminSettingsChange={updateAdminSettings}
-                onAdminSettingsReset={resetAdminSettings}
                 onServiceCheck={handleServiceCheck}
               />
             )}

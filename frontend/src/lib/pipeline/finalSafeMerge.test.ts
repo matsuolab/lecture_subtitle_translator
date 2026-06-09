@@ -15,7 +15,6 @@ const thresholds: PipelineThresholds = {
   slowCps: 3,
   maxExpandPerBlock: 3,
   maxCompressPerBlock: 5,
-  maxPhase2Retries: 3,
 }
 
 function block(partial: Partial<EnBlock> & Pick<EnBlock, 'id' | 'start' | 'end' | 'jaText' | 'enText'>): EnBlock {
