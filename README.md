@@ -36,17 +36,25 @@
 | 対応OS | Windows 10/11 (x64) / macOS (Apple Silicon) / Linux x64 (AppImage) / Fedora (RPM) |
 | 必要なもの | 動画再生と音声抽出（同梱 FFmpeg）が動く程度のスペック |
 
-### 書きおこし・翻訳をどこで動かすか（構成別の追加要件）
+### 書きおこし・翻訳をどこで動かすか
 
-書きおこし（WhisperX）とLLM（翻訳・補正）を **どこで動かすか** で必要な環境が変わります。
+書きおこし（WhisperX）と 翻訳・補正（LLM）は、それぞれ独立に「ローカル / クラウド」を選べます。
 
-| 構成 | 追加で必要なもの | 参考 |
+**書きおこし（WhisperX）**
+
+| 選択肢 | 必要なもの | 向いているケース |
 |---|---|---|
-| **クラウド構成（手軽）**：書きおこし=リモート(AWS等) ＋ LLM=OpenAI / Gemini API | API キー（と、リモート実行なら Service URL / Token）。アプリ実行PCは軽量でよい | [Getting Started](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started) / [AWS](https://github.com/matsuolab/lecture_subtitle_translator/wiki/AWS-Backend-Setup) |
-| **ローカル書きおこし**：このPCで WhisperX | NVIDIA GPU（VRAM 8GB以上、12GB+ 推奨）＋ Docker ＋ NVIDIA Container Toolkit | [ローカルWhisperX](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Local-WhisperX-Setup) |
-| **ローカルLLM**：LM Studio / Ollama 等 | モデルと context 長ぶんの VRAM/RAM（context 32k 以上を推奨） | [Getting Started §3](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started#3-初期設定) |
+| **ローカル（推奨・手軽）** | NVIDIA GPU ＋ Docker Desktop ＋ NVIDIA Container Toolkit（VRAM 8GB以上、12GB+ 推奨） | **GPUのあるPCがあれば最も簡単**。Docker Desktop を入れて GPU があればそのまま動く → [ローカルWhisperX](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Local-WhisperX-Setup) |
+| クラウド（AWS 等） | 構築済みバックエンドの Service URL / Token | GPU の無いマシンで使う、または **複数人で共有**して使う場合 → [AWS](https://github.com/matsuolab/lecture_subtitle_translator/wiki/AWS-Backend-Setup) |
 
-> 推奨：**書きおこしはローカルGPU、LLMはクラウドAPI**の組み合わせが、品質と手軽さのバランスが良い構成です。
+**翻訳・補正（LLM）**
+
+| 選択肢 | 必要なもの | 特徴 |
+|---|---|---|
+| **クラウド API** | OpenAI / Gemini の API キー | 手軽・高品質。従量課金。アプリ実行PCは軽量でよい |
+| **ローカル LLM** | LM Studio / Ollama 等 ＋ 十分な VRAM/RAM（context 32k 以上を推奨） | API キー不要・データがローカル完結。context 長の設定に注意 → [Getting Started §3](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started#3-初期設定) |
+
+> 手軽さ重視の入門構成は、**書きおこし＝ローカル（Docker＋GPU）／翻訳＝クラウド API**。GPU が無い、または複数人で使う場合は書きおこしを AWS 等クラウドへ。
 
 ---
 
