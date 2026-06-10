@@ -2,9 +2,51 @@
 
 日本語講義動画から英語字幕を作成し、レビュー担当者が確認・修正・承認できる字幕編集アプリです。
 
-このリポジトリでは、Desktop アプリ（Tauri + React）と、書き起こし・翻訳・字幕整形のパイプラインを開発しています。
+このリポジトリでは、Desktop アプリ（Tauri + React）と、書き起こし・翻訳・字幕整形のパイプラインを開発しています。データモデルは言語非依存の役割ベース（**書きおこし／字幕**）で、既定構成は 書きおこし＝日本語・字幕＝英語 です。
 
-> この README の操作手順・設定説明は `subtitle-editor v0.4.7` 準拠です。
+> **詳しい使い方・設定・運用・内部動作は [📖 Wiki](https://github.com/matsuolab/lecture_subtitle_translator/wiki) にまとめています。** この README は概要と入口です。
+
+---
+
+## 📖 ドキュメント（Wiki）
+
+| 知りたいこと | ページ |
+|---|---|
+| インストールして使い始める | [Getting Started](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started) |
+| 日々の字幕作成・レビュー作業の手順 | [操作マニュアル](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Operator-Manual) |
+| 画面の各ボタン・機能の意味 | [画面リファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/UI-Reference) |
+| 環境構築〜接続テスト〜配布（管理者） | [管理者セットアップ](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Admin-Setup) |
+| 品質・コスト・接続の調整と対処（症状から引く） | [チューニング＆トラブルシュート](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Admin-Tuning) |
+| 設定項目の意味（表示名↔キー↔既定値） | [上級設定リファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Settings-Reference) |
+| JSON・プロンプト設定の書式 | [設定ファイルリファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Config-Files-Reference) |
+| パイプラインが内部で何をしているか | [動作原理](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Pipeline-Behavior) |
+| 手元のGPUで書きおこしを動かす | [ローカルWhisperXセットアップ](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Local-WhisperX-Setup) |
+| AWSで書きおこしバックエンドを構築 | [AWS バックエンド設定マニュアル](https://github.com/matsuolab/lecture_subtitle_translator/wiki/AWS-Backend-Setup) |
+
+---
+
+## 推奨環境
+
+### アプリ本体（字幕エディタ）
+
+デスクトップアプリ自体は一般的なPCで動作し、**GPUは必須ではありません**。
+
+| 項目 | 内容 |
+|---|---|
+| 対応OS | Windows 10/11 (x64) / macOS (Apple Silicon) / Linux x64 (AppImage) / Fedora (RPM) |
+| 必要なもの | 動画再生と音声抽出（同梱 FFmpeg）が動く程度のスペック |
+
+### 書きおこし・翻訳をどこで動かすか（構成別の追加要件）
+
+書きおこし（WhisperX）とLLM（翻訳・補正）を **どこで動かすか** で必要な環境が変わります。
+
+| 構成 | 追加で必要なもの | 参考 |
+|---|---|---|
+| **クラウド構成（手軽）**：書きおこし=リモート(AWS等) ＋ LLM=OpenAI / Gemini API | API キー（と、リモート実行なら Service URL / Token）。アプリ実行PCは軽量でよい | [Getting Started](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started) / [AWS](https://github.com/matsuolab/lecture_subtitle_translator/wiki/AWS-Backend-Setup) |
+| **ローカル書きおこし**：このPCで WhisperX | NVIDIA GPU（VRAM 8GB以上、12GB+ 推奨）＋ Docker ＋ NVIDIA Container Toolkit | [ローカルWhisperX](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Local-WhisperX-Setup) |
+| **ローカルLLM**：LM Studio / Ollama 等 | モデルと context 長ぶんの VRAM/RAM（context 32k 以上を推奨） | [Getting Started §3](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started#3-初期設定) |
+
+> 推奨：**書きおこしはローカルGPU、LLMはクラウドAPI**の組み合わせが、品質と手軽さのバランスが良い構成です。
 
 ---
 
@@ -19,55 +61,39 @@ GitHub の **Releases** ページから、自分の OS に合った最新版を�
 | Windows | `subtitle-editor-windows-x64.zip` | zip を展開し、フォルダ内の `subtitle-editor.exe` を実行（同フォルダの `ffmpeg.exe` も移動・削除しないでください） |
 | macOS Apple Silicon | `subtitle-editor-macos-arm64.app.zip` | zip を展開して `.app` を開く |
 | Linux x64 | `subtitle-editor-linux-x64.AppImage` | 実行権限を付けて起動 |
+| Fedora | `subtitle-editor-linux-fedora-x64.rpm` | `dnf install` でインストール |
 
 macOS や Windows で警告が出る場合は、配布元を確認したうえで OS の通常手順に従って許可してください。
 
-> v0.4.7 以降、動画から音声を抽出する処理に LGPL ビルドの **FFmpeg** を同梱しています。詳細は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。
+> 動画から音声を抽出する処理に LGPL ビルドの **FFmpeg** を同梱しています。詳細は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。
 
 ### 2. 最低限必要な設定
 
-初回起動後、右側の **設定** タブで実行先とAIプロバイダを設定します。リモート実行する場合は、接続先の Service URL と Service Auth Token も入力します。
+初回起動後、右側の **設定** タブで実行先とAIプロバイダを設定します。
 
 | 項目 | 何を入れるか |
 |---|---|
-| 実行先 | `AWS / リモート実行` または `このPCで実行` を選びます |
-| Service URL | リモート実行する場合のパイプライン API の URL |
-| Service Auth Token | リモート実行する場合の認証トークン。公開しないでください |
-| 接続先AIプロバイダ | 使用するAIプロバイダを選びます |
-| API Key | 選択したAIプロバイダのAPIキーを入力します |
-| 翻訳モデル | 既定値は `gpt-5.4-mini` |
-| 補正モデル | 既定値は `gpt-5.4-mini` |
-| 文脈統合モデル | 既定値は `gpt-5.5` |
-| 1行文字数上限 | 既定値は `80` |
-| CPS上限 | 既定値は `16.9` |
+| 実行先 | `このPCで実行`（ローカル）または `リモート実行`（構築済みAPIを使う） |
+| Service URL / Service Auth Token | リモート実行する場合のみ。接続先APIのURLと認証トークン（公開しないこと） |
+| 接続先AIプロバイダ | OpenAI / Gemini / OpenAI互換 |
+| API Key | 選択したAIプロバイダのAPIキー |
 
-リモート実行では、設定後に **接続テスト** を押してください。OK が表示されれば、アプリからリモート実行先へアクセスできています。その後、**レポート** タブからパイプラインを実行できます。
+設定後に **接続テスト**（実行先の疎通）と **AI Gateway 接続チェック**（Chat / Embedding / Vision）を押し、OK を確認してから **字幕生成** タブでパイプラインを実行します。
 
-#### ローカル OpenAI 互換サーバーを使う場合
-
-LM Studio や Ollama などを使う場合は、**接続チェックが成功しても、実際の字幕パイプラインに十分な context length が確保されているとは限りません**。翻訳・補正ではプロンプト、few-shot、文脈グループ、用語辞書を同じリクエストに含めるため、サーバー側で次の設定を満たしてください。
-
-| 用途 | 最低値 | 推奨値 |
-|---|---:|---:|
-| 短い音声での翻訳・補正テスト | 16k tokens | 32k tokens |
-| 用語辞書あり、長めの講義、文脈グループが多い処理 | 32k tokens | 64k tokens |
-| PDF Vision / 辞書生成など画像・長文を含む処理 | 32k tokens | 64k tokens 以上 |
-
-- **LM Studio**: モデルロード時の `Context Length` / `n_ctx` を上の値に設定してください。OpenAI 互換 `/v1/chat/completions` 経由では、アプリからリクエストごとに context length を指定できません。
-- **Ollama**: OpenAI 互換 API では context size を直接指定できないため、Ollama アプリの context length 設定、または `OLLAMA_CONTEXT_LENGTH=64000 ollama serve`、もしくは `Modelfile` の `PARAMETER num_ctx 32768` / `65536` で増やしてください。
-- `Context size has been exceeded` が出る場合は、まずローカルサーバー側の実割当 context を確認してください。Ollama は `ollama ps` の `CONTEXT` 列で確認できます。
-- context length を増やすと VRAM / RAM 消費が増えます。GPUからCPUへ大きくオフロードされる場合は、より小さいモデルや量子化モデルを使う方が安定します。
+- モデル・品質基準（翻訳/補正モデル、行長、CPS など）の **意味と既定値** → [上級設定リファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Settings-Reference)
+- 管理者が環境を整えて配布するまでの順路 → [管理者セットアップ](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Admin-Setup)
+- LM Studio / Ollama などローカルLLMの context length の注意 → [Getting Started §3](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started#3-初期設定)
 
 ### 3. 基本的な作業の流れ
 
 1. 動画ファイルを読み込む。
-2. レポートタブでパイプラインを実行する。
+2. 字幕生成タブでパイプラインを実行する。
 3. 生成された字幕ブロックを上から順に確認する。
-4. `提案`、`要確認`、用語漏れ、タイポ候補を確認する。
+4. `要確認 🚩`、用語漏れ、タイポ候補を確認する。
 5. 問題なければ `承認` する。
 6. 必要に応じてプロジェクト JSON または SRT を書き出す。
 
-`自動処理 n` バッジを開くと、その字幕で行われた自動分割・短縮・前後結合などの履歴を確認できます。詳しい処理ログは **レポート** タブの `処理ログ` から確認できます。
+各字幕で行われた自動分割・短縮・前後結合などの履歴は、**字幕生成** タブの `このブロックの自動処理履歴` で確認できます。詳しい処理ログは同タブの `処理ログ` から確認できます。操作の詳細は [操作マニュアル](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Operator-Manual) を参照してください。
 
 ---
 
@@ -79,13 +105,15 @@ LM Studio や Ollama などを使う場合は、**接続チェックが成功し
   -> WhisperX などによる日本語書き起こし
   -> TypeScript 後段パイプライン
       -> 日本語ブロック分割・結合
-      -> OpenAI による英語翻訳
+      -> LLM による英語翻訳
       -> CPS / 行長 / 長時間表示 / 短い断片の検証
       -> 自動短縮・分割・文脈統合
       -> レビュー項目と処理ログ生成
   -> 字幕エディタで確認・承認
   -> SRT / プロジェクト JSON 出力
 ```
+
+機械が「字幕として成立する形（CPS・行長・行数・表示時間）」を検査・修復し、人が意味を最終確認する分担で動きます。設計思想と各処理の詳細は [動作原理](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Pipeline-Behavior) を参照してください。
 
 SRT は英語字幕の出力用です。日本語原文、処理ログ、レビュー状態、編集履歴を含めて保存する場合はプロジェクト JSON を使います。
 
@@ -96,34 +124,14 @@ SRT は英語字幕の出力用です。日本語原文、処理ログ、レビ�
 - 動画ファイルの読み込み
 - 字幕ブロックの確認・編集・承認
 - CPS、行長、表示時間の品質表示
-- `提案` / `要確認` / `自動処理` のレビュー導線
-- 字幕ブロック単位の自動処理ログ
-- レポートタブでのモジュール別ログ、進行イベント、設定スナップショット確認
-- 用語辞書 CSV / XLSX の読み込み
+- `要確認 🚩` バッジによるレビュー導線
+- 字幕ブロック単位の自動処理履歴（字幕生成タブ）
+- 字幕生成タブでのモジュール別ログ、進行イベント、設定スナップショット確認
+- 用語辞書 CSV / XLSX の読み込み、PDF からの用語候補抽出
 - 用語ハイライト、用語漏れ、タイポ候補表示
 - 字幕スペル校正（英語 Hunspell 辞書を同梱、ユーザー辞書追加対応）
 - SRT / プロジェクト JSON の入出力
 - 日本語 / English / 中文 UI
-
----
-
-## 管理者・エンジニア向け
-
-### 管理者が確認する設定
-
-- `translationProvider`: `openai`
-- `translationModel`: `gpt-5.4-mini`
-- `correctionModel`: `gpt-5.4-mini`
-- `compressModel`: `gpt-5.4-mini`
-- `expandModel`: `gpt-5.4-mini`
-- `contextMergeModel`: `gpt-5.5`
-- `subtitleLanguageLabel`: `English`
-- `transcriptLanguageLabel`: `Japanese`
-- `enMaxCharsPerLine`: `80`
-- `enMaxCps`: `16.9`
-- `pipelineVerboseEnRatio`: `1.5`
-
-言語プロファイル JSON とプロンプト上書きは、アプリ内 **ヘルプ > 管理者向け** と **設定** タブの説明を確認してください。
 
 ---
 
@@ -161,4 +169,4 @@ SRT は英語字幕の出力用です。日本語原文、処理ログ、レビ�
 
 本リポジトリの本体コードのライセンスは [Apache License, Version 2.0](LICENSE) に従います。
 
-第三者ソフトウェア（同梱する FFmpeg 等）のライセンス・告知は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。
+第三者ソフトウェア（同梱する FFmpeg 等）のライセンス・告知は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。スペル校正用辞書の追加とライセンスの注意は [上級設定リファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Settings-Reference#スペル校正綴りチェックと辞書の追加) を参照してください。
