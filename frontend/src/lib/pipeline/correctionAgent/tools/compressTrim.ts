@@ -1,9 +1,11 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { resolveCompressModelId } from '../../prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from '../../languageProfileConfig'
 import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildBudgetHint } from './budgetHint'
+import { buildSubtitleEditUserContent } from './subtitleEditPrompt'
 import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
 
 function buildTrimSystemPrompt(settings: { enMaxCharsPerLine: number; enMaxLines: number }): string {
@@ -22,6 +24,7 @@ async function callTrim(
   enText: string,
   jaText: string,
   budgetHint: string,
+  languages: LanguageProfileConfig,
   settings: AdminSettings,
 ): Promise<SubtitleLlmCallResult> {
   const model = requireChatModelForProvider(settings, resolveCompressModelId(settings), 'compress trim')
@@ -30,7 +33,7 @@ async function callTrim(
     {
       model,
       systemPrompt,
-      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}\n\n${budgetHint}`,
+      userContent: buildSubtitleEditUserContent(languages, jaText, enText.replace(/\n/g, ' '), `\n\n${budgetHint}`),
       temperature: 0.0,
       nodeName: 'compress_trim',
     },
@@ -57,7 +60,8 @@ export const compressTrimTool: Tool = {
     thresholds: PipelineThresholds & AgentThresholds,
   ): Promise<TimelinePatch> {
     const budgetHint = buildBudgetHint(block, thresholds)
-    const result = await callTrim(block.enText, block.jaText, budgetHint, settings)
+    const languages = loadLanguageProfileConfig(settings)
+    const result = await callTrim(block.enText, block.jaText, budgetHint, languages, settings)
 
     if (result.errorMessage) {
       return {

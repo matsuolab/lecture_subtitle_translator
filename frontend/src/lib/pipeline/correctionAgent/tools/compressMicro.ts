@@ -1,24 +1,26 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { resolveMicroModelId } from '../../prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from '../../languageProfileConfig'
 import { computeMetrics, classifyViolation } from '../../metrics'
 import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildMetrics } from '../metrics'
+import { buildSubtitleEditUserContent } from './subtitleEditPrompt'
 import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
 import { countCpsChars } from '@/lib/subtitleMetrics'
 
 const MICRO_MAX_RETRIES = 5
 
-function buildMicroSystemPrompt(): string {
+function buildMicroSystemPrompt(subtitleLabel: string): string {
   return (
     'You are a subtitle editor making the smallest possible edit. ' +
-    'Your task: Remove EXACTLY ONE word from the current English subtitle while keeping its meaning unchanged.\n' +
+    `Your task: Remove EXACTLY ONE word from the current ${subtitleLabel} subtitle while keeping its meaning unchanged.\n` +
     '\n' +
     'Rules:\n' +
     '- Keep all technical terms, proper nouns, numbers, and equations\n' +
     '- Keep the subject and main verb intact\n' +
-    '- The result must remain a grammatical, readable English subtitle\n' +
+    `- The result must remain a grammatical, readable ${subtitleLabel} subtitle\n` +
     '- Prefer to remove: redundant adverbs, soft modifiers, articles where natural, hedges, repeated topic markers\n' +
     '- Do NOT rephrase, paraphrase, or restructure — only remove a single word\n' +
     '- Do NOT remove the same word that was already removed in previous iterations\n' +
@@ -37,10 +39,11 @@ async function microCompressOnce(
   currentEn: string,
   jaText: string,
   removedWordsSoFar: string[],
+  languages: LanguageProfileConfig,
   settings: AdminSettings,
 ): Promise<SubtitleLlmCallResult> {
   const model = requireChatModelForProvider(settings, resolveMicroModelId(settings), 'compress micro')
-  const systemPrompt = buildMicroSystemPrompt()
+  const systemPrompt = buildMicroSystemPrompt(languages.subtitle.label)
 
   const removedHint = removedWordsSoFar.length > 0
     ? `\n\nWords already removed in earlier iterations (do not remove these again): ${removedWordsSoFar.join(', ')}`
@@ -50,7 +53,7 @@ async function microCompressOnce(
     {
       model,
       systemPrompt,
-      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${currentEn}${removedHint}`,
+      userContent: buildSubtitleEditUserContent(languages, jaText, currentEn, removedHint),
       temperature: 0.0,
       nodeName: 'compress_micro',
     },
@@ -85,6 +88,7 @@ async function runMicroLoop(
   settings: AdminSettings,
 ): Promise<MicroResult> {
   const originalEnText = block.enText.replace(/\n/g, ' ')
+  const languages = loadLanguageProfileConfig(settings)
   let current = originalEnText
   const history: string[] = [current]
   const removedWords: string[] = []
@@ -110,7 +114,7 @@ async function runMicroLoop(
     }
 
     // 1単語削減を試行
-    const callResult = await microCompressOnce(current, block.jaText, removedWords, settings)
+    const callResult = await microCompressOnce(current, block.jaText, removedWords, languages, settings)
     if (callResult.errorMessage) {
       // API 失敗 → ループ打ち切り（最後に持っていた current を返す）。エラー詳細も伝える。
       return {

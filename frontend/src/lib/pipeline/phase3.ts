@@ -8,6 +8,7 @@ import type { PipelineThresholds } from './blockTypes'
 import { buildReviewItemsForBlock } from './reviewDiagnostics'
 import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
 import { formatLines } from './formatLines'
+import { loadLanguageProfileConfig } from './languageProfileConfig'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -25,6 +26,7 @@ export async function runPhase3(
   runNode: RunNode,
 ): Promise<Phase3Result> {
   const reviewItems: PipelineReviewItem[] = []
+  const languages = loadLanguageProfileConfig(settings)
   let normalizedBlocks = enBlocks
 
   if (settings.textNormalizationEnabled) {
@@ -58,7 +60,7 @@ export async function runPhase3(
   const finalFormattedBlocks = await runNode('finalFormatLines', () => formatLines(normalizedBlocks, thresholds))
 
   const terminology = await runNode('terminologyCheck', () => checkTerminology(finalFormattedBlocks, glossaryTerms))
-  reviewItems.push(...finalFormattedBlocks.flatMap(block => buildReviewItemsForBlock(block, thresholds)))
+  reviewItems.push(...finalFormattedBlocks.flatMap(block => buildReviewItemsForBlock(block, thresholds, languages)))
   const blocks = await runNode('toSubtitleBlocks', () => toSubtitleBlocks(finalFormattedBlocks, reviewItems))
 
   terminology.misses.forEach((miss, index) => {

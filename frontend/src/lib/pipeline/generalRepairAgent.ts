@@ -9,6 +9,7 @@ import { checkCpsViolations } from './checkCpsViolations'
 import { meetsConstraints } from './correctionAgent/patchUtils'
 import { requireChatModelForProvider } from './aiProvider'
 import { resolveCompressModelId } from './prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { getCurrentLlmUsageSink } from './llmUsageSink'
 
@@ -91,7 +92,10 @@ interface LlmResponse {
   rationale: string
 }
 
-const SYSTEM_PROMPT = `You are GeneralRepairAgent — the LAST repair pass for academic lecture subtitles.
+// transcript（元言語=校正済みソース）のラベルはプロンプトへ注入する。
+// 既定構成（transcript=Japanese）では従来のハードコード文字列とバイト一致する（generalRepairAgent.test.ts で固定）。
+function buildSystemPrompt(transcriptLabel: string): string {
+  return `You are GeneralRepairAgent — the LAST repair pass for academic lecture subtitles.
 
 The pipeline has already tried rule-based corrections and a coverage-focused repair agent.
 What remains are the hardest cases. You get one more chance per effort level (low → medium → high).
@@ -101,7 +105,7 @@ You will be given:
 - chunk_blocks: all blocks for the current chunk, in time order, with current violations and correction history.
 - residual_violations: per-block violations (cps_over, line_length_only, long_segment, etc.) + chunk-level coverage gaps.
 - constraints: hard limits (max_cps, max_chars_per_line, max_segment_chars, min_duration, etc.). MUST respect.
-- source_segments: original Japanese corrected text (post-correctJa) for coverage reference.
+- source_segments: original ${transcriptLabel} corrected text (post-correctJa) for coverage reference.
 
 Your job: rewrite the affected cues to resolve as many violations as possible.
 
@@ -112,12 +116,13 @@ Rules:
 - Preserve the cue's start/end timing (you do NOT modify timing).
 - Compute allowed en chars as floor(duration_sec × max_cps). Stay within this budget.
 - Respect max_chars_per_line per line and max_segment_chars total.
-- Do not add content not in the source Japanese.
+- Do not add content not in the source ${transcriptLabel}.
 - Preserve technical terms / formulas exactly (post-correctJa form).
 - Do not invent proper nouns (person names, organization names) that are not in source.
 - Use correction_attempts history to AVOID repeating strategies that already failed.
 - If you cannot repair a cue without violating constraints, leave it out of rewrites and explain in rationale.
 - For coverage gaps: prefer rephrasing existing en to absorb missing content, rather than fabricating.`
+}
 
 interface RepairPromptInput {
   chunkBlocks: EnBlock[]
@@ -228,6 +233,7 @@ async function callRepairLlm(
   settings: AdminSettings,
   model: string,
   effort: RepairEffort,
+  languages: LanguageProfileConfig,
 ): Promise<LlmCallResult> {
   const resolvedModel = requireChatModelForProvider(settings, model, 'general repair')
 
@@ -239,7 +245,7 @@ async function callRepairLlm(
       responseFormat: undefined,
       usageSink: getCurrentLlmUsageSink(),
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt(languages.transcript.label) },
         { role: 'user', content: prompt },
       ],
     })
@@ -447,6 +453,7 @@ export async function runGeneralRepairAgent(
   }
 
   const model = resolveGeneralRepairModelId(settings)
+  const languages = loadLanguageProfileConfig(settings)
   let currentBlocks = blocks
   let currentCoverage = coverageReport
   const entries: GeneralRepairLogEntry[] = []
@@ -482,7 +489,7 @@ export async function runGeneralRepairAgent(
       thresholds,
     })
 
-    const llmResult = await callRepairLlm(prompt, settings, model, effort)
+    const llmResult = await callRepairLlm(prompt, settings, model, effort, languages)
 
     const baseEntry: Omit<GeneralRepairLogEntry, 'status'> = {
       attempt: attemptIdx + 1,
@@ -607,4 +614,8 @@ export async function runGeneralRepairAgent(
     entries,
     finalCoverageReport: currentCoverage,
   }
+}
+
+export const __testing = {
+  buildSystemPrompt,
 }

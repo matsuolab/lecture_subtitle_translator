@@ -9,6 +9,7 @@ import {
   resolveChatCompletionTokenLimitForProvider,
 } from './aiProvider'
 import { resolveSplitJaModelId } from './prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta } from './llmCallWithMeta'
@@ -291,16 +292,21 @@ function findUndercoveredSegments(segments: CorrectedSegmentLite[], units: RawSe
   return undercovered
 }
 
-function buildSemanticSplitPrompt(segments: CorrectedSegmentLite[]): string {
+// transcript（元言語）が日本語スクリプトのときだけ、カタカナ保持ルールと日本語の例示を含める。
+// 既定構成（transcript=Japanese）では従来のハードコード文字列とバイト一致する。
+function buildSemanticSplitPrompt(segments: CorrectedSegmentLite[], languages: LanguageProfileConfig): string {
+  const transcriptLabel = languages.transcript.label
+  const transcriptIsJapanese = languages.transcript.script === 'japanese'
+  const rules = [
+    'Output JSON only.',
+    'Preserve all source meaning and wording. Do not summarize, omit, add, or translate.',
+    `Each unit should be a natural ${transcriptLabel} phrase/sentence suitable for grouping into subtitle cues.`,
+    `Avoid single-word units, filler-only units, and fragments that start/end in the middle of a ${transcriptLabel} phrase.`,
+    ...(transcriptIsJapanese ? ['Keep technical terms and katakana words intact.'] : ['Keep technical terms intact.']),
+  ]
   return JSON.stringify({
-    task: 'Split corrected Japanese lecture transcript into subtitle-ready semantic units. Do not translate. Do not create timestamps.',
-    rules: [
-      'Output JSON only.',
-      'Preserve all source meaning and wording. Do not summarize, omit, add, or translate.',
-      'Each unit should be a natural Japanese phrase/sentence suitable for grouping into subtitle cues.',
-      'Avoid single-word units, filler-only units, and fragments that start/end in the middle of a Japanese phrase.',
-      'Keep technical terms and katakana words intact.',
-    ],
+    task: `Split corrected ${transcriptLabel} lecture transcript into subtitle-ready semantic units. Do not translate. Do not create timestamps.`,
+    rules,
     segments: segments.map(segment => ({
       id: segment.id,
       start: segment.start,
@@ -311,7 +317,7 @@ function buildSemanticSplitPrompt(segments: CorrectedSegmentLite[]): string {
       semantic_units: [{
         unit_id: 'u001',
         source_segment_id: 1,
-        ja_text: '自然な日本語の意味単位',
+        ja_text: transcriptIsJapanese ? '自然な日本語の意味単位' : `a natural ${transcriptLabel} semantic unit`,
         semantic_role: 'topic|reason|consequence|example|contrast|detail|transition|summary',
         can_merge_with_next: true,
       }],
@@ -331,6 +337,7 @@ async function callSemanticSplitApi(
   settings: AdminSettings,
 ): Promise<SemanticSplitBatchResult> {
   const model = requireChatModelForProvider(settings, resolveSplitJaModelId(settings), 'semantic subtitle splitting')
+  const languages = loadLanguageProfileConfig(settings)
   const tokenLimit = resolveChatCompletionTokenLimitForProvider(settings, 6000) as Record<string, unknown>
   // tokenLimit は { max_tokens: N } | { max_completion_tokens: N } 等を返すので両方を確認
   const maxTokens = typeof tokenLimit.max_tokens === 'number'
@@ -342,8 +349,8 @@ async function callSemanticSplitApi(
   const callResult = await llmCallWithMeta(
     {
       model,
-      systemPrompt: 'You split Japanese academic lecture transcripts into subtitle-ready semantic units. Return JSON only.',
-      userContent: buildSemanticSplitPrompt(segments),
+      systemPrompt: `You split ${languages.transcript.label} academic lecture transcripts into subtitle-ready semantic units. Return JSON only.`,
+      userContent: buildSemanticSplitPrompt(segments, languages),
       temperature: 0.1,
       maxTokens,
       nodeName: 'semantic_split_ja',
@@ -439,4 +446,8 @@ export async function semanticSplitJa(
     }
   }
   return blocks
+}
+
+export const __testing = {
+  buildSemanticSplitPrompt,
 }

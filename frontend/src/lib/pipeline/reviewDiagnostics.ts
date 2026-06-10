@@ -6,6 +6,12 @@ import type {
 import type { EnBlock } from './blockTypes'
 import type { PipelineThresholds } from './blockTypes'
 import { computeMetrics } from './metrics'
+import {
+  DEFAULT_LANGUAGE_PROFILE_CONFIG,
+  hasContinuationEnd,
+  type LanguageProfileConfig,
+  type LanguageRoleProfile,
+} from './languageProfileConfig'
 
 function round1(value: number): string {
   return value.toFixed(1)
@@ -19,31 +25,40 @@ function compactText(text: string): string {
   return text.replace(/\s/g, '')
 }
 
-function endsWithJapaneseContinuation(text: string): boolean {
-  return /[、,]$/.test(text.trim())
+// transcript（元言語）が継続を示す記号（既定では読点）で終わるか。言語プロファイルの
+// continuationEndPattern で判定する（既定構成 [、,]$ では従来の正規表現とバイト等価）。
+function endsWithSourceContinuation(text: string, transcript: LanguageRoleProfile): boolean {
+  return hasContinuationEnd(text, transcript)
 }
 
-function isContextDependentEnglish(text: string): boolean {
+// 出力字幕がラテン文字系のときのみ意味を持つ「文脈依存の断片」検出。
+// 非ラテン構成では誤検出を避けるため適用しない（subtitle.script でゲート）。
+function isContextDependentSubtitle(text: string, subtitle: LanguageRoleProfile): boolean {
+  if (subtitle.script !== 'latin') return false
   const normalized = text.trim().replace(/\s+/g, ' ')
   return /^[a-z]/.test(normalized)
     || /^(This|That|It|These|Then|Also|Conversely|Especially|Using|In that case)\b/i.test(normalized)
     || (!/[.!?]$/.test(normalized) && compactText(normalized).length <= 55)
 }
 
-function isLikelyUnderTranslated(block: EnBlock, metrics: ReturnType<typeof computeMetrics>): boolean {
+function isLikelyUnderTranslated(
+  block: EnBlock,
+  metrics: ReturnType<typeof computeMetrics>,
+  languages: LanguageProfileConfig,
+): boolean {
   return metrics.jaChars >= 45
     && (
       metrics.enJaRatio < 0.8
       || metrics.enChars <= 55
-      || endsWithJapaneseContinuation(block.jaText)
+      || endsWithSourceContinuation(block.jaText, languages.transcript)
     )
 }
 
-function isLikelyFragment(block: EnBlock): boolean {
+function isLikelyFragment(block: EnBlock, languages: LanguageProfileConfig): boolean {
   const en = block.enText.trim().replace(/\s+/g, ' ')
   if (compactText(en).length === 0) return false
   return compactText(en).length <= 55
-    && (isContextDependentEnglish(en) || endsWithJapaneseContinuation(block.jaText))
+    && (isContextDependentSubtitle(en, languages.subtitle) || endsWithSourceContinuation(block.jaText, languages.transcript))
 }
 
 function hasKeepDecisionFromContextMerge(block: EnBlock): boolean {
@@ -124,6 +139,7 @@ function baseItem(
 export function buildReviewItemsForBlock(
   block: EnBlock,
   thresholds: PipelineThresholds,
+  languages: LanguageProfileConfig = DEFAULT_LANGUAGE_PROFILE_CONFIG,
 ): PipelineReviewItem[] {
   const metrics = computeMetrics(block)
   const items: PipelineReviewItem[] = []
@@ -145,7 +161,7 @@ export function buildReviewItemsForBlock(
     }))
   }
 
-  if (isLikelyUnderTranslated(block, metrics)) {
+  if (isLikelyUnderTranslated(block, metrics, languages)) {
     items.push(baseItem(block, 'under-translated', {
       nodeId: 'subtitleReview',
       reason: 'under_translated_or_over_simplified',
@@ -167,7 +183,7 @@ export function buildReviewItemsForBlock(
     }))
   }
 
-  if (isLikelyFragment(block) && !hasKeepDecisionFromContextMerge(block)) {
+  if (isLikelyFragment(block, languages) && !hasKeepDecisionFromContextMerge(block)) {
     items.push(baseItem(block, 'fragment', {
       nodeId: 'subtitleReview',
       reason: 'context_dependent_fragment',

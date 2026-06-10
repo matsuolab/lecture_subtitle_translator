@@ -11,6 +11,7 @@ import type {
 import { buildMetrics } from './metrics'
 import { requireChatModelForProvider } from '../aiProvider'
 import { parseJsonObjectFromLlmContent } from '../jsonResponse'
+import { loadLanguageProfileConfig } from '../languageProfileConfig'
 
 // ---------------------------------------------------------------------------
 // RuleBasedDecisionNode
@@ -222,6 +223,7 @@ function buildDecisionPrompt(
   const thresholds = ctx.thresholds as PipelineThresholds & AgentThresholds
   const durationSec = ctx.block.end - ctx.block.start
   const physicalMax = Math.floor(thresholds.verboseCps * durationSec)
+  const transcriptLabel = loadLanguageProfileConfig(ctx.settings).transcript.label
 
   return JSON.stringify({
     block: {
@@ -243,7 +245,7 @@ function buildDecisionPrompt(
       compress_rephrase: 'Shorten while preserving meaning',
       compress_trim: 'Drop qualifications/examples, keep main claim',
       compress_core: 'Aggressive rewrite to ~50-70% length, keep as complete sentence',
-      split_block: 'Split Japanese into 2 semantic sentences, re-translate each',
+      split_block: `Split ${transcriptLabel} into 2 semantic sentences, re-translate each`,
       borrow_gap: 'Extend time window into adjacent silence',
       offload_neighbor: 'Move content to neighboring subtitle block',
     },
@@ -268,4 +270,8 @@ function isCorrectionStrategy(value: string): value is CorrectionStrategy {
 
 export function createDecisionNode(useAgent: boolean): DecisionNode {
   return useAgent ? new LLMDecisionNode() : new RuleBasedDecisionNode()
+}
+
+export const __testing = {
+  buildDecisionPrompt,
 }

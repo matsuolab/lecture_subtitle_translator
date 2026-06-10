@@ -1,40 +1,67 @@
-export const FULL_SYSTEM_PROMPT_V08 =
-  'You are a subtitle translator for academic lectures. Translate each Japanese block into natural English.\n' +
-  '\n' +
-  'Input format: {"segments": ["seg0", "seg1", "..."]}\n' +
-  'Output format: {"translations": ["trans0", "trans1", "..."]}\n' +
-  '\n' +
-  'MAPPING:\n' +
-  '- Output exactly one translation per input block\n' +
-  '- Never merge or split blocks\n' +
-  '- Output array length must equal input array length\n' +
-  '\n' +
-  'STYLE:\n' +
-  '- casual-academic tone; contractions are fine\n' +
-  '- subject and verb first\n' +
-  '- avoid front-heavy phrasing and nominalizations\n' +
-  '- do not start a block with This/That/It/These if they refer to the previous block\n' +
-  '- keep technical terms, proper nouns, formulas, and logical connectors\n' +
-  '- restore katakana technical terms to original spelling when obvious\n' +
-  '\n' +
-  'CONCISENESS:\n' +
-  '- omit filler phrases that carry no information: "it seems that", "apparently", "in this manner", "By the way"\n' +
-  '- convert 5W1H noun clauses to simple nouns: "how many layers to have" → "the number of layers"\n' +
-  '- replace idioms and metaphors with direct wording; non-native readers need immediate clarity\n' +
-  '- slides are not visible to viewers: replace vague references with concrete terms when the Japanese names them\n' +
-  '- brief informal asides from the lecturer ("This might seem complicated") may be kept to preserve lecture tone\n' +
-  '\n' +
-  'FAITHFULNESS (anti-hallucination):\n' +
-  '- never invent proper nouns (person names, organization names, place names) that are not in the source\n' +
-  '- only use a specific person name if it is explicitly written in the source Japanese\n' +
-  '- when the Japanese says "I" / "私" / "先生" or refers to a role without naming, render it as "I" / "the lecturer" / etc., NOT a made-up name\n' +
-  '- do not add facts, numbers, dates, or technical details that are not in the source\n' +
-  '- do not infer beyond what the source states; preserve the lecturer\'s level of specificity'
+import type { AdminSettings } from '@/types/adminSettings'
+import {
+  DEFAULT_LANGUAGE_PROFILE_CONFIG,
+  loadLanguageProfileConfig,
+  type LanguageProfileConfig,
+} from './languageProfileConfig'
 
-export const FT_SYSTEM_PROMPT_SHORT =
-  'Translate Japanese lecture subtitles into concise English. Keep one output per input. ' +
-  'Do not merge or split blocks. Use natural casual-academic wording. Preserve technical terms. ' +
-  'Never invent proper nouns or facts not in the source Japanese.'
+// 翻訳系プロンプトは設定の言語プロファイル（subtitle/transcript ラベル）から組み立てる。
+// 既定構成（Japanese→English, transcript.script='japanese'）では従来のハードコード文字列と
+// 完全一致すること（prompts.test.ts で固定）。日本語固有の指示行（カタカナ復元・「私／先生」例示）は
+// transcript.script === 'japanese' のときだけ含める。
+export function buildFullTranslateSystemPrompt(languages: LanguageProfileConfig): string {
+  const subtitleLabel = languages.subtitle.label
+  const transcriptLabel = languages.transcript.label
+  const transcriptIsJapanese = languages.transcript.script === 'japanese'
+  const lecturerLine = transcriptIsJapanese
+    ? `- when the ${transcriptLabel} says "I" / "私" / "先生" or refers to a role without naming, render it as "I" / "the lecturer" / etc., NOT a made-up name\n`
+    : `- when the ${transcriptLabel} refers to the speaker or a role without naming, render it as "I" / "the lecturer" / etc., NOT a made-up name\n`
+  return (
+    `You are a subtitle translator for academic lectures. Translate each ${transcriptLabel} block into natural ${subtitleLabel}.\n` +
+    '\n' +
+    'Input format: {"segments": ["seg0", "seg1", "..."]}\n' +
+    'Output format: {"translations": ["trans0", "trans1", "..."]}\n' +
+    '\n' +
+    'MAPPING:\n' +
+    '- Output exactly one translation per input block\n' +
+    '- Never merge or split blocks\n' +
+    '- Output array length must equal input array length\n' +
+    '\n' +
+    'STYLE:\n' +
+    '- casual-academic tone; contractions are fine\n' +
+    '- subject and verb first\n' +
+    '- avoid front-heavy phrasing and nominalizations\n' +
+    '- do not start a block with This/That/It/These if they refer to the previous block\n' +
+    '- keep technical terms, proper nouns, formulas, and logical connectors\n' +
+    (transcriptIsJapanese ? '- restore katakana technical terms to original spelling when obvious\n' : '') +
+    '\n' +
+    'CONCISENESS:\n' +
+    '- omit filler phrases that carry no information: "it seems that", "apparently", "in this manner", "By the way"\n' +
+    '- convert 5W1H noun clauses to simple nouns: "how many layers to have" → "the number of layers"\n' +
+    '- replace idioms and metaphors with direct wording; non-native readers need immediate clarity\n' +
+    `- slides are not visible to viewers: replace vague references with concrete terms when the ${transcriptLabel} names them\n` +
+    '- brief informal asides from the lecturer ("This might seem complicated") may be kept to preserve lecture tone\n' +
+    '\n' +
+    'FAITHFULNESS (anti-hallucination):\n' +
+    '- never invent proper nouns (person names, organization names, place names) that are not in the source\n' +
+    `- only use a specific person name if it is explicitly written in the source ${transcriptLabel}\n` +
+    lecturerLine +
+    '- do not add facts, numbers, dates, or technical details that are not in the source\n' +
+    '- do not infer beyond what the source states; preserve the lecturer\'s level of specificity'
+  )
+}
+
+export function buildFtTranslateSystemPrompt(languages: LanguageProfileConfig): string {
+  return (
+    `Translate ${languages.transcript.label} lecture subtitles into concise ${languages.subtitle.label}. Keep one output per input. ` +
+    'Do not merge or split blocks. Use natural casual-academic wording. Preserve technical terms. ' +
+    `Never invent proper nouns or facts not in the source ${languages.transcript.label}.`
+  )
+}
+
+export const FULL_SYSTEM_PROMPT_V08 = buildFullTranslateSystemPrompt(DEFAULT_LANGUAGE_PROFILE_CONFIG)
+
+export const FT_SYSTEM_PROMPT_SHORT = buildFtTranslateSystemPrompt(DEFAULT_LANGUAGE_PROFILE_CONFIG)
 
 export const DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS =
   '追加方針:\n' +
@@ -80,8 +107,14 @@ function appendAdditionalInstructions(base: string, additional?: string): string
   return trimmed ? `${base}\n\n${trimmed}` : base
 }
 
-export function pickTranslateSystemPrompt(model: string | undefined, additionalInstructions?: string): string {
-  const base = model?.startsWith('ft:') ? FT_SYSTEM_PROMPT_SHORT : FULL_SYSTEM_PROMPT_V08
+export function pickTranslateSystemPrompt(
+  model: string | undefined,
+  additionalInstructions?: string,
+  languages: LanguageProfileConfig = DEFAULT_LANGUAGE_PROFILE_CONFIG,
+): string {
+  const base = model?.startsWith('ft:')
+    ? buildFtTranslateSystemPrompt(languages)
+    : buildFullTranslateSystemPrompt(languages)
   return appendAdditionalInstructions(base, additionalInstructions)
 }
 
@@ -90,19 +123,19 @@ export function resolveTranslateModelId(model: string | undefined): string {
   return resolved || ''
 }
 
-function buildCompressSystemPrompt(maxCharsPerLine: number, maxLines: number): string {
+function buildCompressSystemPrompt(maxCharsPerLine: number, maxLines: number, subtitleLabel: string): string {
   return (
     'You are a subtitle editor. This subtitle is too long and must be shortened. ' +
     `It must fit on ${maxLines} lines of ${maxCharsPerLine} characters each when displayed. ` +
-    'Shorten the English text while preserving the key meaning. Make it as concise as possible. ' +
+    `Shorten the ${subtitleLabel} text while preserving the key meaning. Make it as concise as possible. ` +
     'Do not include line breaks in your response. ' +
     'Respond with JSON: {"text": "<shortened subtitle>"}'
   )
 }
 
-function buildExpandSystemPrompt(maxCharsPerLine: number, maxLines: number, maxCps: number): string {
+function buildExpandSystemPrompt(maxCharsPerLine: number, maxLines: number, maxCps: number, transcriptLabel: string): string {
   return (
-    'You are a subtitle translator. This subtitle is over-compressed and too brief compared to the Japanese source. ' +
+    `You are a subtitle translator. This subtitle is over-compressed and too brief compared to the ${transcriptLabel} source. ` +
     `It will be displayed on ${maxLines} lines of ${maxCharsPerLine} characters each at ${maxCps} CPS. ` +
     'Expand it to be more complete and natural while staying concise. ' +
     'Do not include line breaks in your response. ' +
@@ -110,18 +143,27 @@ function buildExpandSystemPrompt(maxCharsPerLine: number, maxLines: number, maxC
   )
 }
 
-export function resolveCompressSystemPrompt(
-  settings: { enMaxCharsPerLine: number; enMaxLines: number },
-  override?: string,
-): string {
-  return override?.trim() || buildCompressSystemPrompt(settings.enMaxCharsPerLine, settings.enMaxLines)
+export function resolveCompressSystemPrompt(settings: AdminSettings, override?: string): string {
+  return (
+    override?.trim()
+    || buildCompressSystemPrompt(
+      settings.enMaxCharsPerLine,
+      settings.enMaxLines,
+      loadLanguageProfileConfig(settings).subtitle.label,
+    )
+  )
 }
 
-export function resolveExpandSystemPrompt(
-  settings: { enMaxCharsPerLine: number; enMaxLines: number; enMaxCps: number },
-  override?: string,
-): string {
-  return override?.trim() || buildExpandSystemPrompt(settings.enMaxCharsPerLine, settings.enMaxLines, settings.enMaxCps)
+export function resolveExpandSystemPrompt(settings: AdminSettings, override?: string): string {
+  return (
+    override?.trim()
+    || buildExpandSystemPrompt(
+      settings.enMaxCharsPerLine,
+      settings.enMaxLines,
+      settings.enMaxCps,
+      loadLanguageProfileConfig(settings).transcript.label,
+    )
+  )
 }
 
 export function resolveCompressModelId(settings: { compressModel?: string; translationModel?: string }): string {

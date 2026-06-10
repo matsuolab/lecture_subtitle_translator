@@ -6,13 +6,17 @@ import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta, isAbortableFailure } from './llmCallWithMeta'
 import { DEFAULT_CORRECTION_FEW_SHOT_JSON } from './prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 
 const MAX_SEGMENTS_PER_REQUEST = 20
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
 /** 単一セグメントまで分割しても失敗した時、ここで指定回数までリトライ。それでも駄目なら原文を返す。*/
 const PER_LEAF_RETRY_MAX_ATTEMPTS = 2
 
-const SYSTEM_PROMPT =
+// transcript（書きおこし）が日本語スクリプトの構成で使う校正プロンプト。
+// フィラー語例・同音異義語・漢字変換ミスなど日本語固有のルールを含むため、
+// transcript.script !== 'japanese' の構成では buildGenericCorrectionSystemPrompt に分岐する。
+const JAPANESE_SYSTEM_PROMPT =
   'あなたは日本語書き起こしテキストの校正専門家です。\n' +
   '\n' +
   'Input format:  {"segments": [{"id": N, "text": "..."}]}\n' +
@@ -59,13 +63,52 @@ const FEW_SHOT_ASSISTANT_CONTENT = JSON.stringify({
   ],
 })
 
+// transcript が日本語スクリプト以外の構成で使う汎用校正プロンプト。
+// 言語固有のルール（フィラー語例・同音異義語など）は一般化し、言語名は設定の transcript ラベルから注入する。
+// 言語固有の追加ルールが必要な場合は設定の correctionAdditionalInstructions で補う。
+function buildGenericCorrectionSystemPrompt(transcriptLabel: string): string {
+  return (
+    `You are an expert proofreader for ${transcriptLabel} ASR (speech recognition) transcripts.\n` +
+    '\n' +
+    'Input format:  {"segments": [{"id": N, "text": "..."}]}\n' +
+    'Output format: {"corrections": [{"id": N, "text": "..."}]}\n' +
+    '\n' +
+    'Correction rules:\n' +
+    `1. Remove filler words and hesitation sounds typical of spoken ${transcriptLabel}\n` +
+    '2. Fix misrecognized terms using the provided terminology list\n' +
+    `3. Rewrite colloquial phrasing into natural written ${transcriptLabel}\n` +
+    '4. Fix obvious ASR errors: misheard words, homophone or near-homophone mistakes, and words that do not fit the context\n' +
+    '5. Keep quantities, counts, tense, and subject-predicate agreement consistent with the context\n' +
+    '6. Never change the meaning or amount of information (no summarizing, no additions)\n' +
+    '\n' +
+    'Handling ASR errors:\n' +
+    '- If a sentence does not make sense as written, you may restore the most plausible original wording\n' +
+    '- Examples: typos, missing words, homophones, misheard technical terms\n' +
+    '- Never add new information by guessing. Only make corrections strongly supported by context\n' +
+    '\n' +
+    'CRITICAL: Output EXACTLY one correction per input segment. Array length MUST equal input array length.\n' +
+    'Never make corrections that significantly change the meaning.'
+  )
+}
+
+function pickCorrectionBasePrompt(languages: LanguageProfileConfig): string {
+  return languages.transcript.script === 'japanese'
+    ? JAPANESE_SYSTEM_PROMPT
+    : buildGenericCorrectionSystemPrompt(languages.transcript.label)
+}
+
 function buildCorrectionSystemPrompt(settings: AdminSettings): string {
+  const base = pickCorrectionBasePrompt(loadLanguageProfileConfig(settings))
   const additional = settings.correctionAdditionalInstructions.trim()
-  return additional ? `${SYSTEM_PROMPT}\n\n${additional}` : SYSTEM_PROMPT
+  return additional ? `${base}\n\n${additional}` : base
 }
 
 function resolveCorrectionFewShotMessages(settings: AdminSettings): Array<{ role: 'user' | 'assistant'; content: string }> {
-  const raw = settings.correctionFewShotJson.trim() || DEFAULT_CORRECTION_FEW_SHOT_JSON
+  // 組み込み few-shot は日本語の例なので、transcript が日本語スクリプト以外の構成では使わない
+  // （ユーザーが correctionFewShotJson で対象言語の例を与えた場合のみ few-shot を挿入する）。
+  const transcriptIsJapanese = loadLanguageProfileConfig(settings).transcript.script === 'japanese'
+  const raw = settings.correctionFewShotJson.trim() || (transcriptIsJapanese ? DEFAULT_CORRECTION_FEW_SHOT_JSON : '')
+  if (!raw) return []
   try {
     const parsed = JSON.parse(raw) as { segments?: unknown; corrections?: unknown }
     if (Array.isArray(parsed.segments) && Array.isArray(parsed.corrections)) {
@@ -75,8 +118,9 @@ function resolveCorrectionFewShotMessages(settings: AdminSettings): Array<{ role
       ]
     }
   } catch {
-    // Fall back to the stable built-in example below.
+    // Fall back to the stable built-in example below (Japanese transcript only).
   }
+  if (!transcriptIsJapanese) return []
   return [
     { role: 'user', content: FEW_SHOT_USER_CONTENT },
     { role: 'assistant', content: FEW_SHOT_ASSISTANT_CONTENT },
@@ -360,4 +404,9 @@ export async function correctSegments(
     maxSegmentsPerRequest,
     requestConcurrency,
   )
+}
+
+export const __testing = {
+  buildCorrectionSystemPrompt,
+  resolveCorrectionFewShotMessages,
 }

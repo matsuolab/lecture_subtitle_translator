@@ -4,6 +4,7 @@ import type { EnBlock, JaBlock, ViolationCode } from './blockTypes'
 import { computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
 import { DEFAULT_TRANSLATION_FEW_SHOT_JSON, pickTranslateSystemPrompt, resolveTranslateModelId } from './prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
@@ -76,6 +77,7 @@ function resolveApiConfig(settings: AdminSettings): {
   providerLabel: string
   model: string
   systemPrompt: string
+  languages: LanguageProfileConfig
   fewShotSegments: string[]
   fewShotTranslations: string[]
   maxSegmentsPerRequest: number
@@ -83,6 +85,7 @@ function resolveApiConfig(settings: AdminSettings): {
 } {
   const connection = requireAiConnection(settings)
   const model = requireChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel), 'translation')
+  const languages = loadLanguageProfileConfig(settings)
   const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
     ? LOCAL_MAX_SEGMENTS_PER_REQUEST
     : MAX_SEGMENTS_PER_REQUEST
@@ -90,19 +93,29 @@ function resolveApiConfig(settings: AdminSettings): {
     settings,
     providerLabel: connection.providerLabel,
     model,
-    systemPrompt: pickTranslateSystemPrompt(model, settings.translationAdditionalInstructions),
-    ...resolveTranslationFewShot(settings.translationFewShotJson),
+    systemPrompt: pickTranslateSystemPrompt(model, settings.translationAdditionalInstructions, languages),
+    languages,
+    ...resolveTranslationFewShot(settings.translationFewShotJson, languages),
     maxSegmentsPerRequest,
     requestConcurrency: normalizeConcurrency(settings.apiRequestConcurrency, 1),
   }
 }
 
-function resolveTranslationFewShot(rawJson: string): { fewShotSegments: string[]; fewShotTranslations: string[] } {
-  const fallback = {
-    fewShotSegments: ['機械学習とは何ですか。', 'ディープラーニングについて説明します。'],
-    fewShotTranslations: ['What is machine learning?', 'I will explain deep learning.'],
-  }
-  const raw = rawJson.trim() || DEFAULT_TRANSLATION_FEW_SHOT_JSON
+function resolveTranslationFewShot(
+  rawJson: string,
+  languages: LanguageProfileConfig,
+): { fewShotSegments: string[]; fewShotTranslations: string[] } {
+  // 組み込み few-shot は日本語→英語の例なので、transcript が日本語スクリプト以外の構成では使わない
+  // （誤った言語ペアの例示は出力言語を引きずるため、ユーザー指定が無ければ few-shot なしで翻訳する）。
+  const transcriptIsJapanese = languages.transcript.script === 'japanese'
+  const fallback = transcriptIsJapanese
+    ? {
+        fewShotSegments: ['機械学習とは何ですか。', 'ディープラーニングについて説明します。'],
+        fewShotTranslations: ['What is machine learning?', 'I will explain deep learning.'],
+      }
+    : { fewShotSegments: [], fewShotTranslations: [] }
+  const raw = rawJson.trim() || (transcriptIsJapanese ? DEFAULT_TRANSLATION_FEW_SHOT_JSON : '')
+  if (!raw) return fallback
   try {
     const parsed = JSON.parse(raw) as { segments?: unknown; translations?: unknown }
     if (
@@ -209,14 +222,29 @@ function withContextInstruction(systemPrompt: string): string {
     'Do not merge multiple segments into one output, and do not add context that is outside the current segment.'
 }
 
-function withContextGroupAllocationInstruction(systemPrompt: string): string {
+function buildGlossaryInstruction(glossaryTerms: string[], languages: LanguageProfileConfig): string {
+  if (glossaryTerms.length === 0) return ''
+  return `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the ${languages.transcript.label} term or related notation. Preserve official ${languages.subtitle.label} terms exactly.\n${glossaryTerms.map(term => `- ${term}`).join('\n')}`
+}
+
+function withContextGroupAllocationInstruction(systemPrompt: string, languages: LanguageProfileConfig): string {
   return systemPrompt +
-    '\n\nYou will receive incomplete Japanese context_groups. Translate each whole group first, then allocate that meaning across its items. ' +
-    'Return exactly one English subtitle per item, preserving item order and item count for every group. ' +
+    `\n\nYou will receive incomplete ${languages.transcript.label} context_groups. Translate each whole group first, then allocate that meaning across its items. ` +
+    `Return exactly one ${languages.subtitle.label} subtitle per item, preserving item order and item count for every group. ` +
     'Do not repeat the full group meaning in multiple items. Each item must carry only its share of the group meaning. ' +
     'Continuation items may be grammatical continuations, but they must be readable subtitle lines. ' +
     'Prefer concise wording that fits each item duration; avoid copying the same subject, definition, or referent into every item. ' +
     'Respond only with JSON: {"groups":[{"id":"<group id>","translations":["item0 translation","item1 translation"]}]}'
+}
+
+function buildTranslationFewShotMessages(
+  config: ReturnType<typeof resolveApiConfig>,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (config.fewShotSegments.length === 0) return []
+  return [
+    { role: 'user', content: JSON.stringify({ segments: config.fewShotSegments }) },
+    { role: 'assistant', content: JSON.stringify({ translations: config.fewShotTranslations }) },
+  ]
 }
 
 async function callOpenAICompatible(
@@ -224,9 +252,7 @@ async function callOpenAICompatible(
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
 ): Promise<string[]> {
-  const glossaryInstruction = glossaryTerms.length > 0
-    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.map(term => `- ${term}`).join('\n')}`
-    : ''
+  const glossaryInstruction = buildGlossaryInstruction(glossaryTerms, config.languages)
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[batch]',
     model: config.model,
@@ -234,18 +260,7 @@ async function callOpenAICompatible(
     responseFormat: 'omit',
     messages: [
       { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          segments: config.fewShotSegments,
-        }),
-      },
-      {
-        role: 'assistant',
-        content: JSON.stringify({
-          translations: config.fewShotTranslations,
-        }),
-      },
+      ...buildTranslationFewShotMessages(config),
       {
         role: 'user',
         content: JSON.stringify(buildTranslationUserPayload(inputs)),
@@ -288,47 +303,52 @@ async function callContextGroupAllocation(
   glossaryTerms: string[],
 ): Promise<Map<number, string>> {
   if (groups.length === 0) return new Map()
-  const glossaryInstruction = glossaryTerms.length > 0
-    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.map(term => `- ${term}`).join('\n')}`
-    : ''
+  const glossaryInstruction = buildGlossaryInstruction(glossaryTerms, config.languages)
+  // 組み込みの分担例は日本語→英語なので、transcript が日本語スクリプトの構成でだけ使う
+  const allocationFewShotMessages: Array<{ role: 'user' | 'assistant'; content: string }> =
+    config.languages.transcript.script === 'japanese'
+      ? [
+          {
+            role: 'user',
+            content: JSON.stringify({
+              context_groups: [
+                {
+                  id: 'example-1',
+                  text: 'それを防ぐために、 ペナルティがかかるような目的関数を設計してやるというのがL2正則化になります。',
+                  items: [
+                    { index: 0, role: 'lead', duration_sec: 3.6, text: 'それを防ぐために、' },
+                    { index: 1, role: 'middle', duration_sec: 3.9, text: 'ペナルティがかかるような目的関数を設' },
+                    { index: 2, role: 'tail', duration_sec: 3.2, text: '計してやるというのがL2正則化になります。' },
+                  ],
+                },
+              ],
+            }),
+          },
+          {
+            role: 'assistant',
+            content: JSON.stringify({
+              groups: [
+                {
+                  id: 'example-1',
+                  translations: [
+                    'To prevent that,',
+                    'we design an objective function with a penalty.',
+                    'That is L2 regularization.',
+                  ],
+                },
+              ],
+            }),
+          },
+        ]
+      : []
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[contextGroupAllocation]',
     model: config.model,
     temperature: 0.0,
     responseFormat: 'omit',
     messages: [
-      { role: 'system', content: withContextGroupAllocationInstruction(config.systemPrompt) + glossaryInstruction },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          context_groups: [
-            {
-              id: 'example-1',
-              text: 'それを防ぐために、 ペナルティがかかるような目的関数を設計してやるというのがL2正則化になります。',
-              items: [
-                { index: 0, role: 'lead', duration_sec: 3.6, text: 'それを防ぐために、' },
-                { index: 1, role: 'middle', duration_sec: 3.9, text: 'ペナルティがかかるような目的関数を設' },
-                { index: 2, role: 'tail', duration_sec: 3.2, text: '計してやるというのがL2正則化になります。' },
-              ],
-            },
-          ],
-        }),
-      },
-      {
-        role: 'assistant',
-        content: JSON.stringify({
-          groups: [
-            {
-              id: 'example-1',
-              translations: [
-                'To prevent that,',
-                'we design an objective function with a penalty.',
-                'That is L2 regularization.',
-              ],
-            },
-          ],
-        }),
-      },
+      { role: 'system', content: withContextGroupAllocationInstruction(config.systemPrompt, config.languages) + glossaryInstruction },
+      ...allocationFewShotMessages,
       {
         role: 'user',
         content: JSON.stringify(buildContextGroupTranslationPayload(groups)),
@@ -438,9 +458,7 @@ async function callTranslationOnce(
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
 ): Promise<SingleCallResult> {
-  const glossaryInstruction = glossaryTerms.length > 0
-    ? `\n\nPROJECT GLOSSARY:\nUse these term mappings when the source text contains the Japanese term or related notation. Preserve official English terms exactly.\n${glossaryTerms.map(term => `- ${term}`).join('\n')}`
-    : ''
+  const glossaryInstruction = buildGlossaryInstruction(glossaryTerms, config.languages)
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[single]',
     model: config.model,
@@ -448,18 +466,7 @@ async function callTranslationOnce(
     responseFormat: 'omit',
     messages: [
       { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          segments: config.fewShotSegments,
-        }),
-      },
-      {
-        role: 'assistant',
-        content: JSON.stringify({
-          translations: config.fewShotTranslations,
-        }),
-      },
+      ...buildTranslationFewShotMessages(config),
       {
         role: 'user',
         content: JSON.stringify(buildTranslationUserPayload([input])),

@@ -1,20 +1,22 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { resolveCompressModelId } from '../../prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from '../../languageProfileConfig'
 import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildBudgetHint } from './budgetHint'
+import { buildSubtitleEditUserContent } from './subtitleEditPrompt'
 import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
 
-function buildCoreSystemPrompt(): string {
+function buildCoreSystemPrompt(subtitleLabel: string): string {
   return (
     'You are a subtitle editor performing aggressive rewriting. ' +
     'The current subtitle is significantly too long for its display time, ' +
     'and gentler rephrasing has already been tried. ' +
-    'Rewrite it to fit the display time while producing a COMPLETE, READABLE English subtitle.\n' +
+    `Rewrite it to fit the display time while producing a COMPLETE, READABLE ${subtitleLabel} subtitle.\n` +
     '\n' +
     'Hard requirements:\n' +
-    '- The result MUST be a grammatical English sentence with explicit subject and verb\n' +
+    `- The result MUST be a grammatical ${subtitleLabel} sentence with explicit subject and verb\n` +
     '- The result MUST start with a capital letter and end with appropriate punctuation\n' +
     '- The result MUST keep all technical terms, proper nouns, numbers, equations exactly as in the source\n' +
     '- The result MUST NOT use pronouns like "this", "that", "it" without clear referents\n' +
@@ -36,15 +38,16 @@ async function callCore(
   enText: string,
   jaText: string,
   budgetHint: string,
+  languages: LanguageProfileConfig,
   settings: AdminSettings,
 ): Promise<SubtitleLlmCallResult> {
   const model = requireChatModelForProvider(settings, resolveCompressModelId(settings), 'compress core')
-  const systemPrompt = buildCoreSystemPrompt()
+  const systemPrompt = buildCoreSystemPrompt(languages.subtitle.label)
   return callSubtitleLlm(
     {
       model,
       systemPrompt,
-      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}\n\n${budgetHint}`,
+      userContent: buildSubtitleEditUserContent(languages, jaText, enText.replace(/\n/g, ' '), `\n\n${budgetHint}`),
       temperature: 0.0,
       nodeName: 'compress_core',
     },
@@ -71,7 +74,8 @@ export const compressCoreTool: Tool = {
     thresholds: PipelineThresholds & AgentThresholds,
   ): Promise<TimelinePatch> {
     const budgetHint = buildBudgetHint(block, thresholds)
-    const result = await callCore(block.enText, block.jaText, budgetHint, settings)
+    const languages = loadLanguageProfileConfig(settings)
+    const result = await callCore(block.enText, block.jaText, budgetHint, languages, settings)
 
     if (result.errorMessage) {
       return {

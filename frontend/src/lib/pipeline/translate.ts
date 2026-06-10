@@ -3,6 +3,7 @@ import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
 import { createAiGateway } from '@/lib/aiGateway'
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
 const JA_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/g
@@ -28,10 +29,64 @@ function looksUntranslated(source: string, translated: string): boolean {
   return jaCount / nonSpace.length >= 0.35
 }
 
+// transcript（元言語）が日本語スクリプトのときだけ、カタカナ復元ルールと日本語の few-shot を含める。
+// 既定構成（Japanese→English）では従来のハードコード文字列とバイト一致する。
+function buildTranslateSystemPrompt(languages: LanguageProfileConfig): string {
+  const subtitleLabel = languages.subtitle.label
+  const transcriptLabel = languages.transcript.label
+  const transcriptIsJapanese = languages.transcript.script === 'japanese'
+  return (
+    `You are a subtitle translator for academic lectures. Translate each ${transcriptLabel} segment into natural ${subtitleLabel}.\n` +
+    '\n' +
+    'Input format:  {"segments": ["seg0", "seg1", ...]}\n' +
+    'Output format: {"translations": ["trans0", "trans1", ...]}\n' +
+    '\n' +
+    'MAPPING (CRITICAL):\n' +
+    `- translations[i] is the ${subtitleLabel} translation of segments[i]\n` +
+    '- Output EXACTLY one translation per input segment\n' +
+    '- NEVER merge or split segments\n' +
+    '- Output array length MUST equal input array length\n' +
+    '\n' +
+    'STYLE (BBC/Netflix subtitle standards):\n' +
+    '- casual-academic tone; contractions are fine (we\'ll, it\'s, don\'t)\n' +
+    '- Short sentences; subject and verb first\n' +
+    '- Avoid front-heavy structures — NOT "To solve X, we..." → "We solved X by..."\n' +
+    '- Never use "What we do is..." / "What this means is..." patterns\n' +
+    '- Avoid nominalizations: "use" not "utilization", "show" not "demonstrate"\n' +
+    '\n' +
+    'STANDALONE RULE:\n' +
+    '- Each block appears alone on screen; the viewer cannot look back\n' +
+    '- Never start a block with "This", "That", "It", or "These" referring to the previous block — repeat the noun instead\n' +
+    '\n' +
+    'TERMINOLOGY:\n' +
+    '- Preserve technical terms exactly as-is: RAG, HyDE, LLM, ReAct, etc.\n' +
+    '- Never translate framework, algorithm, or product names' +
+    (transcriptIsJapanese
+      ? '\n- Katakana-rendered terms: restore to original form (ハイド → HyDE, リアクト → ReAct)'
+      : '')
+  )
+}
+
+function buildTranslateFewShot(languages: LanguageProfileConfig): Array<{ role: 'user' | 'assistant'; content: string }> {
+  // 組み込み few-shot は日本語→英語の例なので、transcript が日本語スクリプト以外の構成では使わない。
+  if (languages.transcript.script !== 'japanese') return []
+  return [
+    {
+      role: 'user',
+      content: JSON.stringify({ segments: ['機械学習とは何ですか。', 'ディープラーニングについて説明します。', 'では次のトピックに移ります。'] }),
+    },
+    {
+      role: 'assistant',
+      content: JSON.stringify({ translations: ['What is machine learning?', 'I will explain deep learning.', "Now let's move on to the next topic."] }),
+    },
+  ]
+}
+
 async function callOpenAICompatible(
   texts: string[],
   settings: AdminSettings,
   model: string,
+  languages: LanguageProfileConfig,
 ): Promise<string[]> {
   const result = await createAiGateway(settings).chatText({
     nodeName: 'translation',
@@ -41,42 +96,9 @@ async function callOpenAICompatible(
     messages: [
       {
         role: 'system',
-        content:
-          'You are a subtitle translator for academic lectures. Translate each Japanese segment into natural English.\n' +
-          '\n' +
-          'Input format:  {"segments": ["seg0", "seg1", ...]}\n' +
-          'Output format: {"translations": ["trans0", "trans1", ...]}\n' +
-          '\n' +
-          'MAPPING (CRITICAL):\n' +
-          '- translations[i] is the English translation of segments[i]\n' +
-          '- Output EXACTLY one translation per input segment\n' +
-          '- NEVER merge or split segments\n' +
-          '- Output array length MUST equal input array length\n' +
-          '\n' +
-          'STYLE (BBC/Netflix subtitle standards):\n' +
-          '- casual-academic tone; contractions are fine (we\'ll, it\'s, don\'t)\n' +
-          '- Short sentences; subject and verb first\n' +
-          '- Avoid front-heavy structures — NOT "To solve X, we..." → "We solved X by..."\n' +
-          '- Never use "What we do is..." / "What this means is..." patterns\n' +
-          '- Avoid nominalizations: "use" not "utilization", "show" not "demonstrate"\n' +
-          '\n' +
-          'STANDALONE RULE:\n' +
-          '- Each block appears alone on screen; the viewer cannot look back\n' +
-          '- Never start a block with "This", "That", "It", or "These" referring to the previous block — repeat the noun instead\n' +
-          '\n' +
-          'TERMINOLOGY:\n' +
-          '- Preserve technical terms exactly as-is: RAG, HyDE, LLM, ReAct, etc.\n' +
-          '- Never translate framework, algorithm, or product names\n' +
-          '- Katakana-rendered terms: restore to original form (ハイド → HyDE, リアクト → ReAct)',
+        content: buildTranslateSystemPrompt(languages),
       },
-      {
-        role: 'user',
-        content: JSON.stringify({ segments: ['機械学習とは何ですか。', 'ディープラーニングについて説明します。', 'では次のトピックに移ります。'] }),
-      },
-      {
-        role: 'assistant',
-        content: JSON.stringify({ translations: ['What is machine learning?', 'I will explain deep learning.', "Now let's move on to the next topic."] }),
-      },
+      ...buildTranslateFewShot(languages),
       {
         role: 'user',
         content: JSON.stringify({ segments: texts }),
@@ -129,19 +151,20 @@ async function translateBatchWithFallback(
   texts: string[],
   settings: AdminSettings,
   model: string,
+  languages: LanguageProfileConfig,
 ): Promise<string[]> {
   if (texts.length === 0) return []
 
   try {
-    return await callOpenAICompatible(texts, settings, model)
+    return await callOpenAICompatible(texts, settings, model, languages)
   } catch (error) {
     if (!isRetryableTranslationError(error)) throw error
     if (texts.length === 1) throw formatTranslationFailure(texts[0], error)
   }
 
   const splitAt = Math.ceil(texts.length / 2)
-  const left = await translateBatchWithFallback(texts.slice(0, splitAt), settings, model)
-  const right = await translateBatchWithFallback(texts.slice(splitAt), settings, model)
+  const left = await translateBatchWithFallback(texts.slice(0, splitAt), settings, model, languages)
+  const right = await translateBatchWithFallback(texts.slice(splitAt), settings, model, languages)
   return [...left, ...right]
 }
 
@@ -150,17 +173,18 @@ async function translateInBatches(
   settings: AdminSettings,
   model: string,
   maxSegmentsPerRequest: number,
+  languages: LanguageProfileConfig,
 ): Promise<string[]> {
   const translated: string[] = []
   for (let start = 0; start < texts.length; start += maxSegmentsPerRequest) {
     const batch = texts.slice(start, start + maxSegmentsPerRequest)
-    const batchTranslations = await translateBatchWithFallback(batch, settings, model)
+    const batchTranslations = await translateBatchWithFallback(batch, settings, model, languages)
     translated.push(...batchTranslations)
   }
   return translated
 }
 
-function resolveApiConfig(settings: AdminSettings): { providerLabel: string; model: string; maxSegmentsPerRequest: number } {
+function resolveApiConfig(settings: AdminSettings): { providerLabel: string; model: string; maxSegmentsPerRequest: number; languages: LanguageProfileConfig } {
   const connection = requireAiConnection(settings)
   const model = requireChatModelForProvider(settings, settings.translationModel, 'translation')
   const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
@@ -170,6 +194,7 @@ function resolveApiConfig(settings: AdminSettings): { providerLabel: string; mod
     providerLabel: connection.providerLabel,
     model,
     maxSegmentsPerRequest,
+    languages: loadLanguageProfileConfig(settings),
   }
 }
 
@@ -181,9 +206,9 @@ export async function translateSegments(
     throw new Error('no corrected segments to translate')
   }
 
-  const { providerLabel, model, maxSegmentsPerRequest } = resolveApiConfig(settings)
+  const { providerLabel, model, maxSegmentsPerRequest, languages } = resolveApiConfig(settings)
   const sourceTexts = segments.map((seg) => seg.ja_corrected || seg.text || '')
-  const translatedTexts = await translateInBatches(sourceTexts, settings, model, maxSegmentsPerRequest)
+  const translatedTexts = await translateInBatches(sourceTexts, settings, model, maxSegmentsPerRequest, languages)
 
   const untranslatedIds: number[] = []
   const result: TranslatedSegment[] = segments.map((seg, idx) => {
@@ -206,4 +231,9 @@ export async function translateSegments(
   }
 
   return result
+}
+
+export const __testing = {
+  buildTranslateSystemPrompt,
+  buildTranslateFewShot,
 }

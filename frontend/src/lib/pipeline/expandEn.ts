@@ -4,7 +4,9 @@ import { computeMetrics, classifyViolation } from './metrics'
 import { formatLines } from './formatLines'
 import { resolveExpandModelId, resolveExpandSystemPrompt } from './prompts'
 import { requireChatModelForProvider } from './aiProvider'
+import { loadLanguageProfileConfig } from './languageProfileConfig'
 import { callSubtitleLlm, type SubtitleLlmCallResult } from './correctionAgent/tools/callSubtitleLlm'
+import { buildSubtitleEditUserContent } from './correctionAgent/tools/subtitleEditPrompt'
 
 async function callExpand(
   enText: string,
@@ -17,7 +19,7 @@ async function callExpand(
     {
       model,
       systemPrompt,
-      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}`,
+      userContent: buildSubtitleEditUserContent(loadLanguageProfileConfig(settings), jaText, enText.replace(/\n/g, ' ')),
       temperature: 0.0,
       nodeName: 'expand_en',
     },

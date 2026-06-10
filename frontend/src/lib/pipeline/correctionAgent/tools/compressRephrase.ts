@@ -1,9 +1,11 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { resolveCompressModelId, resolveCompressSystemPrompt } from '../../prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from '../../languageProfileConfig'
 import { requireChatModelForProvider } from '../../aiProvider'
 import type { AgentThresholds, DecisionContext, TimelinePatch, Tool } from '../types'
 import { buildBudgetHint } from './budgetHint'
+import { buildSubtitleEditUserContent } from './subtitleEditPrompt'
 import { callSubtitleLlm, type SubtitleLlmCallResult } from './callSubtitleLlm'
 
 async function callCompress(
@@ -11,6 +13,7 @@ async function callCompress(
   jaText: string,
   budgetHint: string,
   systemPrompt: string,
+  languages: LanguageProfileConfig,
   settings: AdminSettings,
   model: string,
 ): Promise<SubtitleLlmCallResult> {
@@ -19,7 +22,7 @@ async function callCompress(
     {
       model: resolvedModel,
       systemPrompt,
-      userContent: `Japanese source:\n${jaText}\n\nCurrent English subtitle:\n${enText.replace(/\n/g, ' ')}\n\n${budgetHint}`,
+      userContent: buildSubtitleEditUserContent(languages, jaText, enText.replace(/\n/g, ' '), `\n\n${budgetHint}`),
       temperature: 0.0,
       nodeName: 'compress_rephrase',
     },
@@ -48,7 +51,8 @@ export const compressRephraseTool: Tool = {
     const systemPrompt = resolveCompressSystemPrompt(settings, settings.compressPromptOverride)
     const model = resolveCompressModelId(settings)
     const budgetHint = buildBudgetHint(block, thresholds)
-    const result = await callCompress(block.enText, block.jaText, budgetHint, systemPrompt, settings, model)
+    const languages = loadLanguageProfileConfig(settings)
+    const result = await callCompress(block.enText, block.jaText, budgetHint, systemPrompt, languages, settings, model)
 
     if (result.errorMessage) {
       // throw せず warning として correctionEngine ループへ伝搬。元のブロックを維持。

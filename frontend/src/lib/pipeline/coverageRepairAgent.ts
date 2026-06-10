@@ -7,6 +7,7 @@ import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
 import { validateCoverage } from './coverageValidator'
 import { requireChatModelForProvider } from './aiProvider'
 import { resolveCompressModelId } from './prompts'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 import { getCurrentLlmUsageSink } from './llmUsageSink'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 
@@ -83,16 +84,19 @@ function resolveCoverageRepairModelId(settings: AdminSettings): string {
   return settings.coverageRepairModel?.trim() || resolveCompressModelId(settings)
 }
 
-const SYSTEM_PROMPT = `You are CoverageRepairAgent for academic lecture subtitles.
+// transcript（元言語=校正済みソース）のラベルはプロンプトへ注入する。
+// 既定構成（transcript=Japanese）では従来のハードコード文字列とバイト一致する（coverageRepairAgent.test.ts で固定）。
+function buildSystemPrompt(transcriptLabel: string): string {
+  return `You are CoverageRepairAgent for academic lecture subtitles.
 
-A chunk of subtitles has a source-coverage problem: the union of all cue Japanese spans
-does not fully represent the source Japanese segment. Some content from the source
-Japanese is missing from the cues' ja_span and / or en text.
+A chunk of subtitles has a source-coverage problem: the union of all cue ${transcriptLabel} spans
+does not fully represent the source ${transcriptLabel} segment. Some content from the source
+${transcriptLabel} is missing from the cues' ja_span and / or en text.
 
-Your job: rewrite the affected cues so that the source Japanese is fully represented.
+Your job: rewrite the affected cues so that the source ${transcriptLabel} is fully represented.
 
 You will be given:
-- source_segment: the full corrected Japanese with original (pre-correctJa) and correction_distance.
+- source_segment: the full corrected ${transcriptLabel} with original (pre-correctJa) and correction_distance.
   If correction_distance is large, technical terms or formulas were rewritten by correctJa — preserve them carefully.
 - constraints: hard limits (max_cps, max_chars_per_line, max_segment_chars). Your output MUST respect these.
 - affected_cues_to_repair: each cue includes current state AND correction_attempts history (strategies already tried).
@@ -103,15 +107,16 @@ Rules:
 - Return JSON only: { "rationale": "...", "rewrites": [{ "block_id": N, "ja_span": "...", "en": "..." }] }
 - Only return rewrites for the cues you want to change. Other cues stay as-is.
 - Preserve the cue's start/end timing (you do NOT modify timing).
-- Extend or shift each ja_span to claim more of the source Japanese where appropriate.
+- Extend or shift each ja_span to claim more of the source ${transcriptLabel} where appropriate.
 - Rewrite the en text so it expresses the new content compactly.
 - Compute allowed en chars as floor(duration_sec * max_cps). Stay within this budget.
 - Do not exceed max_chars_per_line per line, max_segment_chars total.
-- Do not add content not present in the source Japanese.
+- Do not add content not present in the source ${transcriptLabel}.
 - Preserve technical terms / formulas exactly as written in the source (especially the post-correctJa form).
 - Do not invent proper nouns (person names, organization names) that are not in source.
 - If correction_attempts shows compress_micro / compress_rephrase already failed, do not just shorten — restructure.
 - If you cannot repair without violating constraints, return empty rewrites array with a rationale explaining why.`
+}
 
 interface RepairPromptInput {
   sourceSegment: CorrectedSegmentLite
@@ -120,6 +125,7 @@ interface RepairPromptInput {
   contextBlocksBefore: EnBlock[]
   contextBlocksAfter: EnBlock[]
   thresholds: PipelineThresholds
+  transcriptLabel: string
 }
 
 /**
@@ -201,7 +207,7 @@ function buildRepairUserPrompt(input: RepairPromptInput): string {
     context_cues_before: input.contextBlocksBefore.map(formatContextBlock),
     context_cues_after: input.contextBlocksAfter.map(formatContextBlock),
     instruction:
-      'Rewrite the affected cues to cover the missing source Japanese content. ' +
+      `Rewrite the affected cues to cover the missing source ${input.transcriptLabel} content. ` +
       'Use correction_attempts history to avoid repeating strategies that already failed. ' +
       'Use the original_ja_text vs ja_text diff to identify technical terms that correctJa rewrote — preserve them carefully. ' +
       'Keep timing (do NOT modify start/end). Respect the constraints exactly.',
@@ -221,6 +227,7 @@ async function callCoverageRepairLlm(
   settings: AdminSettings,
   model: string,
   effort: string,
+  languages: LanguageProfileConfig,
 ): Promise<LlmCallResult> {
   const resolvedModel = requireChatModelForProvider(settings, model, 'coverage repair')
 
@@ -232,7 +239,7 @@ async function callCoverageRepairLlm(
       responseFormat: undefined,
       usageSink: getCurrentLlmUsageSink(),
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt(languages.transcript.label) },
         { role: 'user', content: prompt },
       ],
     })
@@ -423,6 +430,7 @@ async function repairOneIssue(
   const contextBefore = firstAffectedIdx > 0 ? sortedAll.slice(Math.max(0, firstAffectedIdx - 2), firstAffectedIdx) : []
   const contextAfter = lastAffectedIdx >= 0 ? sortedAll.slice(lastAffectedIdx + 1, lastAffectedIdx + 3) : []
 
+  const languages = loadLanguageProfileConfig(settings)
   const prompt = buildRepairUserPrompt({
     sourceSegment,
     affectedBlocks,
@@ -430,9 +438,10 @@ async function repairOneIssue(
     contextBlocksBefore: contextBefore,
     contextBlocksAfter: contextAfter,
     thresholds,
+    transcriptLabel: languages.transcript.label,
   })
 
-  const llmResult = await callCoverageRepairLlm(prompt, settings, model, effort)
+  const llmResult = await callCoverageRepairLlm(prompt, settings, model, effort, languages)
 
   const baseEntry: Omit<CoverageRepairLogEntry, 'status'> = {
     sourceSegmentId: issue.sourceSegmentId,
@@ -496,4 +505,8 @@ async function repairOneIssue(
     changedBlocks,
     rationale: llmResult.parsed.rationale,
   }
+}
+
+export const __testing = {
+  buildSystemPrompt,
 }

@@ -2,6 +2,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
+import { loadLanguageProfileConfig } from '../../languageProfileConfig'
 import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
 import { requireChatModelForProvider } from '../../aiProvider'
@@ -147,23 +148,31 @@ function parseSplitUnits(content: string): { units: SplitUnit[]; warning?: strin
   return { units: [], warning: content ? `LLM returned unexpected format: ${content.slice(0, 400)}` : 'LLM returned empty content' }
 }
 
+// transcript（元言語）のラベルをプロンプトへ注入する。
+// 既定構成（transcript=Japanese）では従来のハードコード文字列とバイト一致する。
+function buildSplitSystemPrompt(transcriptLabel: string): string {
+  return (
+    `Resegment this ${transcriptLabel} academic lecture subtitle into 1 to 3 subtitle units. ` +
+    'Use 1 unit if splitting would be unnatural. Use 2 or 3 units only at clear semantic boundaries. ' +
+    'Each unit must make sense independently and must not end with a particle, conjunction, or unfinished clause. ' +
+    'Preserve technical terms, numbers, formulas, definitions, negations, conditions, and causal relations. ' +
+    'You may remove filler, repeated setup phrases, and redundant lecture asides if no information is lost. ' +
+    'If the text cannot be split safely, return {"cannot_split": true, "units": [], "warnings": ["reason"]}. ' +
+    'Respond only with JSON: {"units":[{"text":"...","reason":"...","confidence":0.0}],"warnings":[]}'
+  )
+}
+
 async function splitJaText(
   jaText: string,
   settings: AdminSettings,
 ): Promise<SplitResult> {  // warning フィールドが設定される場合がある
   const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'split block')
+  const transcriptLabel = loadLanguageProfileConfig(settings).transcript.label
 
   const callResult = await llmCallWithMeta(
     {
       model,
-      systemPrompt:
-        'Resegment this Japanese academic lecture subtitle into 1 to 3 subtitle units. ' +
-        'Use 1 unit if splitting would be unnatural. Use 2 or 3 units only at clear semantic boundaries. ' +
-        'Each unit must make sense independently and must not end with a particle, conjunction, or unfinished clause. ' +
-        'Preserve technical terms, numbers, formulas, definitions, negations, conditions, and causal relations. ' +
-        'You may remove filler, repeated setup phrases, and redundant lecture asides if no information is lost. ' +
-        'If the text cannot be split safely, return {"cannot_split": true, "units": [], "warnings": ["reason"]}. ' +
-        'Respond only with JSON: {"units":[{"text":"...","reason":"...","confidence":0.0}],"warnings":[]}',
+      systemPrompt: buildSplitSystemPrompt(transcriptLabel),
       userContent: jaText,
       temperature: 0.0,
       nodeName: 'split_block',
@@ -196,23 +205,27 @@ async function splitJaText(
   return { units: [], warning: `split_block: could not split (no sentence boundary). ${llmActual}` }
 }
 
-const SINGLE_TRANSLATE_SYSTEM =
-  'Translate this Japanese subtitle text into natural English. ' +
-  'Keep technical terms, proper nouns, and formulas. Use casual-academic tone. Contractions are fine. ' +
-  'The subtitle must make sense on its own. Do not start with This, That, It, or These when they refer to previous context. ' +
-  'Repeat the noun when needed. Keep logical connectors, conditions, negations, numbers, and definitions. ' +
-  'Use concise subtitle wording without adding explanations. ' +
-  'Respond with JSON: {"text": "<translation>"}'
+function buildSingleTranslateSystem(transcriptLabel: string, subtitleLabel: string): string {
+  return (
+    `Translate this ${transcriptLabel} subtitle text into natural ${subtitleLabel}. ` +
+    'Keep technical terms, proper nouns, and formulas. Use casual-academic tone. Contractions are fine. ' +
+    'The subtitle must make sense on its own. Do not start with This, That, It, or These when they refer to previous context. ' +
+    'Repeat the noun when needed. Keep logical connectors, conditions, negations, numbers, and definitions. ' +
+    'Use concise subtitle wording without adding explanations. ' +
+    'Respond with JSON: {"text": "<translation>"}'
+  )
+}
 
 async function translateSingle(
   jaText: string,
   settings: AdminSettings,
 ): Promise<{ text: string; errorMessage?: string }> {
   const model = requireChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel), 'split block translation')
+  const languages = loadLanguageProfileConfig(settings)
   const result = await callSubtitleLlm(
     {
       model,
-      systemPrompt: SINGLE_TRANSLATE_SYSTEM,
+      systemPrompt: buildSingleTranslateSystem(languages.transcript.label, languages.subtitle.label),
       userContent: jaText,
       temperature: 0.0,
       nodeName: 'split_block_translation',
@@ -423,4 +436,9 @@ export const splitBlockTool: Tool = {
       warning: splitWarning,
     }
   },
+}
+
+export const __testing = {
+  buildSplitSystemPrompt,
+  buildSingleTranslateSystem,
 }
