@@ -142,11 +142,9 @@ function validateTranslationSettings(settings: AdminSettings): void {
   requireAiConnection(settings)
 }
 
-export function hasConfiguredService(settings: AdminSettings): boolean {
+export function hasPipelineApi(settings: AdminSettings): boolean {
   return resolveServiceBase(settings).length > 0
 }
-
-export const hasPipelineApi = hasConfiguredService
 
 function resolveServiceBase(settings: AdminSettings): string {
   if (settings.serviceMode === 'legacy_pipeline') {
@@ -673,7 +671,7 @@ async function runManagedPipeline(
   })
 }
 
-export async function runPipelineViaService(
+export async function runPipelineViaApi(
   sourceName: string,
   settings: AdminSettings,
   sourceInput?: PipelineSourceInput,
@@ -690,9 +688,6 @@ export async function runPipelineViaService(
   }
   return runLocalTranscriptPipeline(apiBase, sourceName, settings, sourceInput, onProgress, glossary)
 }
-
-export const runPipelineViaApi = runPipelineViaService
-
 
 function validateManagedServiceConnectionInputs(settings: AdminSettings): string {
   const apiBase = resolveServiceBase(settings)

@@ -12,18 +12,6 @@
 import nlp from 'compromise'
 import type { GlossaryEntry } from '@/context/GlossaryContext'
 
-export interface Replacement {
-  found: string      // テキスト中で見つかった形
-  canonical: string  // 正規形（辞書の en フィールド）
-  position: number   // 文字位置
-}
-
-export interface TextApplyResult {
-  text: string
-  replacements: Replacement[]
-  changed: boolean
-}
-
 export interface MissingTerm {
   entry: GlossaryEntry
   jaFound: boolean   // 日本語原文に ja が含まれていた
@@ -37,15 +25,6 @@ export interface MissingTerm {
 function buildPattern(term: string): RegExp {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`\\b${escaped}(?:'?s)?\\b`, 'gi')
-}
-
-/**
- * 置換用パターン（大文字小文字のみ対応・複数形・所有格は変換しない）
- * applyGlossaryToText でのみ使用する
- */
-function buildPatternStrict(term: string): RegExp {
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`\\b${escaped}\\b`, 'gi')
 }
 
 /**
@@ -68,46 +47,6 @@ function findWithNlp(text: string, term: string): boolean {
   } catch {
     return false
   }
-}
-
-/**
- * 英語テキストに確定済み用語辞書を適用し、大文字小文字の違いを辞書表記へ揃える
- *
- * 置換対象:
- * - 大文字・小文字の揺れ（"transformer" → "Transformer"）
- *
- * 複数形・所有格・語形変化は検出には使うが、自動置換では変更しない。
- *
- * 注意: 承認済みブロックへの適用は呼び出し側で制御する
- */
-export function applyGlossaryToText(
-  text: string,
-  entries: GlossaryEntry[],
-): TextApplyResult {
-  let result = text
-  const replacements: Replacement[] = []
-  let offset = 0  // テキスト変更によるオフセット補正
-
-  for (const entry of entries) {
-    if (!entry.confirmed) continue
-    const pattern = buildPatternStrict(entry.en)
-
-    result = result.replace(pattern, (match, matchOffset) => {
-      // 既に正規形なら変更しない。
-      const isAlreadyCanonical = match === entry.en
-      if (isAlreadyCanonical) return match
-
-      replacements.push({
-        found: match,
-        canonical: entry.en,
-        position: matchOffset + offset,
-      })
-      offset += entry.en.length - match.length
-      return entry.en
-    })
-  }
-
-  return { text: result, replacements, changed: replacements.length > 0 }
 }
 
 /**
@@ -169,7 +108,7 @@ export function findMissingTranslations(
  * 日英対応色を示すパレット。
  * ブロック内でマッチした用語に順番に割り当て、同じエントリは日英で同色になる。
  */
-export const TERM_COLOR_PALETTE = [
+const TERM_COLOR_PALETTE = [
   '#60a5fa', // blue
   '#fb923c', // orange
   '#34d399', // green
@@ -240,14 +179,6 @@ export function toTargetTerms(
       isDeviated: false,
       color,
     }))
-}
-
-/** @deprecated findMatchedGlossaryEntries + toSourceTerms を使うこと */
-export function matchGlossaryToSource(
-  source: string,
-  entries: GlossaryEntry[],
-): import('@/types/subtitle').GlossaryTerm[] {
-  return toSourceTerms(findMatchedGlossaryEntries(source, '', entries))
 }
 
 export interface TypoCandidate {
