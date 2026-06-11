@@ -15,6 +15,7 @@
 | インストールして使い始める | [Getting Started](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Getting-Started) |
 | 日々の字幕作成・レビュー作業の手順 | [操作マニュアル](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Operator-Manual) |
 | 画面の各ボタン・機能の意味 | [画面リファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/UI-Reference) |
+| 読みやすい字幕の原則・公式ガイドライン | [字幕ベストプラクティス・参考資料](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Subtitle-Best-Practices) |
 | 環境構築〜接続テスト〜配布（管理者） | [管理者セットアップ](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Admin-Setup) |
 | 品質・コスト・接続の調整と対処（症状から引く） | [チューニング＆トラブルシュート](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Admin-Tuning) |
 | 設定項目の意味（表示名↔キー↔既定値） | [上級設定リファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Settings-Reference) |

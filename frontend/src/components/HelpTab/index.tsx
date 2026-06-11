@@ -4,6 +4,8 @@ import { useLocale } from '@/context/LocaleContext'
 
 type HelpSection = 'guide' | 'admin' | 'shortcuts' | 'bestpractice'
 
+const WIKI_BASE = 'https://github.com/matsuolab/lecture_subtitle_translator/wiki'
+
 function KeyBadge({ label }: { label: string }) {
   const { theme } = useTheme()
   const isClick = label.startsWith('クリック') || label.startsWith('ドラッグ') ||
@@ -48,31 +50,29 @@ function SectionCard({ title, children }: { title: string; children: React.React
   )
 }
 
-function RuleTable({ rows }: { rows: { label: string; netflix?: string; youtube?: string; bbc?: string; note?: string }[] }) {
+interface LinkItem {
+  label: string
+  href: string
+  note: string
+}
+
+function LinkList({ items }: { items: LinkItem[] }) {
   const { theme } = useTheme()
-  const cols = ['項目', 'Netflix', 'YouTube', 'BBC / 一般', '備考']
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-        <thead>
-          <tr style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
-            {cols.map(c => (
-              <th key={c} style={{ textAlign: 'left', padding: '4px 8px', color: theme.textMuted, fontWeight: 600, whiteSpace: 'nowrap' }}>{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
-              <td style={{ padding: '5px 8px', color: theme.textPrimary, fontWeight: 600, whiteSpace: 'nowrap' }}>{r.label}</td>
-              <td style={{ padding: '5px 8px', color: theme.textSecondary }}>{r.netflix ?? '—'}</td>
-              <td style={{ padding: '5px 8px', color: theme.textSecondary }}>{r.youtube ?? '—'}</td>
-              <td style={{ padding: '5px 8px', color: theme.textSecondary }}>{r.bbc ?? '—'}</td>
-              <td style={{ padding: '5px 8px', color: theme.textMuted, fontSize: 10 }}>{r.note ?? ''}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {items.map((item, i) => (
+        <div key={i} style={{ fontSize: 12, lineHeight: 1.6 }}>
+          <a
+            href={item.href}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: theme.glossaryLinkColor, fontWeight: 600 }}
+          >
+            {item.label}
+          </a>
+          <span style={{ color: theme.textMuted, marginLeft: 8, fontSize: 11 }}>{item.note}</span>
+        </div>
+      ))}
     </div>
   )
 }
@@ -109,7 +109,7 @@ export function HelpTab() {
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
       <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 8 }}>
-        このヘルプの操作手順・設定説明は subtitle-editor v0.4.4 準拠です。
+        このヘルプはオフラインで参照できる要約です。詳しい手順・設定・動作原理は Wiki（使い方ガイド内のリンク集）を参照してください。
       </div>
 
       {/* セクション切り替えタブ */}
@@ -136,6 +136,23 @@ export function HelpTab() {
       {/* ガイドセクション */}
       {section === 'guide' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <SectionCard title="📖 詳しいドキュメント（Wiki）">
+            <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: '0 0 8px 0' }}>
+              このヘルプは要約版です。手順・設定・動作原理の正式なドキュメントは Wiki にあります（閲覧にはインターネット接続が必要です）。
+            </p>
+            <LinkList items={[
+              { label: 'Getting Started', href: `${WIKI_BASE}/Getting-Started`, note: 'インストールして使い始める' },
+              { label: '操作マニュアル', href: `${WIKI_BASE}/Operator-Manual`, note: '日々の字幕作成・レビュー作業の手順' },
+              { label: '画面リファレンス', href: `${WIKI_BASE}/UI-Reference`, note: '画面の各ボタン・機能の意味' },
+              { label: '字幕ベストプラクティス・参考資料', href: `${WIKI_BASE}/Subtitle-Best-Practices`, note: '読みやすい字幕の原則と外部資料リンク集' },
+              { label: '管理者セットアップ', href: `${WIKI_BASE}/Admin-Setup`, note: '環境構築〜接続テスト〜配布（管理者）' },
+              { label: 'チューニング＆トラブルシュート', href: `${WIKI_BASE}/Admin-Tuning`, note: '品質・コスト・接続の調整と対処（症状から引く）' },
+              { label: '上級設定リファレンス', href: `${WIKI_BASE}/Settings-Reference`, note: '設定項目の意味（表示名↔キー↔既定値）' },
+              { label: '設定ファイルリファレンス', href: `${WIKI_BASE}/Config-Files-Reference`, note: 'JSON・プロンプト設定の書式' },
+              { label: '動作原理', href: `${WIKI_BASE}/Pipeline-Behavior`, note: 'パイプラインが内部で何をしているか' },
+            ]} />
+          </SectionCard>
+
           <SectionCard title="基本的な作業の流れ">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
@@ -144,7 +161,7 @@ export function HelpTab() {
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
                 <strong style={{ color: theme.textPrimary }}>① 動画を読み込む</strong>（左パネルにドロップ、またはボタンから選択）→
                 <strong style={{ color: theme.textPrimary }}> ② 字幕生成タブで字幕生成を実行</strong> →
-                <strong style={{ color: theme.textPrimary }}> ③ 提案・要確認・用語警告を確認</strong> →
+                <strong style={{ color: theme.textPrimary }}> ③ 要確認・用語警告を確認</strong> →
                 <strong style={{ color: theme.textPrimary }}> ④ 問題なければ承認</strong> →
                 <strong style={{ color: theme.textPrimary }}> ⑤ JSONまたはSRTとして書き出す</strong>
               </p>
@@ -165,13 +182,11 @@ export function HelpTab() {
             </div>
           </SectionCard>
 
-          <SectionCard title="提案・要確認・自動処理ログの見方">
+          <SectionCard title="要確認バッジ・自動処理ログの見方">
             <BulletList items={[
-              '提案: 自動処理またはLLMが修正候補を出している状態です。内容を確認し、必要なら編集して承認します。',
-              '要確認: 速度、表示時間、訳抜け、用語など、人間の判断を優先したい状態です。',
-              '自動: 自動処理が適用済みで、大きな問題がなければ承認できます。',
-              '自動処理 n: その字幕で試した分割、短縮、前後結合、表示時間調整などの履歴です。クリックすると、何を試して、採用されたか見送られたかを確認できます。',
-              '処理全体の詳しいログはレポートタブの「処理ログ」から確認できます。管理者やエンジニアへ相談するときは、プロジェクトJSONも一緒に共有してください。',
+              '要確認 🚩: CPS・行長・表示時間などの測定形式違反が残っている、または未訳のブロックに付きます。内容を確認し、必要なら編集して承認します。',
+              '自動処理の履歴: その字幕で試した分割、短縮、前後結合、表示時間調整などの履歴は、字幕生成タブの「このブロックの自動処理履歴」で、何を試して、採用されたか見送られたかを確認できます。',
+              '処理全体の詳しいログは字幕生成タブの「処理ログ」から確認できます。管理者やエンジニアへ相談するときは、プロジェクトJSONも一緒に共有してください。',
             ]} />
           </SectionCard>
 
@@ -214,77 +229,57 @@ export function HelpTab() {
               '用語辞書タブの「全ブロックに適用」ボタンで一括適用も可能です。',
             ]} />
           </SectionCard>
+
+          <SectionCard title="困ったとき">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {[
+                ['「字幕生成を実行」が押せない', '動画が読み込まれているか確認します（左パネル）'],
+                ['接続エラーが出る', '設定タブで接続テスト・APIキーを確認。直らなければ管理者へ相談します'],
+                ['[UNTRANSLATED: ...] が残っている', '自動翻訳が失敗したブロックです。書きおこしを見て手動で翻訳します'],
+                ['要確認 🚩 が多すぎる', '品質基準（CPS・行長など）が動画に対して厳しすぎる可能性。管理者に設定調整を相談します'],
+                ['処理が途中で失敗する', '字幕生成タブの実行状態・処理ログを確認し、その内容を添えて管理者へ報告します'],
+                ['編集を間違えた', 'Ctrl+Z で戻せます。承認済みブロックは一度承認解除してから編集します'],
+                ['用語漏れ・タイポ表示が誤検出', '表示の × で個別に無視できます（↩ で復帰）'],
+              ].map(([symptom, action], i) => (
+                <div key={i} style={{ display: 'flex', gap: 10, fontSize: 12, alignItems: 'flex-start' }}>
+                  <span style={{ color: theme.textPrimary, fontWeight: 600, minWidth: 200 }}>{symptom}</span>
+                  <span style={{ color: theme.textSecondary, lineHeight: 1.6 }}>{action}</span>
+                </div>
+              ))}
+            </div>
+          </SectionCard>
         </div>
       )}
 
       {/* 管理者向けセクション */}
       {section === 'admin' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <SectionCard title="初回設定で確認する項目">
+          <SectionCard title="初回設定チェックリスト">
             <BulletList items={[
               '実行先: AWS / リモート実行を使うか、このPCで実行するかを選びます。',
               'Service URL / Service Auth Token: リモート実行する場合の接続先と認証情報です。入力後、接続テストでOKが出ればアクセス確認済みです。',
-              '接続先AIプロバイダ: OpenAI または Gemini を選び、対応する API Key を入力します。READMEやチャットに公開しないでください。',
-              'OpenAI Compatible Base URL: OpenAI互換APIを使う場合だけ入力します。通常は空欄です。',
+              '接続先AIプロバイダ: OpenAI / Gemini / OpenAI互換 を選び、対応する API Key を入力します。READMEやチャットに公開しないでください。',
+              'AI Gateway 接続チェック: Chat / Embedding / Vision の疎通を確認してからパイプラインを実行します。',
               '用語辞書: CSV/XLSXを読み込み、確定済み用語をハイライト・用語漏れ・タイポ候補に使います。',
-              'PDF辞書作成で数式・図表・画像化文字の抽出精度を上げたい場合は、辞書タブで Vision LLM を有効にし、設定タブの PDF抽出Visionモデル にVision対応モデルIDを指定します。',
-              'PDF辞書作成の並列化ON/OFFは辞書タブで切り替えます。並列リクエスト数は設定タブで調整します。OFFでは1ページずつ処理します。',
             ]} />
           </SectionCard>
 
-          <SectionCard title="現在の推奨モデル・字幕制限">
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-                <tbody>
-                  {[
-                    ['translationProvider', 'openai'],
-                    ['translationModel', 'gpt-5.4-mini'],
-                    ['correctionModel', 'gpt-5.4-mini'],
-                    ['pdfExtractionVisionModel', 'gpt-5.4-nano'],
-                    ['pdfFormulaMiniModel', 'gpt-5.4-mini'],
-                    ['compressModel', 'gpt-5.4-mini'],
-                    ['expandModel', 'gpt-5.4-mini'],
-                    ['contextMergeModel', 'gpt-5.5'],
-                    ['subtitleLanguageLabel', 'English'],
-                    ['transcriptLanguageLabel', 'Japanese'],
-                    ['enMaxCharsPerLine', '80'],
-                    ['enMaxCps', '16.9'],
-                    ['pipelineVerboseEnRatio', '1.5'],
-                    ['glossaryMaxOutputTokens', '4096'],
-                    ['apiRequestConcurrency', '7'],
-                  ].map(([key, value]) => (
-                    <tr key={key} style={{ borderBottom: `1px solid ${theme.panelBorder}` }}>
-                      <td style={{ padding: '5px 8px', color: theme.textPrimary, fontWeight: 700, whiteSpace: 'nowrap' }}>{key}</td>
-                      <td style={{ padding: '5px 8px', color: theme.textSecondary }}>{value}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </SectionCard>
-
-          <SectionCard title="言語プロファイルJSON">
-            <BulletList items={[
-              'Context Merge で source/target の取り違えを防ぐため、曖昧な source/target ではなく subtitle_text と transcript_text の役割でLLMに渡します。',
-              'subtitleLanguageLabel は画面に表示する字幕の言語です。既定では English です。',
-              'transcriptLanguageLabel は参照する書き起こし原文の言語です。既定では Japanese です。',
-              'script は latin / japanese / generic から選びます。英日以外の言語では generic を使うと、文字種による強制判定を避けられます。',
-              'sentenceEndPattern、continuationEndPattern、fragmentStartPattern は、短い断片を前後と統合する候補判定に使います。',
-            ]} />
-          </SectionCard>
-
-          <SectionCard title="プロンプト上書きの注意">
-            <BulletList items={[
-              'compressPromptOverride と expandPromptOverride を入力すると、デフォルトプロンプトを完全に置き換えます。',
-              '上書きプロンプトでは、CPS、行長、行数、講義らしさ、専門用語保持などの制約を自分で明示してください。',
-              '一部だけ追記する欄ではないため、検証中は空欄に戻せるよう変更内容を別途控えてください。',
+          <SectionCard title="設定・チューニングの正式ドキュメント（Wiki）">
+            <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: '0 0 8px 0' }}>
+              推奨モデル・既定値・各設定項目の意味は、アプリのバージョンアップで変わるためこのヘルプには記載していません。常に Wiki の最新版を参照してください。
+            </p>
+            <LinkList items={[
+              { label: '管理者セットアップ', href: `${WIKI_BASE}/Admin-Setup`, note: '環境構築〜接続テスト〜共有用設定の配布までの順路' },
+              { label: '上級設定リファレンス', href: `${WIKI_BASE}/Settings-Reference`, note: 'モデル・品質基準（行長/CPS）など全設定項目の意味と既定値' },
+              { label: '設定ファイルリファレンス', href: `${WIKI_BASE}/Config-Files-Reference`, note: '言語プロファイルJSON・プロンプト上書き等の書式と注意点' },
+              { label: 'チューニング＆トラブルシュート', href: `${WIKI_BASE}/Admin-Tuning`, note: '品質・コスト・接続の問題を症状から引いて対処する' },
             ]} />
           </SectionCard>
 
           <SectionCard title="障害調査で共有する情報">
             <BulletList items={[
               'プロジェクトJSON: 字幕、レビュー状態、自動処理ログ、編集履歴、設定スナップショットを含みます。',
-              'ReportTab の処理ログ: モジュール別ログ、進行イベント、設定スナップショットを確認できます。',
+              '字幕生成タブの処理ログ: モジュール別ログ、進行イベント、設定スナップショットを確認できます。',
               'job_id または runId: Managed Service の実行結果を追跡するときに必要です。',
               '不要な提案、危険な自動修正、良かった自動修正、UIで迷った点をメモとして残してください。',
             ]} />
@@ -327,54 +322,7 @@ export function HelpTab() {
       {section === 'bestpractice' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-          <SectionCard title="プラットフォーム別 主要パラメータ比較">
-            <RuleTable rows={[
-              {
-                label: 'CPS上限（英語）',
-                netflix: '17 cps',
-                youtube: '〜20 cps（目安）',
-                bbc: '15〜20 cps',
-                note: '既定上限は16.9。設定で変更可',
-              },
-              {
-                label: '1行最大文字数',
-                netflix: '42文字',
-                youtube: '42文字（推奨）',
-                bbc: '40〜42文字',
-                note: 'このプロジェクトの既定上限は80文字',
-              },
-              {
-                label: '最大行数',
-                netflix: '2行',
-                youtube: '2行',
-                bbc: '2行',
-                note: '3行以上は読みにくい',
-              },
-              {
-                label: '最短表示時間',
-                netflix: '0.833秒（24fpsで20f）',
-                youtube: '約1秒推奨',
-                bbc: '0.5〜1秒',
-                note: '短すぎると読めない',
-              },
-              {
-                label: '最長表示時間',
-                netflix: '7秒',
-                youtube: '7〜8秒',
-                bbc: '8秒',
-                note: '長すぎると残り続けて不自然',
-              },
-              {
-                label: 'ブロック間隔',
-                netflix: '最低2フレーム（〜83ms）',
-                youtube: '〜100ms推奨',
-                bbc: '特に規定なし',
-                note: 'ギャップゼロは避ける',
-              },
-            ]} />
-          </SectionCard>
-
-          <SectionCard title="読みやすい字幕のルール">
+          <SectionCard title="読みやすい字幕の一般原則">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div>
                 <div style={{ fontSize: 11, fontWeight: 700, color: theme.textPrimary, marginBottom: 4 }}>改行位置</div>
@@ -388,7 +336,7 @@ export function HelpTab() {
               <div>
                 <div style={{ fontSize: 11, fontWeight: 700, color: theme.textPrimary, marginBottom: 4 }}>句読点・記号</div>
                 <BulletList items={[
-                  '行末に句読点（。、.）を置かない（Netflixガイドライン）',
+                  '行末に句読点（。、.）を置かない',
                   'ダッシュ（—）で文章が途切れた場合は次ブロックの先頭にも — を付ける',
                   '三点リーダー（…）は文章が途切れた場合に使う',
                   '感嘆符・疑問符の後にスペースを入れない',
@@ -406,47 +354,13 @@ export function HelpTab() {
             </div>
           </SectionCard>
 
-          <SectionCard title="Netflix 字幕ガイドライン（英語字幕の主要ルール）">
-            <BulletList items={[
-              'CPS: 最大17（英語）。このツールでは15超で黄色、20超で赤で警告',
-              '1行最大42文字（半角）。2行まで。現在のプロジェクト既定値は講義字幕向けに80文字',
-              '最短表示時間: 5フレーム（24fpsで0.208秒）、推奨は0.833秒（20フレーム）',
-              '最長表示時間: 7秒',
-              'ブロック間の最小間隔: 2フレーム（24fpsで83ms）',
-              '行末にピリオド・カンマを置かない（例外: 略語、省略形）',
-              '話者が変わる場合は「—」をブロック先頭に付ける',
-              '上付き文字・特殊フォント・色指定は使わない（SRTでは対応外）',
-            ]} />
-          </SectionCard>
-
-          <SectionCard title="YouTube / 一般動画向けのポイント">
-            <BulletList items={[
-              'Netflix ほど厳密でなくてよいが、CPS 20以下を目安にすると視聴者体験が向上する',
-              'YouTubeの自動字幕に合わせて修正する場合は、誤認識されやすい固有名詞を重点的に確認する',
-              '長い動画（講義・セミナー）では1ブロックを4〜5秒以内に抑えると読みやすい',
-              'テロップや図解と字幕が重ならないよう、必要に応じて表示位置を調整する（SRTのLine指定）',
-            ]} />
-          </SectionCard>
-
-          <SectionCard title="BBC / 放送向けのポイント">
-            <BulletList items={[
-              'BBCガイドラインでは CPS 17以下を推奨。複雑な内容は15以下を目標にする',
-              '話者の交代には — を使い、複数話者が同じブロックに含まれないようにする',
-              '音響描写（[拍手]、[笑い声]等）は [] または () で囲み、通常の発話と区別する',
-              '方言・アクセントは標準表記で書くが、話者の特徴を反映した語彙を選ぶ',
-              'ニュース・ドキュメンタリーでは固有名詞のスペルを事前に確認する',
-              'ライブ放送字幕では最短 0.5秒、通常番組では最短 1秒の表示時間を確保する',
-            ]} />
-          </SectionCard>
-
           <SectionCard title="このツールでの品質チェックポイント">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {[
                 ['CPS警告', '既定では16.9を上限として判定。設定タブの値に連動します'],
                 ['行長警告', '既定では1行80文字を上限として判定。設定タブの値に連動します'],
-                ['提案', '自動修正やLLMが修正候補を出しているブロック。内容確認後に承認します'],
-                ['要確認', '人間の判断を優先するブロック。訳抜け、速度、表示時間、用語を確認します'],
-                ['自動処理', 'そのブロックで試した分割・短縮・結合などの履歴を確認できます'],
+                ['要確認 🚩', '測定形式違反（CPS・行長・表示時間など）や未訳が残っているブロック。内容を確認して承認します'],
+                ['自動処理履歴', '字幕生成タブの「このブロックの自動処理履歴」で、分割・短縮・結合などの履歴を確認できます'],
                 ['用語ハイライト', '用語辞書に登録した語が正しく訳されているか確認する'],
               ].map(([badge, desc], i) => (
                 <div key={i} style={{ display: 'flex', gap: 10, fontSize: 12, alignItems: 'flex-start' }}>
@@ -455,6 +369,17 @@ export function HelpTab() {
                 </div>
               ))}
             </div>
+          </SectionCard>
+
+          <SectionCard title="参考資料">
+            <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
+              CPS・行長・表示時間などの具体的な数値基準を参考にしたい場合は、各プラットフォームの公式ガイドライン最新版を参照してください。
+              注釈付きのリンク集（Netflix / BBC / EBU の公式ガイドライン、教育向けガイドライン、学術文献）は{' '}
+              <a href={`${WIKI_BASE}/Subtitle-Best-Practices`} target="_blank" rel="noreferrer" style={{ color: theme.glossaryLinkColor, fontWeight: 600 }}>
+                Wiki: 字幕ベストプラクティス・参考資料
+              </a>
+              {' '}にまとめています（閲覧にはインターネット接続が必要です）。
+            </p>
           </SectionCard>
 
         </div>
