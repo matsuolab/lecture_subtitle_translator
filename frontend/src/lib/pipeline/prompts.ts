@@ -170,9 +170,6 @@ export function resolveCompressModelId(settings: { compressModel?: string; trans
   return settings.compressModel?.trim() || settings.translationModel?.trim() || ''
 }
 
-export function resolveExpandModelId(settings: { expandModel?: string; translationModel?: string }): string {
-  return settings.expandModel?.trim() || settings.translationModel?.trim() || ''
-}
 
 // compress_micro 用モデル解決。
 // microModel が空なら compressModel、それも空なら translationModel をフォールバック。

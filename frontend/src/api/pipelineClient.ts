@@ -6,23 +6,6 @@ import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } fr
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
 import { getLocalPipelineDebugFailure, runLocalPostPipeline, type LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
-import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
-
-interface BackendTranslatedSegment {
-  id?: number
-  start?: number
-  end?: number
-  text?: string
-  ja_corrected?: string
-  en?: string
-  translated_text?: string
-  translation_flagged?: boolean
-}
-
-interface BackendSubtitleBlock {
-  start?: number
-  end?: number
-}
 
 interface BackendNodeTrace {
   node_id?: string
@@ -34,32 +17,6 @@ interface BackendNodeTrace {
   error?: string
 }
 
-interface BackendReviewItem {
-  id?: string
-  node_id?: string
-  reason?: string
-  priority?: string
-  score?: number
-  block_id?: number
-}
-
-interface BackendAudit {
-  must_review_count?: number
-  should_review_count?: number
-  auto_pass_count?: number
-  review_items?: BackendReviewItem[]
-  node_traces?: BackendNodeTrace[]
-}
-
-interface LegacyPipelineResult {
-  state?: {
-    data?: {
-      translated_segments?: BackendTranslatedSegment[]
-      subtitle_blocks?: BackendSubtitleBlock[]
-    }
-  }
-  audit?: BackendAudit
-}
 
 interface ManagedUploadResponse {
   upload_url?: string
@@ -247,37 +204,6 @@ function formatFetchError(stage: string, error: unknown, extra?: string): Error 
   return new Error(`${stage} failed${suffix}: ${String(error || 'unknown error')} / ${hint} / ${context}`)
 }
 
-function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
-  return Object.fromEntries(
-    Object.entries(record).filter(([, value]) => value !== '' && value !== undefined && value !== null),
-  ) as Partial<T>
-}
-
-function toSubtitleBlocks(result: LegacyPipelineResult): SubtitleBlock[] {
-  const translated: BackendTranslatedSegment[] = result?.state?.data?.translated_segments ?? []
-  const subtitleRows: BackendSubtitleBlock[] = result?.state?.data?.subtitle_blocks ?? []
-  if (translated.length === 0) return []
-
-  return translated.map((row, idx) => {
-    const sub = subtitleRows[idx]
-    const startTime = Number(sub?.start ?? row.start ?? 0)
-    const endTime = Number(sub?.end ?? row.end ?? startTime + 2)
-    const subtitle = String(row.en ?? row.translated_text ?? '')
-    const duration = Math.max(0.1, endTime - startTime)
-    const charCount = countCpsChars(subtitle)
-    return {
-      id: Number(row.id ?? idx + 1),
-      startTime,
-      endTime,
-      subtitle,
-      transcript: String(row.ja_corrected ?? row.text ?? ''),
-      cps: calculateRoundedCps(subtitle, duration),
-      charCount,
-      status: row.translation_flagged ? 'flagged' : 'pending',
-      glossaryTerms: [],
-    } as SubtitleBlock
-  })
-}
 
 function toAuditTraces(rows: BackendNodeTrace[]): PipelineNodeTrace[] {
   return rows.map((row) => ({
@@ -291,34 +217,6 @@ function toAuditTraces(rows: BackendNodeTrace[]): PipelineNodeTrace[] {
   }))
 }
 
-function toTraces(result: LegacyPipelineResult): PipelineNodeTrace[] {
-  const rows: BackendNodeTrace[] = result?.audit?.node_traces ?? []
-  return toAuditTraces(rows)
-}
-
-function toAudit(result: LegacyPipelineResult): PipelineAuditReport {
-  const audit: BackendAudit = result?.audit ?? {}
-  const reviewItems = (audit.review_items ?? []).map((item: BackendReviewItem) => ({
-    id: String(item.id),
-    nodeId: String(item.node_id),
-    reason: String(item.reason),
-    priority: (
-      item.priority === 'must_review' || item.priority === 'should_review' || item.priority === 'auto_pass'
-        ? item.priority
-        : 'should_review'
-    ) as 'must_review' | 'should_review' | 'auto_pass',
-    score: Number(item.score ?? 0),
-    blockId: item.block_id !== undefined ? Number(item.block_id) : undefined,
-  }))
-
-  return {
-    mustReviewCount: Number(audit.must_review_count ?? 0),
-    shouldReviewCount: Number(audit.should_review_count ?? 0),
-    autoPassCount: Number(audit.auto_pass_count ?? 0),
-    reviewItems,
-    nodeTraces: toTraces(result),
-  }
-}
 
 function toManagedMetadataTraces(result: ManagedTranscriptResult): PipelineNodeTrace[] {
   const metadata = result.metadata ?? {}
@@ -353,33 +251,6 @@ function normalizeProgressStatus(status: string | undefined): PipelineRunProgres
   }
 }
 
-async function pollLegacyStatus(apiBase: string, runId: string, settings: AdminSettings, onProgress?: (p: PipelineRunProgress) => void): Promise<void> {
-  const intervalMs = 2000
-  const deadline = Date.now() + 60 * 60 * 1000
-  const authHeaders = buildAuthHeaders(settings)
-
-  while (Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, intervalMs))
-    const res = await fetch(`${apiBase}/api/pipeline/runs/${runId}`, {
-      headers: authHeaders,
-    })
-    if (!res.ok) throw new Error(`status poll failed: ${res.status}`)
-    const data = await res.json()
-
-    onProgress?.({
-      runId,
-      status: normalizeProgressStatus(data.status),
-      currentNode: data.current_node ?? null,
-      completedNodes: data.completed_nodes ?? [],
-      totalNodes: data.total_nodes ?? 0,
-      nodeElapsedSec: data.node_elapsed_sec ?? null,
-    })
-
-    if (data.status === 'success' || data.status === 'failed' || data.status === 'cancelled') return
-  }
-
-  throw new Error('pipeline polling timed out (1h)')
-}
 
 async function pollManagedStatus(apiBase: string, jobId: string, settings: AdminSettings, onProgress?: (p: PipelineRunProgress) => void): Promise<void> {
   const intervalMs = 2000
@@ -546,68 +417,6 @@ function normalizeLocalTranscriptResult(payload: LocalWhisperxTranscriptResponse
   }
 }
 
-export async function runLegacyPipeline(
-  apiBase: string,
-  sourceName: string,
-  settings: AdminSettings,
-  sourcePath?: string,
-  onProgress?: (p: PipelineRunProgress) => void,
-): Promise<PipelineApiRunResult> {
-  validateTranslationSettings(settings)
-  const runtimeSettings = compactRecord({
-    translation_provider: settings.translationProvider,
-    openai_api_key: settings.openaiApiKey.trim(),
-    gemini_api_key: settings.geminiApiKey.trim(),
-    openai_compatible_base_url: settings.openaiCompatibleBaseUrl.trim(),
-    hf_token: settings.hfToken.trim(),
-  })
-
-  const startRes = await fetch(`${apiBase}/api/pipeline/runs`, {
-    method: 'POST',
-    headers: {
-      ...buildAuthHeaders(settings),
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      workflow: 'drop_first_with_quality_v1',
-      source_name: sourceName,
-      initial_data: {
-        source_name: sourceName,
-        source_media_path: sourcePath,
-        max_cps: 99,
-        glossary_terms: [],
-        semantic_score_override: 0.9,
-        runtime_settings: runtimeSettings,
-        execution_mode: 'production',
-        allow_transcribe_fallback: false,
-      },
-    }),
-  })
-  if (!startRes.ok) {
-    throw new Error(`pipeline start failed: ${startRes.status}`)
-  }
-  const started = await startRes.json()
-  const runId = String(started.run_id)
-
-  await pollLegacyStatus(apiBase, runId, settings, onProgress)
-
-  const resultRes = await fetch(`${apiBase}/api/pipeline/runs/${runId}/result`, {
-    headers: buildAuthHeaders(settings),
-  })
-  if (!resultRes.ok) {
-    throw new Error(`pipeline result failed: ${resultRes.status}`)
-  }
-  const result: LegacyPipelineResult = await resultRes.json()
-
-  return {
-    blocks: toSubtitleBlocks(result),
-    traces: toTraces(result),
-    audit: toAudit(result),
-    debug: {
-      mode: 'legacy_pipeline',
-    },
-  }
-}
 
 async function runLocalTranscriptPipeline(
   _apiBase: string,

@@ -91,9 +91,7 @@ export function loadSessionSnapshotFromLocalStorage(): SessionExportData | null 
   }
 }
 
-export function clearLocalStorage(): void {
-  localStorage.removeItem(STORAGE_KEY)
-}
+
 
 // ─── JSON プロジェクトファイル ─────────────────────────────────────────────
 
