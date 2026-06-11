@@ -10,6 +10,8 @@ const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
 export interface SessionExportData {
   version: number
   savedAt: string
+  /** 書き出したアプリのバージョン（リリースビルドではタグ名、開発ビルドでは 'dev'）。障害報告の特定に使う */
+  appVersion?: string
   blocks: SubtitleBlock[]
   session?: {
     videoSource?: {
@@ -105,9 +107,13 @@ function timestampForFilename(iso: string): string {
 }
 
 export function exportProjectJson(data: SessionExportData | SubtitleBlock[]): void {
-  const payload: SessionExportData = Array.isArray(data)
+  const base: SessionExportData = Array.isArray(data)
     ? { version: 1, savedAt: new Date().toISOString(), blocks: data }
     : data
+  const payload: SessionExportData = {
+    ...base,
+    appVersion: (import.meta.env.VITE_APP_VERSION as string | undefined) || 'dev',
+  }
   const json = JSON.stringify(payload, null, 2)
   // セッションIDがあればワークログ(<sessionId>.jsonl)と名前で対応が取れる
   const suffix = payload.session?.workLog?.header.sessionId
