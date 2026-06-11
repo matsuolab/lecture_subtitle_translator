@@ -1,4 +1,4 @@
-import { Play } from 'lucide-react'
+import { Play, Save } from 'lucide-react'
 import type { PipelineReviewItem, PipelineRunResult } from '@/types/pipeline'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
@@ -8,6 +8,7 @@ interface ReportTabProps {
   pipelineRun: PipelineRunResult
   videoSourceName: string | null
   onRunPipeline: () => void
+  onSaveProjectJson: () => void
   maxCharsPerLine: number
 }
 
@@ -69,7 +70,7 @@ function formatDurationMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`
 }
 
-export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, maxCharsPerLine }: ReportTabProps) {
+export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, onSaveProjectJson, maxCharsPerLine }: ReportTabProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
   const isRunning = pipelineRun.status === 'queued' || pipelineRun.status === 'running'
@@ -188,11 +189,45 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, m
                 color: theme.textSecondary,
                 lineHeight: 1.6,
               }}>
-                失敗原因の確認に必要な処理ログと設定スナップショットはJSON保存に含まれます。管理者へ報告する場合は、上部ツールバーのJSON保存で現在のプロジェクトを出力してください。
+                失敗原因の確認に必要な処理ログと設定スナップショットはプロジェクトJSONに含まれます。下の「管理者へ報告用に保存」で出力し、管理者へ送ってください。
               </div>
             )}
           </div>
         )}
+
+        {/* 管理者への報告導線（常設） */}
+        <div style={{
+          marginTop: 10,
+          paddingTop: 8,
+          borderTop: `1px solid ${theme.panelBorder}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap',
+        }}>
+          <button
+            onClick={onSaveProjectJson}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 11,
+              fontWeight: 600,
+              padding: '6px 10px',
+              borderRadius: 6,
+              border: `1px solid ${theme.panelBorder}`,
+              background: theme.panelBg,
+              color: theme.textPrimary,
+              cursor: 'pointer',
+            }}
+          >
+            <Save size={11} />
+            管理者へ報告用に保存
+          </button>
+          <span style={{ fontSize: 10, color: theme.textMuted, lineHeight: 1.5 }}>
+            処理ログ・設定スナップショット入りのプロジェクトJSONを保存します。失敗時や出力がおかしい時は、このファイルを管理者へ送ってください。
+          </span>
+        </div>
       </div>
 
       <div style={{

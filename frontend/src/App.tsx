@@ -2547,6 +2547,7 @@ export default function App() {
                 pipelineRun={pipelineRun}
                 videoSourceName={videoSource?.name ?? null}
                 onRunPipeline={handleRunPipelineFromReport}
+                onSaveProjectJson={handleExportProjectJson}
                 maxCharsPerLine={adminSettings.enMaxCharsPerLine}
               />
             )}

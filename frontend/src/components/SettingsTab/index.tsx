@@ -41,6 +41,11 @@ type AiGatewayProbeItem = {
   message: string
 }
 
+type AiGatewayProbeGuidance = {
+  title: string
+  actions: string[]
+}
+
 type SettingsTabProps = {
   adminSettings: AdminSettings
   serviceCheck: ServiceCheckState
@@ -463,9 +468,73 @@ export function SettingsTab({
     onAdminSettingsChange({ textNormalizationRulesJson: formatted })
   }
 
+  function getAiGatewayProbeGuidance(item: AiGatewayProbeItem): AiGatewayProbeGuidance | null {
+    if (item.status !== 'error') return null
+    const message = item.message.toLowerCase()
+    const actions: string[] = []
+
+    if (item.name === 'Connection' || /failed to fetch|network|econnrefused|connection|models|http_?404/.test(message)) {
+      actions.push(isLocalOpenAiProvider
+        ? '接続設定の OpenAI互換 Base URL を確認してください。LM Studio は通常 http://127.0.0.1:1234/v1、Ollama は通常 http://127.0.0.1:11434/v1 です。'
+        : '接続設定のAIプロバイダとAPIキーを確認してください。')
+      actions.push('接続先サーバーが起動していて、/models エンドポイントを返せるか確認してください。')
+    }
+
+    if (/401|403|unauthorized|forbidden|api key|auth|permission/.test(message)) {
+      actions.push('接続設定のAPIキーを確認してください。OpenAI互換サーバーでキー不要の場合は空欄にしてください。')
+    }
+
+    if (/model|not found|404|does not exist|unknown/.test(message) && item.name !== 'Connection') {
+      actions.push('上級者向け設定 > モデル設定で、この用途に存在するモデルIDを指定してください。')
+    }
+
+    if (/embedding|embeddings/.test(message) || item.name === 'Embeddings') {
+      actions.push('Embedding を使わないローカルサーバーの場合は、セマンティックチェックをオフまたはログのみ運用にするか、/embeddings 対応モデルを指定してください。')
+    }
+
+    if (/vision|image|unsupported/.test(message) || item.name === 'Chat Vision') {
+      actions.push('PDF教材からの辞書作成を使う場合は、Vision対応モデルをPDF抽出Visionモデルに指定してください。使わない場合は通常の字幕生成には影響しません。')
+    }
+
+    if (/context_size_exceeded|context length|context size|maximum context/.test(message)) {
+      actions.push('LM Studio / ローカルサーバー側で読み込むモデルの context length を増やしてください。接続チェックが通っても本番プロンプトで不足することがあります。')
+    }
+
+    if (/response_format|max_completion_tokens|max_tokens|json/.test(message)) {
+      actions.push('このすぐ下の「API互換プロファイル」で API Compatibility Profile が接続先に合っているか確認してください。Auto が合わない場合は LM Studio / Ollama / User Profile を選びます。')
+    }
+
+    const uniqueActions = Array.from(new Set(actions))
+    return {
+      title: '確認する設定',
+      actions: uniqueActions.length > 0
+        ? uniqueActions
+        : ['接続設定のAIプロバイダ/APIキー/Base URL/API互換プロファイル、上級者向け設定のモデルIDを順に確認してください。'],
+    }
+  }
+
   return (
     <div className="h-full overflow-y-auto" style={{ padding: 14 }}>
       <Section title="接続設定" theme={theme}>
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>共有設定の読み込み</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button type="button" onClick={() => sharedSettingsImportRef.current?.click()} style={smallButtonStyle(theme)}>
+              共有用JSONを読み込む
+            </button>
+            <input
+              ref={sharedSettingsImportRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => void importSharedAdminSettings(event.target.files?.[0])}
+              style={{ display: 'none' }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            管理者から共有用JSONを受け取っている場合は、最初にここで読み込みます。読み込み後は下のAPIキー入力と接続チェックだけで使い始められます。
+          </div>
+        </FieldCard>
+
         <FieldCard theme={theme}>
           <ModeSelectField
             theme={theme}
@@ -525,7 +594,7 @@ export function SettingsTab({
             >
               {serviceCheck.status === 'checking' ? 'Checking...' : '接続テスト'}
             </button>
-            <span style={{ fontSize: 11, color: serviceCheckColor }}>
+            <span aria-live="polite" style={{ fontSize: 11, color: serviceCheckColor }}>
               {serviceCheck.message}
             </span>
           </div>
@@ -566,45 +635,28 @@ export function SettingsTab({
                 theme={theme}
                 label={t.settingsOpenAiBaseUrl}
                 value={adminSettings.openaiCompatibleBaseUrl}
-                placeholder={isLocalOpenAiProvider ? LOCAL_OPENAI_COMPAT_BASE_URL : t.settingsOpenAiBaseUrlPlaceholder}
+                placeholder={LOCAL_OPENAI_COMPAT_BASE_URL}
                 onChange={(value) => onAdminSettingsChange({ openaiCompatibleBaseUrl: value })}
               />
-              {isLocalOpenAiProvider && (
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    onClick={() => onAdminSettingsChange({ openaiCompatibleBaseUrl: LOCAL_OPENAI_COMPAT_BASE_URL })}
-                    style={{
-                      padding: '7px 10px',
-                      borderRadius: 8,
-                      border: `1px solid ${theme.panelBorder}`,
-                      background: theme.panelBg,
-                      color: theme.textPrimary,
-                      cursor: 'pointer',
-                      fontSize: 12,
-                      fontWeight: 600,
-                    }}
-                  >
-                    LM Studio
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onAdminSettingsChange({ openaiCompatibleBaseUrl: LOCAL_OLLAMA_OPENAI_COMPAT_BASE_URL })}
-                    style={{
-                      padding: '7px 10px',
-                      borderRadius: 8,
-                      border: `1px solid ${theme.panelBorder}`,
-                      background: theme.panelBg,
-                      color: theme.textPrimary,
-                      cursor: 'pointer',
-                      fontSize: 12,
-                      fontWeight: 600,
-                    }}
-                  >
-                    Ollama
-                  </button>
-                </div>
-              )}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => onAdminSettingsChange({ openaiCompatibleBaseUrl: LOCAL_OPENAI_COMPAT_BASE_URL })}
+                  style={smallButtonStyle(theme)}
+                >
+                  LM Studio
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAdminSettingsChange({ openaiCompatibleBaseUrl: LOCAL_OLLAMA_OPENAI_COMPAT_BASE_URL })}
+                  style={smallButtonStyle(theme)}
+                >
+                  Ollama
+                </button>
+              </div>
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                Base URL は /v1 まで含めます。接続チェックの Connection が失敗する場合は、まずこのURLとローカルサーバーの起動状態を確認してください。
+              </div>
             </>
           )}
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
@@ -630,35 +682,183 @@ export function SettingsTab({
             >
               {aiGatewayProbeRunning ? 'Checking...' : 'AI Gateway 接続チェック'}
             </button>
+            <span style={{ fontSize: 11, color: theme.textSecondary }}>
+              /models、Chat Text、Embeddings、Chat Vision を個別に確認します。
+            </span>
           </div>
+          <div aria-live="polite">
           {aiGatewayProbeItems.length > 0 && (
-            <div style={{ display: 'grid', gap: 6 }}>
+            <div style={{ display: 'grid', gap: 8 }}>
               {aiGatewayProbeItems.map(item => {
                 const color = item.status === 'success'
                   ? '#22c55e'
                   : item.status === 'error'
                     ? '#ef4444'
                     : theme.textSecondary
+                const guidance = getAiGatewayProbeGuidance(item)
                 return (
                   <div
                     key={item.name}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '92px 70px minmax(0, 1fr)',
-                      gap: 8,
-                      alignItems: 'center',
-                      fontSize: 11,
-                      color: theme.textSecondary,
+                      gap: 6,
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      border: `1px solid ${theme.panelBorder}`,
+                      background: theme.panelBg,
                     }}
                   >
-                    <span style={{ color: theme.textPrimary, fontWeight: 600 }}>{item.name}</span>
-                    <span style={{ color, fontWeight: 700 }}>{item.status}</span>
-                    <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{item.message}</span>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '92px 70px minmax(0, 1fr)',
+                        gap: 8,
+                        alignItems: 'center',
+                        fontSize: 11,
+                        color: theme.textSecondary,
+                      }}
+                    >
+                      <span style={{ color: theme.textPrimary, fontWeight: 600 }}>{item.name}</span>
+                      <span style={{ color, fontWeight: 700 }}>{item.status}</span>
+                      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{item.message}</span>
+                    </div>
+                    {guidance && (
+                      <div style={{ display: 'grid', gap: 4, fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+                        <div style={{ color: theme.textPrimary, fontWeight: 700 }}>{guidance.title}</div>
+                        {guidance.actions.map(action => (
+                          <div key={action}>- {action}</div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )
               })}
             </div>
           )}
+          </div>
+          <details style={{
+            border: `1px solid ${theme.panelBorder}`,
+            borderRadius: 8,
+            background: theme.panelBg,
+            padding: '10px 12px',
+          }}>
+            <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontSize: 12, fontWeight: 700 }}>
+              API互換プロファイル（接続チェックが失敗する時）
+            </summary>
+            <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6, marginTop: 10 }}>
+              OpenAI互換サーバーごとのAPI方言（パラメータ名・応答形式）と、モデルの能力差を吸収する設定です。AI Gateway 接続チェックが response_format / max_tokens 系のエラーで失敗する時だけ調整します。
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+              <ApiCompatibilityProfileSelect
+                theme={theme}
+                label="API Compatibility Profile"
+                value={adminSettings.apiCompatibilityProfilePreset}
+                onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfilePreset: value })}
+              />
+              <div style={{
+                padding: '8px 10px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.cardBg,
+                color: theme.textSecondary,
+                fontSize: 11,
+                lineHeight: 1.6,
+              }}>
+                <div style={{ color: theme.textPrimary, fontWeight: 700 }}>
+                  Resolved: {resolvedApiCompatibilityProfile
+                    ? `${resolvedApiCompatibilityProfile.id} (${resolvedApiCompatibilityProfile.label})`
+                    : 'User Profile JSON が不正です'}
+                </div>
+                {resolvedApiCompatibilityProfile && (
+                  <div>
+                    tokenLimitParam: {resolvedApiCompatibilityProfile.requestDialect.chat.tokenLimitParam}
+                    {' / '}
+                    responseFormat: {resolvedApiCompatibilityProfile.requestDialect.chat.responseFormat}
+                  </div>
+                )}
+                {adminSettings.apiCompatibilityProfilePreset === 'auto' && autoResolvedApiCompatibilityProfile && (
+                  <div>Auto は現在 {autoResolvedApiCompatibilityProfile.id} を使用します。</div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button type="button" onClick={duplicateResolvedApiCompatibilityProfile} style={smallButtonStyle(theme)}>
+                  Built-inをUser JSONへ複製
+                </button>
+                <button type="button" onClick={exportApiCompatibilityProfileJson} style={smallButtonStyle(theme)}>
+                  User JSONを出力
+                </button>
+                <button type="button" onClick={() => apiCompatibilityProfileImportRef.current?.click()} style={smallButtonStyle(theme)}>
+                  User JSONを読み込む
+                </button>
+                <input
+                  ref={apiCompatibilityProfileImportRef}
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(event) => void importApiCompatibilityProfileJson(event.target.files?.[0])}
+                  style={{ display: 'none' }}
+                />
+              </div>
+              <TextareaField
+                theme={theme}
+                label="API Compatibility User Profile JSON"
+                value={adminSettings.apiCompatibilityProfileJson}
+                placeholder="User Profile 選択時に使用。Built-inを複製して requestDialect を調整してください"
+                onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfileJson: value })}
+              />
+              <div style={{
+                fontSize: 11,
+                color: apiCompatibilityProfileValidation.ok ? '#22c55e' : '#ef4444',
+                lineHeight: 1.5,
+              }}>
+                {adminSettings.apiCompatibilityProfileJson.trim()
+                  ? apiCompatibilityProfileValidation.ok
+                    ? `User Profile JSON OK: ${apiCompatibilityProfileValidation.profile?.id ?? 'unknown'}`
+                    : `User Profile JSON error: ${apiCompatibilityProfileValidation.error ?? 'invalid profile'}`
+                  : 'User Profile JSON は空です。Built-inを複製して外部エディタで編集できます。'}
+              </div>
+              <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+                <ModelProfileSelect
+                  theme={theme}
+                  label="Chat Text プロファイル"
+                  value={adminSettings.chatTextProfilePreset}
+                  onChange={(value) => onAdminSettingsChange({ chatTextProfilePreset: value })}
+                />
+                <ModelProfileSelect
+                  theme={theme}
+                  label="Chat Vision プロファイル"
+                  value={adminSettings.chatVisionProfilePreset}
+                  onChange={(value) => onAdminSettingsChange({ chatVisionProfilePreset: value })}
+                />
+                <ModelProfileSelect
+                  theme={theme}
+                  label="Embedding プロファイル"
+                  value={adminSettings.embeddingProfilePreset}
+                  onChange={(value) => onAdminSettingsChange({ embeddingProfilePreset: value })}
+                />
+              </div>
+              <TextareaField
+                theme={theme}
+                label="Chat Text カスタムプロファイルJSON"
+                value={adminSettings.chatTextProfileJson}
+                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+                onChange={(value) => onAdminSettingsChange({ chatTextProfileJson: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="Chat Vision カスタムプロファイルJSON"
+                value={adminSettings.chatVisionProfileJson}
+                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+                onChange={(value) => onAdminSettingsChange({ chatVisionProfileJson: value })}
+              />
+              <TextareaField
+                theme={theme}
+                label="Embedding カスタムプロファイルJSON"
+                value={adminSettings.embeddingProfileJson}
+                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
+                onChange={(value) => onAdminSettingsChange({ embeddingProfileJson: value })}
+              />
+            </div>
+          </details>
         </FieldCard>
 
         <FieldCard theme={theme}>
@@ -788,20 +988,11 @@ export function SettingsTab({
             <button type="button" onClick={exportSharedAdminSettings} style={smallButtonStyle(theme)}>
               共有用JSONを出力
             </button>
-            <button type="button" onClick={() => sharedSettingsImportRef.current?.click()} style={smallButtonStyle(theme)}>
-              共有用JSONを読み込む
-            </button>
-            <input
-              ref={sharedSettingsImportRef}
-              type="file"
-              accept=".json,application/json"
-              onChange={(event) => void importSharedAdminSettings(event.target.files?.[0])}
-              style={{ display: 'none' }}
-            />
           </div>
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
             プロンプト、例文、モデル、プロファイル、閾値を共有します。OpenAI互換 Base URL は出力時に含めるか選択します。
             Service Auth Token、HuggingFace Token、OpenAI/Gemini APIキー、ワークログ保管場所は含めません。
+            配布されたJSONは、接続設定の「共有設定の読み込み」から読み込みます。
           </div>
         </FieldCard>
 
@@ -987,7 +1178,6 @@ export function SettingsTab({
             placeholder="Japanese"
             onChange={(value) => onAdminSettingsChange({ transcriptLanguageLabel: value })}
           />
-
           <details style={{
             border: `1px solid ${theme.panelBorder}`,
             borderRadius: 8,
@@ -995,117 +1185,9 @@ export function SettingsTab({
             padding: '10px 12px',
           }}>
             <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontSize: 12, fontWeight: 700 }}>
-              診断設定: API互換 / Profile JSON
+              言語プロファイルJSON（英日以外の言語構成）
             </summary>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
-              <ApiCompatibilityProfileSelect
-                theme={theme}
-                label="API Compatibility Profile"
-                value={adminSettings.apiCompatibilityProfilePreset}
-                onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfilePreset: value })}
-              />
-              <div style={{
-                padding: '8px 10px',
-                borderRadius: 8,
-                border: `1px solid ${theme.panelBorder}`,
-                background: theme.cardBg,
-                color: theme.textSecondary,
-                fontSize: 11,
-                lineHeight: 1.6,
-              }}>
-                <div style={{ color: theme.textPrimary, fontWeight: 700 }}>
-                  Resolved: {resolvedApiCompatibilityProfile
-                    ? `${resolvedApiCompatibilityProfile.id} (${resolvedApiCompatibilityProfile.label})`
-                    : 'User Profile JSON が不正です'}
-                </div>
-                {resolvedApiCompatibilityProfile && (
-                  <div>
-                    tokenLimitParam: {resolvedApiCompatibilityProfile.requestDialect.chat.tokenLimitParam}
-                    {' / '}
-                    responseFormat: {resolvedApiCompatibilityProfile.requestDialect.chat.responseFormat}
-                  </div>
-                )}
-                {adminSettings.apiCompatibilityProfilePreset === 'auto' && autoResolvedApiCompatibilityProfile && (
-                  <div>Auto は現在 {autoResolvedApiCompatibilityProfile.id} を使用します。</div>
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button type="button" onClick={duplicateResolvedApiCompatibilityProfile} style={smallButtonStyle(theme)}>
-                  Built-inをUser JSONへ複製
-                </button>
-                <button type="button" onClick={exportApiCompatibilityProfileJson} style={smallButtonStyle(theme)}>
-                  User JSONを出力
-                </button>
-                <button type="button" onClick={() => apiCompatibilityProfileImportRef.current?.click()} style={smallButtonStyle(theme)}>
-                  User JSONを読み込む
-                </button>
-                <input
-                  ref={apiCompatibilityProfileImportRef}
-                  type="file"
-                  accept=".json,application/json"
-                  onChange={(event) => void importApiCompatibilityProfileJson(event.target.files?.[0])}
-                  style={{ display: 'none' }}
-                />
-              </div>
-              <TextareaField
-                theme={theme}
-                label="API Compatibility User Profile JSON"
-                value={adminSettings.apiCompatibilityProfileJson}
-                placeholder="User Profile 選択時に使用。Built-inを複製して requestDialect を調整してください"
-                onChange={(value) => onAdminSettingsChange({ apiCompatibilityProfileJson: value })}
-              />
-              <div style={{
-                fontSize: 11,
-                color: apiCompatibilityProfileValidation.ok ? '#22c55e' : '#ef4444',
-                lineHeight: 1.5,
-              }}>
-                {adminSettings.apiCompatibilityProfileJson.trim()
-                  ? apiCompatibilityProfileValidation.ok
-                    ? `User Profile JSON OK: ${apiCompatibilityProfileValidation.profile?.id ?? 'unknown'}`
-                    : `User Profile JSON error: ${apiCompatibilityProfileValidation.error ?? 'invalid profile'}`
-                  : 'User Profile JSON は空です。Built-inを複製して外部エディタで編集できます。'}
-              </div>
-              <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-                <ModelProfileSelect
-                  theme={theme}
-                  label="Chat Text プロファイル"
-                  value={adminSettings.chatTextProfilePreset}
-                  onChange={(value) => onAdminSettingsChange({ chatTextProfilePreset: value })}
-                />
-                <ModelProfileSelect
-                  theme={theme}
-                  label="Chat Vision プロファイル"
-                  value={adminSettings.chatVisionProfilePreset}
-                  onChange={(value) => onAdminSettingsChange({ chatVisionProfilePreset: value })}
-                />
-                <ModelProfileSelect
-                  theme={theme}
-                  label="Embedding プロファイル"
-                  value={adminSettings.embeddingProfilePreset}
-                  onChange={(value) => onAdminSettingsChange({ embeddingProfilePreset: value })}
-                />
-              </div>
-              <TextareaField
-                theme={theme}
-                label="Chat Text カスタムプロファイルJSON"
-                value={adminSettings.chatTextProfileJson}
-                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
-                onChange={(value) => onAdminSettingsChange({ chatTextProfileJson: value })}
-              />
-              <TextareaField
-                theme={theme}
-                label="Chat Vision カスタムプロファイルJSON"
-                value={adminSettings.chatVisionProfileJson}
-                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
-                onChange={(value) => onAdminSettingsChange({ chatVisionProfileJson: value })}
-              />
-              <TextareaField
-                theme={theme}
-                label="Embedding カスタムプロファイルJSON"
-                value={adminSettings.embeddingProfileJson}
-                placeholder="空欄 = プリセットまたはモデルIDから自動推定"
-                onChange={(value) => onAdminSettingsChange({ embeddingProfileJson: value })}
-              />
               <TextareaField
                 theme={theme}
                 label="言語プロファイルJSON"
@@ -1113,6 +1195,9 @@ export function SettingsTab({
                 placeholder='{"subtitle":{"label":"English","script":"latin"},"transcript":{"label":"Japanese","script":"japanese"}}'
                 onChange={(value) => onAdminSettingsChange({ languageProfileConfigJson: value })}
               />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                上の言語ラベルより細かく、文字種（script）や文末パターンを指定します。既定の英日構成では空欄のままで構いません。
+              </div>
             </div>
           </details>
         </FieldCard>
@@ -1680,6 +1765,12 @@ export function SettingsTab({
                 placeholder='{"segments":["..."],"translations":["..."]}'
                 onChange={(value) => onAdminSettingsChange({ translationFewShotJson: value })}
               />
+              <div style={{ borderTop: `1px solid ${theme.panelBorder}`, paddingTop: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#ef4444' }}>完全上書き（注意）</div>
+                <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6, marginTop: 4 }}>
+                  以下の2欄はデフォルトプロンプトを完全に置き換えます。CPS・行長・行数・専門用語保持などの制約も自分で明示する必要があります。検証時以外は空欄のままにしてください。
+                </div>
+              </div>
               <TextareaField
                 theme={theme}
                 label={t.settingsCompressPromptOverride}
@@ -1709,12 +1800,12 @@ export function SettingsTab({
 function Section({ title, theme, children }: { title: string; theme: Theme; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 24 }}>
-      <div style={{
+      <h3 style={{
         fontSize: 11, fontWeight: 700, color: theme.textSecondary,
-        letterSpacing: '0.5px', marginBottom: 12,
+        letterSpacing: '0.5px', margin: '0 0 12px 0',
       }}>
         {title}
-      </div>
+      </h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {children}
       </div>
@@ -1767,7 +1858,7 @@ function FieldCard({ theme, children }: { theme: Theme; children: React.ReactNod
 function SettingsGroupLabel({ theme, title, hint }: { theme: Theme; title: string; hint?: string }) {
   return (
     <div style={{ marginTop: 4 }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>{title}</div>
+      <h4 style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary, margin: 0 }}>{title}</h4>
       {hint && (
         <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5, marginTop: 2 }}>{hint}</div>
       )}
