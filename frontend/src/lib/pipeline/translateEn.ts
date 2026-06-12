@@ -290,11 +290,25 @@ async function callOpenAICompatible(
       `translation response was not valid JSON with a translations array. content=${result.content.slice(0, 500)}`,
     )
   }
-  if (translations.length !== inputs.length) {
+  const coalesced = coalesceTranslations(translations, inputs.length)
+  if (!coalesced) {
     throw new TranslationRetryableError(`translation API returned ${translations.length} segments for ${inputs.length} inputs`)
   }
 
-  return translations.map((item) => normalizeSpaces(String(item)))
+  return coalesced.map((item) => normalizeSpaces(String(item)))
+}
+
+/**
+ * 翻訳件数と入力件数のずれをコード側で吸収する。
+ * 温度0ではリトライしても同じずれが決定的に再現するため、
+ * 1入力に複数翻訳が返るケース（モデルが勝手に分割する）は結合して採用する。
+ * 複数入力でのずれは対応関係が特定できないので null を返し、バッチ半割リトライに委ねる。
+ */
+function coalesceTranslations(translations: unknown[], inputCount: number): string[] | null {
+  if (!translations.every((item): item is string => typeof item === 'string')) return null
+  if (translations.length === inputCount) return translations
+  if (inputCount === 1 && translations.length > 1) return [translations.join(' ')]
+  return null
 }
 
 async function callContextGroupAllocation(
@@ -737,4 +751,5 @@ export const __testing = {
   buildTranslationUserPayload,
   buildContextGroupTranslationDrafts,
   buildContextGroupTranslationPayload,
+  coalesceTranslations,
 }

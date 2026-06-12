@@ -272,6 +272,24 @@ function parseUnits(payload: Record<string, unknown>): RawSemanticUnit[] {
 }
 
 /**
+ * LLM応答のユニットを「このバッチで依頼したセグメントに実在し、テキストが当該セグメントと
+ * 実際に重なるもの」だけに絞る。モデルが output_schema の例（source_segment_id: 1）を
+ * そのまま返す事故があり、放置すると講義全体のユニットが先頭セグメントへ集積して
+ * 数千文字の巨大ブロックになる（T7評価で実際に発生）。
+ */
+function filterUnitsToBatch(units: RawSemanticUnit[], segments: CorrectedSegmentLite[]): RawSemanticUnit[] {
+  const segmentsById = new Map(segments.map(segment => [segment.id, segment]))
+  return units.filter(unit => {
+    const segment = segmentsById.get(unit.sourceSegmentId)
+    if (!segment) return false
+    const source = normalizeTimingText(segment.correctedText || segment.text)
+    const unitText = normalizeTimingText(unit.jaText)
+    if (!source || !unitText) return false
+    return lcsLength(unitText, source) / unitText.length >= 0.6
+  })
+}
+
+/**
  * 各セグメントの LLM 分割カバレッジを計算。0.9 未満のセグメント ID を返す（呼出元が原文 fallback）。
  */
 function findUndercoveredSegments(segments: CorrectedSegmentLite[], units: RawSemanticUnit[]): Set<number> {
@@ -377,7 +395,7 @@ async function callSemanticSplitApi(
     }
   }
 
-  const units = parseUnits(parsed)
+  const units = filterUnitsToBatch(parseUnits(parsed), segments)
   return {
     units,
     undercoveredSegmentIds: findUndercoveredSegments(segments, units),
@@ -450,4 +468,5 @@ export async function semanticSplitJa(
 
 export const __testing = {
   buildSemanticSplitPrompt,
+  filterUnitsToBatch,
 }
