@@ -1,6 +1,6 @@
 [package]
 name = "subtitle-editor"
-version = "0.4.14"
+version = "1.0.0"
 description = "Subtitle Editor"
 authors = []
 license = "Apache-2.0"
