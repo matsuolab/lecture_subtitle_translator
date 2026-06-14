@@ -4,7 +4,7 @@ import type { EnBlock, JaBlock, ViolationCode } from './blockTypes'
 import { computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
 import { DEFAULT_TRANSLATION_FEW_SHOT_JSON, pickTranslateSystemPrompt, resolveTranslateModelId } from './prompts'
-import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
+import { loadLanguageProfileConfig, resolveTargetCharMatcher, type LanguageProfileConfig, type LanguageRoleProfile } from './languageProfileConfig'
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
@@ -54,22 +54,42 @@ class TranslationRetryableError extends Error {
   }
 }
 
-function looksUntranslated(source: string, translated: string): boolean {
+// 出力にターゲット言語の特徴文字がこの比率を下回ると「未翻訳（ソース言語のまま）」とみなす。
+const MIN_TARGET_CHAR_RATIO = 0.15
+// ラテン字幕（日本語→英語など）に CJK がこの比率以上混入していれば未翻訳と判定する既存セーフティネット。
+const LATIN_TARGET_CJK_LEAK_RATIO = 0.35
+
+function charRatio(text: string, matcher: RegExp | null): number {
+  if (!matcher) return 0
+  const nonSpace = [...text].filter((c) => c.trim())
+  if (nonSpace.length === 0) return 0
+  return (text.match(matcher) ?? []).length / nonSpace.length
+}
+
+/**
+ * バッチ翻訳結果がソース言語のまま（未翻訳）かどうかを、ターゲット言語プロファイルに基づき判定する。
+ * - 空 / ソースと同一 → 未翻訳
+ * - ターゲット言語の特徴文字が乏しい（< MIN_TARGET_CHAR_RATIO） → 未翻訳
+ * - ラテン字幕に CJK が混入（>= LATIN_TARGET_CJK_LEAK_RATIO） → 未翻訳（日本語→英語の取りこぼし対策）
+ * target.script === 'generic' かつ translatedCharPattern 未指定なら、同一文字列チェックのみで判定する。
+ */
+function looksUntranslated(source: string, translated: string, target: LanguageRoleProfile): boolean {
   const src = normalizeSpaces(source)
   const trl = normalizeSpaces(translated)
   if (!trl || trl === src) return true
   const nonSpace = [...trl].filter((c) => c.trim())
   if (nonSpace.length === 0) return true
-  const jaCount = (trl.match(JA_CHAR_RE) ?? []).length
-  return jaCount / nonSpace.length >= 0.35
+
+  const targetMatcher = resolveTargetCharMatcher(target)
+  if (targetMatcher && charRatio(trl, targetMatcher) < MIN_TARGET_CHAR_RATIO) return true
+  if (target.script === 'latin' && charRatio(trl, JA_CHAR_RE) >= LATIN_TARGET_CJK_LEAK_RATIO) return true
+  return false
 }
 
-function computeJaRatio(text: string): number {
-  const trl = normalizeSpaces(text)
-  const nonSpace = [...trl].filter((c) => c.trim())
-  if (nonSpace.length === 0) return 0
-  const jaCount = (trl.match(JA_CHAR_RE) ?? []).length
-  return Math.round((jaCount / nonSpace.length) * 100) / 100
+/** 診断用: 出力に含まれるターゲット言語特徴文字の比率（0〜1, 小数2桁）。 */
+function computeTargetCharRatio(text: string, target: LanguageRoleProfile): number {
+  const ratio = charRatio(normalizeSpaces(text), resolveTargetCharMatcher(target))
+  return Math.round(ratio * 100) / 100
 }
 
 function resolveApiConfig(settings: AdminSettings): {
@@ -575,7 +595,7 @@ async function retranslateBlockIndividually(
     }
 
     // 翻訳成功
-    if (!looksUntranslated(input.text, result.translation)) {
+    if (!looksUntranslated(input.text, result.translation, config.languages.subtitle)) {
       return {
         translation: result.translation,
         attempts: attempt,
@@ -584,8 +604,8 @@ async function retranslateBlockIndividually(
     }
 
     // まだ未翻訳: ratio を含めて理由を残してリトライ
-    const jaRatio = computeJaRatio(result.translation)
-    lastReason = `attempt_${attempt}_still_japanese (jaRatio=${jaRatio}, content_preview=${result.translation.slice(0, 80)})`
+    const targetRatio = computeTargetCharRatio(result.translation, config.languages.subtitle)
+    lastReason = `attempt_${attempt}_untranslated (targetCharRatio=${targetRatio}, content_preview=${result.translation.slice(0, 80)})`
   }
 
   return {
@@ -678,7 +698,7 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
   const untranslatedIndices: number[] = []
   for (let i = 0; i < blocks.length; i += 1) {
     const enRaw = translatedTexts[i] ?? ''
-    if (looksUntranslated(blocks[i].jaText, enRaw)) {
+    if (looksUntranslated(blocks[i].jaText, enRaw, config.languages.subtitle)) {
       untranslatedIndices.push(i)
     }
   }
@@ -747,7 +767,7 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
 
 export const __testing = {
   looksUntranslated,
-  computeJaRatio,
+  computeTargetCharRatio,
   buildTranslationUserPayload,
   buildContextGroupTranslationDrafts,
   buildContextGroupTranslationPayload,
