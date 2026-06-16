@@ -8,8 +8,16 @@ locals {
   }
 }
 
+# S3 バケット名は全AWSグローバルで一意である必要があるため、ランダムサフィックスを付与する。
+# OSS として配布し不特定多数の組織がそれぞれのアカウントへ展開する想定なので、
+# 利用者が名前を手当てしなくても衝突しないよう byte_length = 8（16桁hex / 2^64通り）で自動一意化する。
+# 詳細: docs/research/20260616_terraform_oss_s3_naming.md
+resource "random_id" "bucket" {
+  byte_length = 8
+}
+
 resource "aws_s3_bucket" "input" {
-  bucket = "${local.prefix}-input"
+  bucket = "${local.prefix}-input-${random_id.bucket.hex}"
   tags   = local.common_tags
 }
 
@@ -34,7 +42,7 @@ resource "aws_s3_bucket_cors_configuration" "input" {
 }
 
 resource "aws_s3_bucket" "result" {
-  bucket = "${local.prefix}-result"
+  bucket = "${local.prefix}-result-${random_id.bucket.hex}"
   tags   = local.common_tags
 }
 
