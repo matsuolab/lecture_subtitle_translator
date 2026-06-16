@@ -1,6 +1,6 @@
 locals {
-  prefix = "${var.project_name}-${var.environment}"
-  use_batch_custom_ami = trimspace(var.batch_custom_ami_id) != ""
+  prefix                       = "${var.project_name}-${var.environment}"
+  use_batch_custom_ami         = trimspace(var.batch_custom_ami_id) != ""
   batch_worker_image_reference = trimspace(var.batch_worker_image_reference) != "" ? var.batch_worker_image_reference : "${aws_ecr_repository.worker.repository_url}:latest"
   common_tags = {
     Project     = var.project_name
@@ -36,7 +36,7 @@ resource "aws_s3_bucket_cors_configuration" "input" {
       "http://tauri.localhost",
       "https://tauri.localhost",
     ]
-    expose_headers = ["ETag"]
+    expose_headers  = ["ETag"]
     max_age_seconds = 300
   }
 }
