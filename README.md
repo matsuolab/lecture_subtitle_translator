@@ -6,6 +6,17 @@
 
 > **詳しい使い方・設定・運用・内部動作は [📖 Wiki](https://github.com/matsuolab/lecture_subtitle_translator/wiki) にまとめています。** この README は概要と入口です。
 
+## 導入効果
+
+本ソフトでは、文字起こし、翻訳、字幕調整、SRT出力までを一つのアプリから扱い、翻訳担当者が翻訳修正から字幕編集まで一貫して担当できます。
+
+従来、複数の担当者・ツールに分かれていた字幕作成業務へ導入した結果、次の効果が示されました。
+
+- **作業時間の短縮**：担当者ヒアリングに基づく試算では、2時間講義1本あたり4.78時間（15.8%）削減
+- **品質面の改善**：担当者から、翻訳品質と字幕の読みやすさが向上したとの評価
+
+評価条件、システム処理費用、字幕品質、再現性の詳細は、Wikiの [評価と品質指標](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Evaluation) を参照してください。
+
 ---
 
 ## 📖 ドキュメント（Wiki）
@@ -21,6 +32,7 @@
 | 設定項目の意味（表示名↔キー↔既定値） | [上級設定リファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Settings-Reference) |
 | JSON・プロンプト設定の書式 | [設定ファイルリファレンス](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Config-Files-Reference) |
 | パイプラインが内部で何をしているか | [動作原理](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Pipeline-Behavior) |
+| 導入効果・字幕品質・再現性 | [評価と品質指標](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Evaluation) |
 | 手元のGPUで書きおこしを動かす | [ローカルWhisperXセットアップ](https://github.com/matsuolab/lecture_subtitle_translator/wiki/Local-WhisperX-Setup) |
 | AWSで書きおこしバックエンドを構築 | [AWS バックエンド設定マニュアル](https://github.com/matsuolab/lecture_subtitle_translator/wiki/AWS-Backend-Setup) |
 
