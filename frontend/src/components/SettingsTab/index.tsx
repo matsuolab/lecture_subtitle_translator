@@ -27,6 +27,12 @@ import {
   parseTextNormalizationConfig,
   validateTextNormalizationRulesJson,
 } from '@/lib/pipeline/textNormalization'
+import { loadLanguageProfileConfig } from '@/lib/pipeline/languageProfileConfig'
+import {
+  diffSubtitleQualityPreset,
+  resolveSubtitleQualityPreset,
+  type SubtitleQualityPreset,
+} from '@/lib/pipeline/subtitleQualityPresets'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { getWorkLogDir, isWorkLogPersistent, openWorkLogDir } from '@/lib/worklog/repository'
 import { isSupportedWhisperxLanguage, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
@@ -1246,6 +1252,12 @@ export function SettingsTab({
               </div>
             </div>
           </details>
+
+          <SubtitleQualityPresetPanel
+            theme={theme}
+            adminSettings={adminSettings}
+            onAdminSettingsChange={onAdminSettingsChange}
+          />
         </FieldCard>
 
         <SettingsGroupLabel
@@ -1839,6 +1851,94 @@ export function SettingsTab({
           {t.settingsStorageNotice}
         </div>
       </Section>
+    </div>
+  )
+}
+
+const PRESET_FIELD_LABELS: Record<keyof SubtitleQualityPreset, string> = {
+  enMaxCharsPerLine: '1行の最大文字数',
+  enMaxLines: '最大行数',
+  enMaxCps: '最大CPS（1秒あたり文字数）',
+  subtitleMinDurationSec: '最小表示時間（秒）',
+  pipelineSlowCps: '間延び判定CPS',
+  pipelineVerboseEnRatio: '冗長判定の文字数比',
+  pipelineOverCompressedRatio: '過圧縮判定の文字数比',
+  pipelineOverCompressedJaChars: '過圧縮判定の最小書きおこし文字数',
+}
+
+/**
+ * 現在の言語構成に対する推奨品質基準を提示し、明示操作で適用する。
+ *
+ * ラベル変更に連動して自動的に書き換えないのは、チームで調整済みの値を
+ * 黙って破壊しないため。差分を見せたうえで利用者に選ばせる。
+ */
+function SubtitleQualityPresetPanel({
+  theme,
+  adminSettings,
+  onAdminSettingsChange,
+}: {
+  theme: Theme
+  adminSettings: AdminSettings
+  onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
+}) {
+  const info = React.useMemo(
+    () => resolveSubtitleQualityPreset(loadLanguageProfileConfig(adminSettings)),
+    [adminSettings],
+  )
+  const diff = React.useMemo(
+    () => (info ? diffSubtitleQualityPreset(adminSettings, info.preset) : []),
+    [adminSettings, info],
+  )
+
+  if (!info) {
+    return (
+      <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+        この言語構成には推奨の品質基準がありません。下の「字幕品質・修復」で行長・CPS を手動で設定してください。
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      border: `1px solid ${theme.panelBorder}`,
+      borderRadius: 8,
+      background: theme.panelBg,
+      padding: '10px 12px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>
+        推奨の品質基準（{info.label}）
+      </div>
+      {diff.length === 0 ? (
+        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+          現在の設定は推奨値と一致しています。
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            字幕言語に合わせた行長・CPS・文字数比の推奨値です。適用すると次の {diff.length} 項目が変わります。
+            公開ガイドラインの英日比から導出した出発点なので、実際の講義動画で確認して調整してください。
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: theme.textSecondary, lineHeight: 1.7 }}>
+            {diff.map(entry => (
+              <li key={entry.key}>
+                {PRESET_FIELD_LABELS[entry.key]}: {entry.current} → <strong style={{ color: theme.textPrimary }}>{entry.next}</strong>
+              </li>
+            ))}
+          </ul>
+          <div>
+            <button
+              type="button"
+              style={smallButtonStyle(theme)}
+              onClick={() => onAdminSettingsChange({ ...info.preset })}
+            >
+              推奨値を適用
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }
