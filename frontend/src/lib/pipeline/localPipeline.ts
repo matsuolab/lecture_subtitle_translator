@@ -5,6 +5,7 @@ import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } fr
 import { resetLlmActivity } from '@/lib/aiGateway/llmActivity'
 
 import type { PipelineThresholds } from './blockTypes'
+import { loadLanguageProfileConfig } from './languageProfileConfig'
 import { runPhase1 } from './phase1'
 import { runPhase2 } from './phase2'
 import { runPhase3 } from './phase3'
@@ -166,7 +167,10 @@ function buildSnapshotDetailItems(items: unknown[], kind: string): Record<string
 }
 
 function buildPipelineThresholds(settings: AdminSettings): PipelineThresholds {
+  const languages = loadLanguageProfileConfig(settings)
   return {
+    subtitleScript: languages.subtitle.script,
+    transcriptScript: languages.transcript.script,
     shortDurationSec: settings.pipelineShortDurationSec,
     longDurationSec: settings.pipelineLongDurationSec,
     mergedLongDurationSec: settings.pipelineMergedLongDurationSec,

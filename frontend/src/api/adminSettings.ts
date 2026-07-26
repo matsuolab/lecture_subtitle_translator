@@ -1,5 +1,4 @@
 import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
-import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
 import {
   DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,
@@ -102,7 +101,10 @@ export function getDefaultAdminSettings(): AdminSettings {
     transcribeLanguageCode: DEFAULT_WHISPERX_LANGUAGE,
     subtitleLanguageLabel: 'English',
     transcriptLanguageLabel: 'Japanese',
-    languageProfileConfigJson: DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON,
+    // 既定は空欄。言語ラベルから script・作法パターンを導出できるため、英日構成では不要。
+    // 事前充填すると「ラベルだけ入れ替えた」利用者の設定に別言語の作法が残り続ける
+    // （languageProfileConfig 側の stale 判定で無害化しているが、UI 上も空欄が正しい状態）。
+    languageProfileConfigJson: '',
     textNormalizationEnabled: true,
     textNormalizationRulesJson: DEFAULT_TEXT_NORMALIZATION_RULES_JSON,
     correctionAdditionalInstructions: DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,

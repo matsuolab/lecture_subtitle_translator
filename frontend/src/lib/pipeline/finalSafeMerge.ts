@@ -3,7 +3,7 @@ import { DEFAULT_PIPELINE_THRESHOLDS, type EnBlock, type PipelineThresholds, typ
 import { reindexContextGroups } from './contextGrouping'
 import { formatLines } from './formatLines'
 import { classifyViolation, computeMetrics } from './metrics'
-import { normalizeSpaces } from './textUtils'
+import { joinSubtitleParts, unwrapSubtitleLines } from './textUtils'
 
 export interface FinalSafeMergeEntry {
   leftId: number
@@ -36,6 +36,9 @@ function finiteOrDefault(value: number, fallback: number): number {
 
 function normalizeThresholds(thresholds: PipelineThresholds): PipelineThresholds {
   return {
+    // 数値以外のフィールド（言語 script など）は素通しする。
+    // 列挙し忘れると結合・行分割の言語作法が黙って既定へ落ちるため、先にスプレッドする。
+    ...thresholds,
     shortDurationSec: finiteOrDefault(thresholds.shortDurationSec, DEFAULT_PIPELINE_THRESHOLDS.shortDurationSec),
     longDurationSec: finiteOrDefault(thresholds.longDurationSec, DEFAULT_PIPELINE_THRESHOLDS.longDurationSec),
     mergedLongDurationSec: finiteOrDefault(thresholds.mergedLongDurationSec, DEFAULT_PIPELINE_THRESHOLDS.mergedLongDurationSec),
@@ -66,10 +69,19 @@ function sameContextGroup(left: EnBlock, right: EnBlock): boolean {
   return Boolean(left.contextGroupId && right.contextGroupId && left.contextGroupId === right.contextGroupId)
 }
 
-function mergeCandidateText(left: EnBlock, right: EnBlock): { enText: string; jaText: string } {
+function mergeCandidateText(
+  left: EnBlock,
+  right: EnBlock,
+  thresholds: PipelineThresholds,
+): { enText: string; jaText: string } {
+  const subtitleScript = thresholds.subtitleScript ?? 'latin'
+  const transcriptScript = thresholds.transcriptScript ?? 'latin'
   return {
-    enText: normalizeSpaces(`${left.enText.replace(/\n/g, ' ')} ${right.enText.replace(/\n/g, ' ')}`),
-    jaText: normalizeSpaces(`${left.jaText} ${right.jaText}`),
+    enText: joinSubtitleParts(
+      [unwrapSubtitleLines(left.enText, subtitleScript), unwrapSubtitleLines(right.enText, subtitleScript)],
+      subtitleScript,
+    ),
+    jaText: joinSubtitleParts([left.jaText, right.jaText], transcriptScript),
   }
 }
 
@@ -100,7 +112,9 @@ function appendFinalSafeMergeAttempt(
   changed: boolean,
   after: EnBlock | undefined,
   rationale: string,
+  thresholds: PipelineThresholds,
 ): PipelineCorrectionAttemptSummary[] {
+  const before = mergeCandidateText(block, pair, thresholds)
   const attempt: PipelineCorrectionAttemptSummary = {
     strategy: 'final_safe_merge',
     changed,
@@ -108,8 +122,8 @@ function appendFinalSafeMergeAttempt(
     afterChars: after?.enChars ?? block.enChars + pair.enChars,
     beforeViolation: `${block.violation},${pair.violation}`,
     afterViolation: after?.violation ?? block.violation,
-    beforeTranscriptText: normalizeSpaces(`${block.jaText} ${pair.jaText}`),
-    beforeSubtitleText: normalizeSpaces(`${block.enText.replace(/\n/g, ' ')} ${pair.enText.replace(/\n/g, ' ')}`),
+    beforeTranscriptText: before.jaText,
+    beforeSubtitleText: before.enText,
     afterTranscriptText: after?.jaText,
     afterSubtitleText: after?.enText,
     rationale,
@@ -147,7 +161,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
     return { reason: `duration ${duration.toFixed(2)}s > ${thresholds.mergedLongDurationSec.toFixed(2)}s` }
   }
 
-  const mergedText = mergeCandidateText(left, right)
+  const mergedText = mergeCandidateText(left, right, thresholds)
   const expectedJaLength = compactLength(left.jaText) + compactLength(right.jaText)
   if (compactLength(mergedText.jaText) < expectedJaLength) {
     return { reason: 'transcript coverage would shrink' }
@@ -192,6 +206,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
       true,
       formatted,
       `deterministic same-context final merge; gapSec=${gap.toFixed(2)}`,
+      thresholds,
     ),
   }
   return { block }

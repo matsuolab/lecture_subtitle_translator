@@ -3,7 +3,7 @@ import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
 import type { EnBlock, PipelineThresholds } from './blockTypes'
 import { classifyViolation, computeMetrics } from './metrics'
 import { formatLines } from './formatLines'
-import { normalizeSpaces } from './textUtils'
+import { joinSubtitleParts, unwrapSubtitleLines } from './textUtils'
 import { resolveAiConnection, requireChatModelForProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { llmCallWithMeta } from './llmCallWithMeta'
@@ -13,6 +13,7 @@ import {
   hasSentenceEnd,
   loadLanguageProfileConfig,
   type LanguageProfileConfig,
+  type LanguageScript,
 } from './languageProfileConfig'
 
 type MergeDecisionKind = 'merge_prev' | 'merge_next' | 'keep'
@@ -32,6 +33,22 @@ const MAX_MERGED_DURATION_SEC = 12
 
 function compactText(text: string): string {
   return text.replace(/\s/g, '')
+}
+
+/**
+ * 「この長さ以下なら文脈依存の断片かもしれない」と見なす字幕の文字数上限。
+ *
+ * ラテン字幕の 55 文字は従来からの実測値。日本語のような表意文字系は 1 文字あたりの情報量が
+ * 大きく、同じ内容がおよそ半分以下の文字数になるため、同じ 55 を当てると「ほぼ全ての正常な
+ * 日本語字幕」が断片候補に入ってしまう（＝過剰マージ）。文字数比から 24 文字を既定とする。
+ *
+ * TODO(Phase2): 行長・CPS の言語別プリセットと合わせて実データで再調整する。
+ */
+const LATIN_FRAGMENT_MAX_CHARS = 55
+const IDEOGRAPHIC_FRAGMENT_MAX_CHARS = 24
+
+function fragmentMaxChars(subtitle: LanguageProfileConfig['subtitle']): number {
+  return subtitle.script === 'japanese' ? IDEOGRAPHIC_FRAGMENT_MAX_CHARS : LATIN_FRAGMENT_MAX_CHARS
 }
 
 function countJapaneseChars(text: string): number {
@@ -61,16 +78,14 @@ function endsWithTranscriptContinuation(text: string, config: LanguageProfileCon
 function isContextDependentSubtitle(text: string, config: LanguageProfileConfig): boolean {
   const normalized = text.trim().replace(/\s+/g, ' ')
   if (hasFragmentStart(normalized, config.subtitle)) return true
-  if (config.subtitle.script === 'latin') {
-    return !hasSentenceEnd(normalized, config.subtitle) && compactText(normalized).length <= 55
-  }
-  return !hasSentenceEnd(normalized, config.subtitle) && compactText(normalized).length <= 55
+  return !hasSentenceEnd(normalized, config.subtitle)
+    && compactText(normalized).length <= fragmentMaxChars(config.subtitle)
 }
 
 function isContextMergeCandidate(block: EnBlock, config: LanguageProfileConfig): boolean {
   const en = block.enText.trim().replace(/\s+/g, ' ')
   if (compactText(en).length === 0) return false
-  if (compactText(en).length > 55) return false
+  if (compactText(en).length > fragmentMaxChars(config.subtitle)) return false
   return isContextDependentSubtitle(en, config) || endsWithTranscriptContinuation(block.jaText, config)
 }
 
@@ -147,13 +162,14 @@ function normalizeDecisionRoles(
   transcriptCandidate: string,
   config: LanguageProfileConfig,
 ): { subtitleText: string; transcriptText: string } {
-  const subtitleText = sanitizeMergedSubtitle(subtitleCandidate)
-  const transcriptText = normalizeSpaces(transcriptCandidate)
+  const subtitleText = sanitizeMergedSubtitle(subtitleCandidate, config.subtitle.script)
+  const transcriptText = unwrapSubtitleLines(transcriptCandidate, config.transcript.script)
 
   if (shouldSwapConfiguredRoles(subtitleText, transcriptText, config)) {
+    // ロールが入れ替わっていた場合、各テキストは「本来のロールの言語」で整形し直す。
     return {
-      subtitleText: sanitizeMergedSubtitle(transcriptText),
-      transcriptText: normalizeSpaces(subtitleText),
+      subtitleText: sanitizeMergedSubtitle(transcriptText, config.subtitle.script),
+      transcriptText: unwrapSubtitleLines(subtitleText, config.transcript.script),
     }
   }
 
@@ -214,9 +230,9 @@ async function decideContextMerge(
         'Do not include line breaks in subtitle_text. Keep the merged subtitle_text compact enough for two subtitle lines. ' +
         'Respond only with JSON: {"decision":"merge_prev|merge_next|keep","subtitle_text":"...","transcript_text":"...","rationale":"..."}',
       userContent: JSON.stringify({
-        previous: prev ? blockForPrompt(prev) : null,
-        current: blockForPrompt(current),
-        next: next ? blockForPrompt(next) : null,
+        previous: prev ? blockForPrompt(prev, config.subtitle.script) : null,
+        current: blockForPrompt(current, config.subtitle.script),
+        next: next ? blockForPrompt(next, config.subtitle.script) : null,
       }, null, 2),
       nodeName: 'context_merge',
     },
@@ -234,25 +250,33 @@ async function decideContextMerge(
   }
 }
 
-function blockForPrompt(block: EnBlock) {
+function blockForPrompt(block: EnBlock, subtitleScript: LanguageScript) {
   return {
     id: block.id,
     start: block.start,
     end: block.end,
-    subtitle_text: block.enText.replace(/\n/g, ' '),
+    subtitle_text: unwrapSubtitleLines(block.enText, subtitleScript),
     transcript_text: block.jaText,
   }
 }
 
-function mergeTextFallback(host: EnBlock, fragment: EnBlock): { subtitleText: string; transcriptText: string } {
+function mergeTextFallback(
+  host: EnBlock,
+  fragment: EnBlock,
+  config: LanguageProfileConfig,
+): { subtitleText: string; transcriptText: string } {
+  const subtitleScript = config.subtitle.script
   return {
-    subtitleText: sanitizeMergedSubtitle(`${host.enText.replace(/\n/g, ' ')} ${fragment.enText.replace(/\n/g, ' ')}`),
-    transcriptText: normalizeSpaces(`${host.jaText}${fragment.jaText}`),
+    subtitleText: joinSubtitleParts(
+      [unwrapSubtitleLines(host.enText, subtitleScript), unwrapSubtitleLines(fragment.enText, subtitleScript)],
+      subtitleScript,
+    ),
+    transcriptText: joinSubtitleParts([host.jaText, fragment.jaText], config.transcript.script),
   }
 }
 
-function sanitizeMergedSubtitle(text: string): string {
-  return normalizeSpaces(text.replace(/\n+/g, ' '))
+function sanitizeMergedSubtitle(text: string, script: LanguageScript): string {
+  return unwrapSubtitleLines(text, script)
 }
 
 function countLines(text: string): number {
@@ -326,7 +350,7 @@ function buildMergedBlock(
   rationale: string,
 ): { ok: true; block: EnBlock } | { ok: false; warning: string } {
   const config = loadLanguageProfileConfig(settings)
-  const fallback = mergeTextFallback(host, fragment)
+  const fallback = mergeTextFallback(host, fragment, config)
   const normalized = normalizeDecisionRoles(
     subtitleText || fallback.subtitleText,
     transcriptText || fallback.transcriptText,
@@ -624,4 +648,10 @@ export async function mergeContextFragments(
   }
 
   return result
+}
+
+export const __testing = {
+  fragmentMaxChars,
+  isContextDependentSubtitle,
+  isContextMergeCandidate,
 }

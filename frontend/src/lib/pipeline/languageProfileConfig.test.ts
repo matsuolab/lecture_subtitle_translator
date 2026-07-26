@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { AdminSettings } from '@/types/adminSettings'
 import {
   DEFAULT_LANGUAGE_PROFILE_CONFIG,
+  DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON,
+  hasContinuationEnd,
+  hasFragmentStart,
+  hasSentenceEnd,
   loadLanguageProfileConfig,
   resolveTargetCharMatcher,
 } from './languageProfileConfig'
@@ -76,6 +80,85 @@ describe('loadLanguageProfileConfig — 既知ラベルは古い JSON の矛盾 
     )
     expect(config.subtitle.script).toBe('japanese')
     expect(config.transcript.script).toBe('latin')
+  })
+
+  // script だけでなく作法パターンもラベルへ追従しなければならない。
+  // 本番既定は languageProfileConfigJson に英日構成が「事前充填」されているため、
+  // ラベルだけ入れ替えた利用者は必ずこのケースを踏む（#en-ja Phase0）。
+  it('ラベルを英→日へ入れ替えたら作法パターンもラベル側へ追従する', () => {
+    const config = loadLanguageProfileConfig(
+      makeSettings({
+        subtitleLanguageLabel: 'Japanese',
+        transcriptLanguageLabel: 'English',
+        languageProfileConfigJson: DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON,
+      }),
+    )
+    // 字幕=日本語: 句点で文末判定できないと contextMergeFragments が正常字幕を断片扱いする
+    expect(config.subtitle.script).toBe('japanese')
+    expect(config.subtitle.sentenceEndPattern).toBe('[。！？!?]$')
+    expect(config.subtitle.continuationEndPattern).toBe('[、,]$')
+    // 英語専用の断片開始パターン（^[a-z] / This・That…）を日本語字幕へ持ち込まない
+    expect(config.subtitle.fragmentStartPattern).toBeUndefined()
+    // 書きおこし=英語
+    expect(config.transcript.script).toBe('latin')
+    expect(config.transcript.sentenceEndPattern).toBe('[.!?]$')
+    expect(config.transcript.continuationEndPattern).toBe('[,;:]$')
+  })
+
+  it('JSON の label と有効ラベルが一致する場合は JSON の明示パターンを尊重する', () => {
+    // 「日本語字幕向けに作法を自分で調整した」ケース。stale ではないので捨ててはいけない。
+    const customJson = JSON.stringify({
+      subtitle: { label: 'Japanese', script: 'japanese', sentenceEndPattern: '[。]$' },
+      transcript: { label: 'English', script: 'latin' },
+    })
+    const config = loadLanguageProfileConfig(
+      makeSettings({
+        subtitleLanguageLabel: 'Japanese',
+        transcriptLanguageLabel: 'English',
+        languageProfileConfigJson: customJson,
+      }),
+    )
+    expect(config.subtitle.sentenceEndPattern).toBe('[。]$')
+  })
+
+  it('JSON に label が無い場合は明示指定として扱う（ラベル未記載の手書きJSON救済）', () => {
+    const noLabelJson = JSON.stringify({
+      subtitle: { sentenceEndPattern: '[。]$' },
+    })
+    const config = loadLanguageProfileConfig(
+      makeSettings({ subtitleLanguageLabel: 'Japanese', languageProfileConfigJson: noLabelJson }),
+    )
+    expect(config.subtitle.sentenceEndPattern).toBe('[。]$')
+  })
+})
+
+describe('作法パターンは大文字小文字を区別する', () => {
+  const subtitle = DEFAULT_LANGUAGE_PROFILE_CONFIG.subtitle
+
+  // 'i' フラグを固定で付けていた時期は `^[a-z]` が大文字にもマッチし、英字で始まる
+  // 英語字幕が事実上すべて断片判定されていた（過剰な文脈マージの原因）。
+  it('小文字始まりだけを断片開始として扱う', () => {
+    expect(hasFragmentStart('and then we apply softmax.', subtitle)).toBe(true)
+    expect(hasFragmentStart('We compute the gradient.', subtitle)).toBe(false)
+    expect(hasFragmentStart('Gradients flow backward.', subtitle)).toBe(false)
+  })
+
+  it('先頭が既知の文脈依存語なら大文字始まりでも断片開始として扱う', () => {
+    expect(hasFragmentStart('This is the same as before.', subtitle)).toBe(true)
+    expect(hasFragmentStart('These are the weights.', subtitle)).toBe(true)
+    expect(hasFragmentStart('Using this rule, we get...', subtitle)).toBe(true)
+  })
+
+  it('文末・継続パターンは記号のみなのでフラグ変更の影響を受けない', () => {
+    expect(hasSentenceEnd('We compute the gradient.', subtitle)).toBe(true)
+    expect(hasSentenceEnd('We compute the gradient', subtitle)).toBe(false)
+    expect(hasContinuationEnd('first we compute the loss,', subtitle)).toBe(true)
+  })
+
+  it('日本語字幕の文末判定も従来どおり動く', () => {
+    const jaSubtitle = { label: 'Japanese', script: 'japanese' as const, sentenceEndPattern: '[。！？!?]$' }
+    expect(hasSentenceEnd('これは誤差逆伝播法です。', jaSubtitle)).toBe(true)
+    expect(hasSentenceEnd('これは誤差逆伝播法です', jaSubtitle)).toBe(false)
   })
 })
 

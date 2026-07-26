@@ -7,7 +7,7 @@ import {
 } from './blockTypes'
 import { classifyViolation, computeMetrics } from './metrics'
 import { countCpsChars } from '../subtitleMetrics'
-import { normalizeSpaces } from './textUtils'
+import { joinSubtitleParts, unwrapSubtitleLines } from './textUtils'
 
 export type CpsReliefStrategy = 'retime_only' | 'split_evenly'
 export type CpsReliefStatus = 'applied' | 'skipped'
@@ -44,6 +44,9 @@ function finiteOrDefault(value: number, fallback: number): number {
 
 function normalizeThresholds(thresholds: PipelineThresholds): PipelineThresholds {
   return {
+    // 数値以外のフィールド（言語 script など）は素通しする。
+    // 列挙し忘れると結合・行分割の言語作法が黙って既定へ落ちるため、先にスプレッドする。
+    ...thresholds,
     shortDurationSec: finiteOrDefault(thresholds.shortDurationSec, DEFAULT_PIPELINE_THRESHOLDS.shortDurationSec),
     longDurationSec: finiteOrDefault(thresholds.longDurationSec, DEFAULT_PIPELINE_THRESHOLDS.longDurationSec),
     mergedLongDurationSec: finiteOrDefault(thresholds.mergedLongDurationSec, DEFAULT_PIPELINE_THRESHOLDS.mergedLongDurationSec),
@@ -245,7 +248,11 @@ function findBestSplit(combined: string, maxLineLen: number): SplitChoice | null
 }
 
 function trySplitEvenly(left: EnBlock, right: EnBlock, thresholds: PipelineThresholds): PairCandidate | null {
-  const combined = normalizeSpaces(`${left.enText.replace(/\n/g, ' ')} ${right.enText.replace(/\n/g, ' ')}`)
+  const subtitleScript = thresholds.subtitleScript ?? 'latin'
+  const combined = joinSubtitleParts(
+    [unwrapSubtitleLines(left.enText, subtitleScript), unwrapSubtitleLines(right.enText, subtitleScript)],
+    subtitleScript,
+  )
   const totalDur = right.end - left.start
   const gap = gapSec(left, right)
   if (totalDur <= 0) return null

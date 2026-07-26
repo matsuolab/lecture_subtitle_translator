@@ -2,7 +2,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
-import { loadLanguageProfileConfig } from '../../languageProfileConfig'
+import { loadLanguageProfileConfig, type LanguageScript } from '../../languageProfileConfig'
 import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
 import { requireChatModelForProvider } from '../../aiProvider'
@@ -87,6 +87,22 @@ function isBadEnglishUnit(text: string): boolean {
   if (normalized.replace(/\s/g, '').length < 8) return true
   if (/^[a-z]/.test(normalized)) return true
   return /^(This|That|It|These|There is\.?|There are\.?|In that case,?|In the case of|Each one|Means)\.?$/i.test(normalized)
+}
+
+/**
+ * 「単独の字幕単位として成立しないテキストか」を、そのテキストの言語で判定する。
+ *
+ * この判定はロール（書きおこし／字幕）ではなく **言語** に依存する。
+ * 既定構成（書きおこし=日本語 / 字幕=英語）では、従来の
+ * isBadJapaneseUnit(unit) / isBadEnglishUnit(translation) と同じ組み合わせになる。
+ * 英→日構成ではそれぞれ入れ替わり、短い日本語字幕が英語基準（8文字未満）で
+ * 誤って却下される問題を防ぐ。
+ */
+function isBadUnitForScript(text: string, script: LanguageScript): boolean {
+  if (script === 'japanese') return isBadJapaneseUnit(text)
+  if (script === 'latin') return isBadEnglishUnit(text)
+  // generic: 言語固有の作法が不明なため、極端に短いものだけ却下する。
+  return normalizeSpaces(text).replace(/\s/g, '').length < 6
 }
 
 function confidenceOf(unit: SplitUnit): number {
@@ -366,9 +382,13 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, 'split_block: rejected low-confidence split unit')
     }
 
-    const badJa = cleanUnits.find(unit => isBadJapaneseUnit(unit.text))
-    if (badJa) {
-      return buildFailurePatch(block, `split_block: rejected incomplete or too-short Japanese unit: ${badJa.text}`)
+    const languages = loadLanguageProfileConfig(settings)
+    const badSource = cleanUnits.find(unit => isBadUnitForScript(unit.text, languages.transcript.script))
+    if (badSource) {
+      return buildFailurePatch(
+        block,
+        `split_block: rejected incomplete or too-short ${languages.transcript.label} unit: ${badSource.text}`,
+      )
     }
 
     const translatedResults = await Promise.all(cleanUnits.map(unit => translateSingle(unit.text, settings)))
@@ -377,9 +397,12 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, `split_block: translation API failed: ${failedTranslation.errorMessage}`)
     }
     const translated = translatedResults.map(r => r.text)
-    const badEn = translated.find(en => isBadEnglishUnit(en))
-    if (badEn) {
-      return buildFailurePatch(block, `split_block: rejected fragment-like English unit: ${badEn}`)
+    const badSubtitle = translated.find(text => isBadUnitForScript(text, languages.subtitle.script))
+    if (badSubtitle) {
+      return buildFailurePatch(
+        block,
+        `split_block: rejected fragment-like ${languages.subtitle.label} unit: ${badSubtitle}`,
+      )
     }
 
     const totalDurationMs = Math.round((block.end - block.start) * 1000)
