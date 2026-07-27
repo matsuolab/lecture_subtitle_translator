@@ -82,14 +82,41 @@ export function loadSessionSnapshotFromLocalStorage(): SessionExportData | null 
         transcript: b.transcript ?? target ?? japanese ?? '',
       }
     }) as SubtitleBlock[]
+    const session = parsed.session as SessionExportData['session'] | undefined
     return {
       version: Number(parsed.version ?? 2),
       savedAt: String(parsed.savedAt ?? new Date(0).toISOString()),
       blocks,
-      session: parsed.session,
+      session: session
+        ? { ...session, pipelineRun: reconcileRestoredPipelineRun(session.pipelineRun) }
+        : session,
     }
   } catch {
     return null
+  }
+}
+
+/**
+ * 復元した pipelineRun の状態を、新しい画面プロセスの現実に合わせて整合させる。
+ *
+ * ローカルパイプラインは画面プロセス内で動くため、アプリを閉じる・リロードすると
+ * 実行は必ず失われる。ところが localStorage には status='running' のまま保存されるため、
+ * そのまま復元すると「実行中」の表示が永久に残り、ユーザーが復帰できなくなる
+ * （実際にこの状態に陥った事例あり）。
+ *
+ * したがって復元時点で 'running' / 'queued' は 'cancelled' に落とす。異常終了ではないので
+ * 'error' にはしない。履歴 (pipelineHistory) は過去の記録なので変換しない。
+ */
+export function reconcileRestoredPipelineRun(
+  run: PipelineRunResult | undefined,
+): PipelineRunResult | undefined {
+  if (!run) return run
+  if (run.status !== 'running' && run.status !== 'queued') return run
+  return {
+    ...run,
+    status: 'cancelled',
+    step: 'done',
+    message: '前回の実行はアプリの終了またはリロードにより中断されました',
   }
 }
 
