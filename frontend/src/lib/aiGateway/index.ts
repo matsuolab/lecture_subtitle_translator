@@ -16,7 +16,9 @@ export function createAiGateway(settings: AdminSettings, options: AiGatewayOptio
 }
 
 export type { AiGatewayOptions } from './connection'
-export type { ChatTextContent, ChatTextMessage, ChatTextOptions, ChatTextResult } from './chatText'
+export type { ChatTextContent, ChatTextMessage, ChatTextOptions, ChatTextResult, LlmErrorCode } from './chatText'
 export type { ChatVisionOptions } from './chatVision'
 export type { EmbeddingsOptions } from './embeddings'
 export type { AiGatewayProbeName, AiGatewayProbeResult, AiGatewayProbeStatus } from './probe'
+export type { JsonSchemaSpec } from './apiCompatibilityProfile'
+export { buildLlmFailureCode } from './errors'
