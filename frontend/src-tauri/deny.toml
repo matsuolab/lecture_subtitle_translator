@@ -16,7 +16,16 @@ allow = [
     "CC0-1.0",
     "OpenSSL",
     "Unicode-DFS-2016",
+    # ICU 系クレートが Unicode-DFS-2016 から移行した後継ライセンス（寛容系）
+    "Unicode-3.0",
     "Zlib",
+    # 弱コピーレフト（ファイル単位）。依存を改変せず利用する分には
+    # ソース開示義務は生じないため、バイナリ配布アプリでは一般に許容される
+    "MPL-2.0",
+    # 寛容系データライセンス
+    "CDLA-Permissive-2.0",
+    # LLVM 例外付き Apache-2.0（SPDX 上は別表現のため明示が必要）
+    "Apache-2.0 WITH LLVM-exception",
 ]
 # 注: 旧バージョンにあった deny リストは cargo-deny の新仕様
 # (https://github.com/EmbarkStudios/cargo-deny/pull/611) でキー自体が削除された。
