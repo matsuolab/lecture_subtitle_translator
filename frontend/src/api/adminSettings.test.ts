@@ -118,3 +118,27 @@ describe('admin settings model profile migration', () => {
     expect(normalized.embeddingProfilePreset).toBe('qwen')
   })
 })
+
+describe('llmRequestTimeoutSec normalization', () => {
+  it('defaults to 600 seconds when unset', () => {
+    expect(getDefaultAdminSettings().llmRequestTimeoutSec).toBe(600)
+    expect(normalizeAdminSettings({}).llmRequestTimeoutSec).toBe(600)
+  })
+
+  it('clamps values below the 30 second floor', () => {
+    expect(normalizeAdminSettings({ llmRequestTimeoutSec: 0 }).llmRequestTimeoutSec).toBe(30)
+    expect(normalizeAdminSettings({ llmRequestTimeoutSec: -100 }).llmRequestTimeoutSec).toBe(30)
+  })
+
+  it('clamps values above the 3600 second ceiling', () => {
+    expect(normalizeAdminSettings({ llmRequestTimeoutSec: 999_999 }).llmRequestTimeoutSec).toBe(3600)
+  })
+
+  it('keeps in-range values as-is', () => {
+    expect(normalizeAdminSettings({ llmRequestTimeoutSec: 120 }).llmRequestTimeoutSec).toBe(120)
+  })
+
+  it('falls back to the default for non-numeric input', () => {
+    expect(normalizeAdminSettings({ llmRequestTimeoutSec: 'not-a-number' }).llmRequestTimeoutSec).toBe(600)
+  })
+})

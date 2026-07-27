@@ -1011,6 +1011,20 @@ export function SettingsTab({
         </FieldCard>
 
         <FieldCard theme={theme}>
+          <NumberField
+            theme={theme}
+            label={t.settingsLlmRequestTimeoutSec}
+            value={adminSettings.llmRequestTimeoutSec}
+            min={30}
+            step={30}
+            onChange={(value) => onAdminSettingsChange({ llmRequestTimeoutSec: Math.trunc(value) })}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
+            ローカルLLMが応答しなくなった場合の打ち切り時間。default: 600秒。30〜3600秒の範囲でクランプされます。
+          </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
           <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>モデル設定</div>
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>
             処理段階ごとに使うモデルを指定します。まず「モデル一覧を更新」で選択肢を取得し、各欄は入力でフィルター、▼ で一覧から選択できます。空欄の欄は記載のフォールバック先を使います。

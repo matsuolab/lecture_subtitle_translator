@@ -274,6 +274,7 @@ export const ja: LocaleStrings = {
   settingsPipelineMergeContinuationMaxTranscriptChars: '結合後の最大書きおこし文字数',
   settingsIncompleteEndDetectionModel: '未完結検出モデル (nano)',
   settingsIncompleteEndDetectionBatchSize: '未完結検出バッチサイズ',
+  settingsLlmRequestTimeoutSec: 'LLMリクエストタイムアウト（秒）',
   settingsCompressModel: '圧縮モデル (Compress)',
   settingsMicroModel: 'マイクロ圧縮モデル (Micro)',
   settingsExpandModel: '展開モデル (Expand)',
