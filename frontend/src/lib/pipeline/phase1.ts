@@ -7,6 +7,7 @@ import { semanticSplitJa } from './semanticSplitJa'
 import { mergeShort } from './mergeShort'
 import { contextGroupCueBlocks, reindexContextGroups } from './contextGrouping'
 import { runCorrectionDebug, isCorrectionDebugEnabled } from './correctionDebug'
+import { buildPartialFailureWarning } from './partialFailureSummary'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -39,6 +40,13 @@ export async function runPhase1(
       options.glossaryTerms ?? [],
     ),
   )
+  // 部分失敗の誤報防止: correctJa は例外を投げず原文フォールバックで「成功」を返せてしまうため、
+  // 大量失敗時でも trace が success のまま何も語らない事故があった（このファイル冒頭 import の
+  // partialFailureSummary.ts の JSDoc 参照）。既存の contextGroupCueBlocks の警告と同じ仕組みで
+  // 失敗件数を trace に残す。
+  const failedCorrectionCount = corrected.filter((seg) => seg.correctionFailureReason !== undefined).length
+  const correctionWarning = buildPartialFailureWarning('correction', failedCorrectionCount, corrected.length)
+  if (correctionWarning) onWarning?.('correctJa', correctionWarning)
   // デバッグ計測：correctJa の効果（意味変動）を Embedding で測る
   // master debugModeEnabled + サブ correctionDebugEmbedding の両方が ON の時のみ実行
   if (isCorrectionDebugEnabled(settings)) {
