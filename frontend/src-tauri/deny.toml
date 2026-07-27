@@ -34,3 +34,17 @@ allow = [
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
+# 保守終了 (unmaintained) 勧告は直接依存 (workspace) のみエラーにする。
+# GTK3 bindings (RUSTSEC-2024-041x) や fxhash 等は Tauri の Linux スタック由来の
+# 推移的依存で、こちらでは差し替え不能なため。直接依存が保守終了になった場合は
+# 引き続きエラーとして検出される。
+unmaintained = "workspace"
+ignore = [
+    # quick-xml の DoS 系脆弱性 2 件（信頼できない XML パース時の CPU/メモリ消費）。
+    # 2026-07 時点で修正版が存在しない (Solution: No safe upgrade is available)。
+    # 本アプリは信頼できない XML をパースしない（入力はローカル動画/PDF と
+    # OpenAI 互換 API の JSON のみ）ため実害なしと判断。
+    # 修正版リリース後に依存更新でこの ignore を外すこと。
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
