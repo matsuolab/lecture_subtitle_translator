@@ -18,17 +18,10 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
 ]
-# Deny list of licenses
-deny = [
-    "GPL-1.0",
-    "GPL-2.0",
-    "GPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
-    "AGPL-1.0",
-    "AGPL-3.0",
-]
+# 注: 旧バージョンにあった deny リストは cargo-deny の新仕様
+# (https://github.com/EmbarkStudios/cargo-deny/pull/611) でキー自体が削除された。
+# 現仕様では上記 allow リストに無いライセンスはすべて自動的に拒否されるため、
+# GPL/LGPL/AGPL 系の拒否は「allow に載せない」ことで引き続き担保される。
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
