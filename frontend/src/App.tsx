@@ -26,11 +26,12 @@ import {
 } from '@/api/persistence'
 import { loadAdminSettings, saveAdminSettings } from '@/api/adminSettings'
 import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/pipelineClient'
+import { abortCurrentPipeline, isPipelineAbortedError } from '@/lib/pipeline/pipelineAbort'
 import { describeError } from '@/lib/describeError'
 import { buildMacAssetUrl } from '@/lib/video/macAssetUrl'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
-import type { PipelineAuditReport, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
+import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecord, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
 import { useSpellChecker, type SpellIssue } from '@/lib/pipeline/spellCheck'
 import type { LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
@@ -403,6 +404,8 @@ function getPipelineClientDebug(error: unknown): {
   transcriptMetadata?: Record<string, unknown>
   traces?: PipelineNodeTrace[]
   stageSnapshots?: PipelineRunDebug['stageSnapshots']
+  llmErrors?: PipelineLlmErrorRecord[]
+  llmUsage?: PipelineLlmUsageRecord[]
 } {
   if (!error || typeof error !== 'object') return {}
   const debug = (error as Record<string, unknown>).pipelineClientDebug
@@ -415,6 +418,8 @@ function getPipelineClientDebug(error: unknown): {
       : undefined,
     traces: Array.isArray(row.traces) ? row.traces as PipelineNodeTrace[] : undefined,
     stageSnapshots: Array.isArray(row.stageSnapshots) ? row.stageSnapshots as PipelineRunDebug['stageSnapshots'] : undefined,
+    llmErrors: Array.isArray(row.llmErrors) ? row.llmErrors as PipelineLlmErrorRecord[] : undefined,
+    llmUsage: Array.isArray(row.llmUsage) ? row.llmUsage as PipelineLlmUsageRecord[] : undefined,
   }
 }
 
@@ -515,6 +520,16 @@ export default function App() {
     restoredSession?.session?.pipelineHistory ?? [],
   )
   const [pipelineStatusPinned, setPipelineStatusPinned] = useState(false)
+  // 中断要求済みだが、実行中の LLM リクエストの完了待ちで停止が確定していない状態。
+  // 協調的キャンセルなので押した瞬間に止まるわけではない。それを黙って「中断済み」と
+  // 表示すると実態と乖離するため、確定するまでは別表示にする。
+  const [pipelineAborting, setPipelineAborting] = useState(false)
+  // 実行が終端状態に達したら中断中フラグを解除する。次回実行で「中断中...」が残るのを防ぐ。
+  useEffect(() => {
+    if (pipelineRun.status !== 'running' && pipelineRun.status !== 'queued') {
+      setPipelineAborting(false)
+    }
+  }, [pipelineRun.status])
   const [srtExportFormat, setSrtExportFormat] = useState<SrtExportFormat>(() => {
     try {
       const saved = localStorage.getItem('srtExportFormat')
@@ -1012,6 +1027,8 @@ export default function App() {
     let transcriptSegments: TranscriptSegment[] | undefined = undefined
     let transcriptMetadata: Record<string, unknown> | undefined = undefined
     let stageSnapshots: PipelineRunDebug['stageSnapshots'] | undefined = undefined
+    let llmErrors: PipelineLlmErrorRecord[] | undefined = undefined
+    let llmUsage: PipelineLlmUsageRecord[] | undefined = undefined
 
     const mapProgressStatus = (status: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'): PipelineRunResult['status'] => {
       if (status === 'queued') return 'queued'
@@ -1082,6 +1099,16 @@ export default function App() {
           const node = progress.currentNode ?? ''
           const label = nodeLabel[node] ?? node
           const elapsed = progress.nodeElapsedSec !== null ? ` (${progress.nodeElapsedSec}s)` : ''
+          // inFlightLlmCalls はローカルパイプライン経路（runLocalPostPipeline のハートビート）
+          // でのみ埋まる。「時間のかかる段階を正常に処理中」か「フリーズしている」かを見分けるため、
+          // API応答待ち件数と最後の応答からの経過秒数をメッセージに追記する。
+          const llmActivitySuffix = progress.inFlightLlmCalls !== undefined
+            ? ` / API応答待ち ${progress.inFlightLlmCalls}件${
+                progress.secondsSinceLastLlmResponse !== undefined && progress.secondsSinceLastLlmResponse !== null
+                  ? ` / 最後の応答から ${progress.secondsSinceLastLlmResponse}s`
+                  : ''
+              }`
+            : ''
           const stepKey = mapProgressStep(progress.currentNode)
           const message = (() => {
             if (progress.status === 'queued') {
@@ -1090,7 +1117,7 @@ export default function App() {
             if (adminSettings.serviceMode === 'managed_service' && node === 'transcribe') {
               return `AWS上で書き起こし実行中です${elapsed}。ローカル実行より時間がかかります。`
             }
-            return `${label}${elapsed}`
+            return `${label}${elapsed}${llmActivitySuffix}`
           })()
           progressEvents.push({
             at: Date.now(),
@@ -1102,6 +1129,8 @@ export default function App() {
             completedNodes: progress.completedNodes,
             totalNodes: progress.totalNodes,
             nodeElapsedSec: progress.nodeElapsedSec,
+            inFlightLlmCalls: progress.inFlightLlmCalls,
+            secondsSinceLastLlmResponse: progress.secondsSinceLastLlmResponse,
           })
           const progressState: PipelineRunResult = {
             status: mapProgressStatus(progress.status),
@@ -1110,6 +1139,12 @@ export default function App() {
             runId: progress.runId,
             sourceName,
             startedAt,
+            llmActivity: progress.inFlightLlmCalls !== undefined
+              ? {
+                  inFlightLlmCalls: progress.inFlightLlmCalls,
+                  secondsSinceLastLlmResponse: progress.secondsSinceLastLlmResponse ?? null,
+                }
+              : undefined,
           }
           setPipelineRun(progressState)
           persistSessionSnapshot({
@@ -1122,6 +1157,8 @@ export default function App() {
         transcriptSegments = apiResult.debug?.transcriptSegments
         transcriptMetadata = apiResult.debug?.transcriptMetadata
         stageSnapshots = apiResult.debug?.stageSnapshots
+        llmErrors = apiResult.debug?.llmErrors
+        llmUsage = apiResult.debug?.llmUsage
       }
 
       reset(generated)
@@ -1153,6 +1190,8 @@ export default function App() {
           stageSnapshots,
           transcriptSegments,
           transcriptMetadata,
+          llmErrors,
+          llmUsage,
         },
       }
       progressEvents.push({
@@ -1177,6 +1216,8 @@ export default function App() {
       const finishedAt = Date.now()
       const pipelineDebug = getPipelineClientDebug(err)
       const errorMessage = describeError(err)
+      // 中断はユーザーの意思による停止なので失敗として扱わない（status を error にしない）
+      const aborted = isPipelineAbortedError(err)
       const failureTraces = pipelineDebug.traces ?? traces
       const pipelineErrorTrace: PipelineNodeTrace = {
         nodeId: pipelineDebug.traces?.length ? 'pipeline_catch' : 'pipeline',
@@ -1191,17 +1232,21 @@ export default function App() {
       transcriptSegments = transcriptSegments ?? pipelineDebug.transcriptSegments
       transcriptMetadata = transcriptMetadata ?? pipelineDebug.transcriptMetadata
       stageSnapshots = stageSnapshots ?? pipelineDebug.stageSnapshots
+      llmErrors = llmErrors ?? pipelineDebug.llmErrors
+      llmUsage = llmUsage ?? pipelineDebug.llmUsage
       progressEvents.push({
         at: finishedAt,
-        status: 'error',
+        status: aborted ? 'cancelled' : 'error',
         step: 'done',
-        message: errorMessage,
+        message: aborted ? 'ユーザー操作により中断されました' : errorMessage,
         runId: managedRunId,
       })
       const result: PipelineRunResult = {
-        status: 'error',
+        status: aborted ? 'cancelled' : 'error',
         step: 'done',
-        message: `パイプライン失敗: ${errorMessage}`,
+        message: aborted
+          ? 'パイプラインを中断しました'
+          : `パイプライン失敗: ${errorMessage}`,
         runId: managedRunId,
         sourceName,
         startedAt,
@@ -1235,6 +1280,8 @@ export default function App() {
           stageSnapshots,
           transcriptSegments,
           transcriptMetadata,
+          llmErrors,
+          llmUsage,
           errorInfo: buildPipelineErrorInfo(err),
         },
       }
@@ -2417,11 +2464,22 @@ export default function App() {
                           ? '#22c55e'
                           : pipelineRun.status === 'error'
                             ? '#ef4444'
-                            : theme.textMuted,
+                            : pipelineRun.status === 'cancelled'
+                              ? '#8b5cf6'
+                              : theme.textMuted,
                   }}
                 />
                 <span style={{ color: theme.textSecondary, fontWeight: 600 }}>
-                  Pipeline: {pipelineRun.status === 'queued' ? '待機中' : pipelineRun.status === 'running' ? '実行中' : pipelineRun.status === 'success' ? '完了' : pipelineRun.status === 'error' ? '失敗' : '待機中'}
+                  Pipeline: {
+                    pipelineAborting && pipelineRun.status === 'running'
+                      ? '中断しています（実行中のリクエストの完了待ち）'
+                      : pipelineRun.status === 'queued' ? '待機中'
+                        : pipelineRun.status === 'running' ? '実行中'
+                          : pipelineRun.status === 'success' ? '完了'
+                            : pipelineRun.status === 'error' ? '失敗'
+                              : pipelineRun.status === 'cancelled' ? '中断'
+                                : '待機中'
+                  }
                 </span>
                 {pipelineRun.sourceName && (
                   <span style={{ color: theme.textMuted }}>
@@ -2438,11 +2496,35 @@ export default function App() {
                     job_id: {pipelineRun.runId}
                   </span>
                 )}
+                {(pipelineRun.status === 'running' || pipelineRun.status === 'queued') && (
+                  <button
+                    onClick={() => {
+                      setPipelineAborting(true)
+                      abortCurrentPipeline()
+                    }}
+                    disabled={pipelineAborting}
+                    title={pipelineAborting
+                      ? '中断要求済み。実行中のリクエストの完了を待っています'
+                      : '実行中の処理を中断します（実行中のリクエストの完了は待ちます）'}
+                    style={{
+                      marginLeft: 'auto',
+                      background: 'transparent',
+                      border: `1px solid ${theme.panelBorder}`,
+                      cursor: pipelineAborting ? 'default' : 'pointer',
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      fontSize: 11,
+                      color: pipelineAborting ? theme.textMuted : '#ef4444',
+                    }}
+                  >
+                    {pipelineAborting ? '中断中...' : '中断'}
+                  </button>
+                )}
                 <button
                   onClick={() => setPipelineStatusPinned(v => !v)}
                   title={pipelineStatusPinned ? 'ピン解除（完了後に自動非表示）' : 'ピン留め（常時表示）'}
                   style={{
-                    marginLeft: 'auto',
+                    marginLeft: (pipelineRun.status === 'running' || pipelineRun.status === 'queued') ? 0 : 'auto',
                     background: 'transparent',
                     border: 'none',
                     cursor: 'pointer',
@@ -2457,7 +2539,25 @@ export default function App() {
                 </button>
               </div>
 
-              <div style={{ marginTop: 4, fontSize: 11, color: theme.textMuted }}>
+              <div style={{
+                marginTop: 4,
+                fontSize: 11,
+                // 最後の LLM 応答からの経過秒数が API タイムアウト設定に近づいている（70%以上）場合は
+                // 「詰まっている疑い」として強調表示する。ハートビート未対応の経路（managed service 等）
+                // では llmActivity が undefined のため通常表示のまま。
+                color: pipelineRun.llmActivity
+                  && pipelineRun.llmActivity.inFlightLlmCalls > 0
+                  && pipelineRun.llmActivity.secondsSinceLastLlmResponse !== null
+                  && pipelineRun.llmActivity.secondsSinceLastLlmResponse >= adminSettings.llmRequestTimeoutSec * 0.7
+                  ? '#ef4444'
+                  : theme.textMuted,
+                fontWeight: pipelineRun.llmActivity
+                  && pipelineRun.llmActivity.inFlightLlmCalls > 0
+                  && pipelineRun.llmActivity.secondsSinceLastLlmResponse !== null
+                  && pipelineRun.llmActivity.secondsSinceLastLlmResponse >= adminSettings.llmRequestTimeoutSec * 0.7
+                  ? 600
+                  : undefined,
+              }}>
                 {pipelineRun.message}
               </div>
               {pipelineRun.metrics && (

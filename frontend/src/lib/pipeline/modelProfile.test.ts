@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { AdminSettings } from '@/types/adminSettings'
+import type { ModelProfile } from '@/types/modelProfile'
 import { getDefaultAdminSettings } from '@/api/adminSettings'
 import {
   adaptChatCompletionRequest,
+  CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS,
+  MIN_REASONING_HEADROOM_TOKENS,
+  MODEL_PROFILE_PRESETS,
   normalizeChatCompletionContent,
+  REASONING_BUDGET_TOKENS,
   resolveModelProfile,
   stripDelimitedReasoning,
+  withReasoningHeadroom,
 } from './modelProfile'
 
 function settings(overrides: Partial<AdminSettings> = {}): AdminSettings {
@@ -126,6 +132,163 @@ describe('adaptChatCompletionRequest', () => {
       reasoningMode: 'nonThinking',
     })
     expect(adapted.messages).toEqual([{ role: 'user', content: 'System rules\n\nUser request' }])
+  })
+
+  it('clamps max_tokens against a conservative context ceiling for a long prompt, without going below the floor (context_size_exceeded regression)', () => {
+    // gemma プリセットの contextLength は 128000 だが、実機の JIT ロード既定値は 8192。
+    // 長いプロンプトでは CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS を基準にクランプが効き、
+    // かつ床(256)を割り込まないことを確認する。
+    const longContent = 'あ'.repeat(20000)
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'gemma-4-e4b-it', max_tokens: 32768 },
+      messages: [{ role: 'user', content: longContent }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'gemma-4-e4b-it',
+      reasoningMode: 'nonThinking',
+    })
+    expect(adapted.body.max_tokens).toBeLessThan(32768)
+    expect(adapted.body.max_tokens as number).toBeGreaterThanOrEqual(256)
+    expect(adapted.maxTokensClamp?.wasClamped).toBe(true)
+    expect(adapted.maxTokensClamp?.requested).toBe(32768)
+  })
+
+  it('does not report a clamp when the requested max_tokens already fits comfortably', () => {
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'gemma-4-e4b-it', max_tokens: 512 },
+      messages: [{ role: 'user', content: 'short prompt' }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'gemma-4-e4b-it',
+      reasoningMode: 'nonThinking',
+    })
+    expect(adapted.body.max_tokens).toBe(512)
+    expect(adapted.maxTokensClamp).toBeUndefined()
+  })
+
+  it('caps the effective context length used for clamping at CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS even though the gemma preset declares a much larger contextLength', () => {
+    expect(MODEL_PROFILE_PRESETS.gemma.contextLength).toBeGreaterThan(CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS)
+  })
+
+  it('uses runtimeContextLengthTokens (e.g. LM Studio loaded_context_length) instead of the fixed 8192 ceiling when provided', () => {
+    // 中程度の長さのプロンプト。CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS(8192) を基準にすると
+    // 実質クランプされるが、実測の 32768 を渡せばクランプされない・より大きい max_tokens が
+    // 許容されるはずである（8192 固定のままでは反映されないことの回帰防止）。
+    const content = 'あ'.repeat(8000)
+    const withoutRuntimeLength = adaptChatCompletionRequest({
+      body: { model: 'gemma-4-e4b-it', max_tokens: 4096 },
+      messages: [{ role: 'user', content }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'gemma-4-e4b-it',
+      reasoningMode: 'nonThinking',
+    })
+    const withRuntimeLength = adaptChatCompletionRequest({
+      body: { model: 'gemma-4-e4b-it', max_tokens: 4096 },
+      messages: [{ role: 'user', content }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'gemma-4-e4b-it',
+      reasoningMode: 'nonThinking',
+      runtimeContextLengthTokens: 32768,
+    })
+
+    expect(withoutRuntimeLength.maxTokensClamp?.wasClamped).toBe(true)
+    expect(withRuntimeLength.maxTokensClamp).toBeUndefined()
+    expect(withRuntimeLength.body.max_tokens).toBe(4096)
+    expect(withRuntimeLength.body.max_tokens as number).toBeGreaterThan(withoutRuntimeLength.body.max_tokens as number)
+  })
+
+  it('ignores an invalid runtimeContextLengthTokens (non-finite or <= 0) and falls back to CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS', () => {
+    const content = 'あ'.repeat(20000)
+    const baseline = adaptChatCompletionRequest({
+      body: { model: 'gemma-4-e4b-it', max_tokens: 32768 },
+      messages: [{ role: 'user', content }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'gemma-4-e4b-it',
+      reasoningMode: 'nonThinking',
+    })
+    for (const invalid of [0, -100, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const adapted = adaptChatCompletionRequest({
+        body: { model: 'gemma-4-e4b-it', max_tokens: 32768 },
+        messages: [{ role: 'user', content }],
+        settings: settings({ translationProvider: 'local_openai' }),
+        model: 'gemma-4-e4b-it',
+        reasoningMode: 'nonThinking',
+        runtimeContextLengthTokens: invalid,
+      })
+      expect(adapted.body.max_tokens).toBe(baseline.body.max_tokens)
+    }
+  })
+})
+
+describe('withReasoningHeadroom', () => {
+  const nonThinkingProfile: ModelProfile = {
+    id: 'no-reasoning',
+    label: 'No reasoning',
+    contextLength: 8192,
+    maxOutputTokens: 4096,
+    supportsSystemRole: true,
+    reasoning: {
+      capability: 'none',
+      enable: { method: 'none' },
+      output: { style: 'reasoning_content_field' },
+    },
+    sampling: {},
+  }
+
+  it('returns the desired token count unchanged when the profile is undefined', () => {
+    expect(withReasoningHeadroom(1000, undefined)).toBe(1000)
+  })
+
+  it('returns the desired token count unchanged for a non-reasoning capable profile', () => {
+    expect(withReasoningHeadroom(1000, nonThinkingProfile)).toBe(1000)
+  })
+
+  it('adds REASONING_BUDGET_TOKENS for a toggleable reasoning profile', () => {
+    const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+    expect(withReasoningHeadroom(1000, profile)).toBe(1000 + REASONING_BUDGET_TOKENS)
+  })
+
+  it('adds REASONING_BUDGET_TOKENS for an always_on reasoning profile', () => {
+    const alwaysOnProfile: ModelProfile = {
+      ...MODEL_PROFILE_PRESETS.qwen,
+      maxOutputTokens: 1_000_000,
+      reasoning: { ...MODEL_PROFILE_PRESETS.qwen.reasoning, capability: 'always_on' },
+    }
+    expect(withReasoningHeadroom(500, alwaysOnProfile)).toBe(500 + REASONING_BUDGET_TOKENS)
+  })
+
+  it('adds enough headroom for a small batch estimate to exceed the measured 5-item detection reasoning consumption (regression for the 96% detection-failure incident)', () => {
+    // detectIncompleteEnds.ts の 8件バッチ見積り相当（8*12+16=112）。旧実装は 6倍しても 672 にしか
+    // ならず、実測の reasoning 消費（565）に対してほぼ余裕がなく毎回切り詰められていた。
+    const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+    const measuredReasoningTokensFor5ItemBatch = 565
+    expect(withReasoningHeadroom(112, profile)).toBeGreaterThan(measuredReasoningTokensFor5ItemBatch)
+  })
+
+  it('does not blow up to a multiplier-scale value for a larger desired output (regression for the context_size_exceeded incident)', () => {
+    // 旧実装（6倍）なら 4000 は 24000 になっていた。加算方式では desired + 固定予算に留まる。
+    const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+    const desired = 4000
+    const result = withReasoningHeadroom(desired, profile)
+    expect(result).toBe(desired + REASONING_BUDGET_TOKENS)
+    expect(result).toBeLessThan(desired * 6)
+  })
+
+  it('clamps the result to profile.maxOutputTokens', () => {
+    const smallCapProfile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 2000 }
+    expect(withReasoningHeadroom(1000, smallCapProfile)).toBe(2000)
+  })
+
+  it('never clamps below MIN_REASONING_HEADROOM_TOKENS even for an extremely small maxOutputTokens', () => {
+    const tinyCapProfile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 10 }
+    expect(withReasoningHeadroom(1, tinyCapProfile)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+  })
+
+  it('returns MIN_REASONING_HEADROOM_TOKENS (never 0 or NaN) for invalid input values', () => {
+    expect(withReasoningHeadroom(Number.NaN, MODEL_PROFILE_PRESETS.gemma)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+    expect(withReasoningHeadroom(-5, MODEL_PROFILE_PRESETS.gemma)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+    expect(withReasoningHeadroom(0, MODEL_PROFILE_PRESETS.gemma)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+    expect(withReasoningHeadroom(Number.POSITIVE_INFINITY, MODEL_PROFILE_PRESETS.gemma)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+    expect(withReasoningHeadroom(Number.NaN, undefined)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+    expect(Number.isNaN(withReasoningHeadroom(Number.NaN, MODEL_PROFILE_PRESETS.gemma))).toBe(false)
   })
 })
 

@@ -30,6 +30,18 @@ export interface ApiCompatibilityProfile {
   requestDialect: RequestDialect
 }
 
+/**
+ * response_format.json_schema (Structured Outputs) を組み立てるための入力。
+ * strict:true 前提のため、schema 側は additionalProperties:false / 全フィールド required を
+ * 呼出元で徹底しておくこと（gateway 側では検証しない）。
+ */
+export interface JsonSchemaSpec {
+  /** response_format.json_schema.name に入る識別子 */
+  name: string
+  /** JSON Schema 本体（strict:true 前提で additionalProperties:false / 全フィールド required にしておくこと） */
+  schema: Record<string, unknown>
+}
+
 export interface AiGatewayProfileSnapshot {
   apiCompatibilityProfile: {
     id: string
@@ -91,13 +103,13 @@ export const BUILTIN_API_COMPATIBILITY_PROFILES = {
     id: 'builtin:api:lmstudio',
     label: 'LM Studio OpenAI Compatible',
     schemaVersion: 1,
-    profileVersion: '2026.06.08',
+    profileVersion: '2026.07.26',
     origin: 'builtin',
     requestDialect: {
       chat: {
         endpoint: '/chat/completions',
         tokenLimitParam: 'max_tokens',
-        responseFormat: 'text',
+        responseFormat: 'json_schema',
       },
       embeddings: { endpoint: '/embeddings' },
       vision: {
@@ -111,13 +123,13 @@ export const BUILTIN_API_COMPATIBILITY_PROFILES = {
     id: 'builtin:api:ollama',
     label: 'Ollama OpenAI Compatible',
     schemaVersion: 1,
-    profileVersion: '2026.06.08',
+    profileVersion: '2026.07.26',
     origin: 'builtin',
     requestDialect: {
       chat: {
         endpoint: '/chat/completions',
         tokenLimitParam: 'max_tokens',
-        responseFormat: 'text',
+        responseFormat: 'json_schema',
       },
       embeddings: { endpoint: '/embeddings' },
       vision: {
@@ -284,10 +296,34 @@ export function applyChatRequestDialect(
   }
 }
 
+/**
+ * プロファイルの responseFormat モードに応じて実際に送る response_format を解決する。
+ *
+ * - json_schema かつ jsonSchema 指定あり → Structured Outputs 形式（strict:true 固定）
+ * - json_schema かつ jsonSchema 指定なし → スキーマなしで json_schema は送れないため text にフォールバック
+ *   （変更前の LM Studio / Ollama プロファイルの既定挙動を維持する）
+ * - json_object / text → { type: mode } をそのまま返す。jsonSchema が渡されていても無視する
+ *   （OpenAI / Gemini OpenAI Compatible の既存挙動を一切変えないため）
+ * - omit → undefined
+ */
 export function resolveChatResponseFormatForDialect(
   profile: ApiCompatibilityProfile,
-): { type: 'json_object' | 'text' } | undefined {
+  jsonSchema?: JsonSchemaSpec,
+): Record<string, unknown> | undefined {
   const mode = profile.requestDialect.chat.responseFormat
+  if (mode === 'json_schema') {
+    if (jsonSchema) {
+      return {
+        type: 'json_schema',
+        json_schema: {
+          name: jsonSchema.name,
+          strict: true,
+          schema: jsonSchema.schema,
+        },
+      }
+    }
+    return { type: 'text' }
+  }
   if (mode === 'json_object' || mode === 'text') return { type: mode }
   return undefined
 }

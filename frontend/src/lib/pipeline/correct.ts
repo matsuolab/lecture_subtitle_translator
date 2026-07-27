@@ -1,6 +1,7 @@
 import type { TranscriptSegment } from './types'
 import { normalizeSpaces } from './textUtils'
 import type { AdminSettings } from '@/types/adminSettings'
+import { buildLlmFailureCode, type LlmErrorCode } from '@/lib/aiGateway'
 import { requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
@@ -171,6 +172,8 @@ interface CorrectionApiResult {
   texts: string[]
   errorMessage?: string
   abortable: boolean
+  /** 分岐判定に使う構造化エラーコード。'context_exceeded' は決定的エラー（同一内容の盲リトライ禁止）。 */
+  errorCode?: LlmErrorCode
 }
 
 async function callCorrectionApi(
@@ -196,6 +199,9 @@ async function callCorrectionApi(
       // response_format は付けない（OpenAI 既定 text のまま、既存挙動を保つ）
       responseFormat: 'omit',
       nodeName: 'correctJa',
+      // 実際のコンテキスト長を反映してクランプする（LM Studio 系プロファイルのみ有効。
+      // modelProfile.ts の CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS の JSDoc 参照）。
+      resolveRuntimeContextLength: true,
     },
     settings,
   )
@@ -203,8 +209,25 @@ async function callCorrectionApi(
   if (result.errorMessage) {
     return {
       texts: fallbackTexts,
-      errorMessage: result.errorMessage,
-      abortable: isAbortableFailure(result),
+      // HTTP ステータスから分類されたエラー（http_error / context_exceeded / rate_limited /
+      // quota_exhausted）は gateway 側の errorMessage にプロバイダの生応答本文がそのまま含まれうる
+      // （formatAiGatewayHttpError の raw= 参照）。この errorMessage は最終的に
+      // correctionFailureReason としてプロジェクト JSON に残る／UI に表示されうるため、
+      // 生本文を持たせず buildLlmFailureCode() が組み立てる短い分類コードに置き換える
+      // （organization 等が字幕パイプラインの成果物に流出した本番事故の再発防止。
+      // translateEn.ts の同種の対応も参照）。それ以外（timeout / fetch_failed / refusal /
+      // truncated 等）は呼出元自身が組み立てた安全なメッセージなのでそのまま残す。
+      errorMessage: result.errorCode === 'http_error' || result.errorCode === 'context_exceeded' || result.errorCode === 'rate_limited' || result.errorCode === 'quota_exhausted'
+        ? buildLlmFailureCode({ errorCode: result.errorCode, httpStatus: result.httpStatus })
+        : result.errorMessage,
+      // quota_exhausted（HTTP 429 のうち insufficient_quota。aiGateway/errors.ts の
+      // classifyHttpErrorCode 参照）は 401/403/404 と同格の致命エラー: 課金設定を直さない限り
+      // 絶対に回復しないため、isAbortableFailure（content_filter/refusal のみを見る）に加えて
+      // ここで明示的に abortable=true にする。correctBatchWithFallback 側のリトライ・半割
+      // フローに乗せず、盲目的な再試行で時間を空費しない（translateEn.ts の
+      // isFatalTranslationHttpError・detectIncompleteEnds.ts の config_error 分岐と同じ理由）。
+      abortable: isAbortableFailure(result) || result.errorCode === 'quota_exhausted',
+      errorCode: result.errorCode,
     }
   }
 
@@ -293,6 +316,15 @@ async function correctBatchWithFallback(
     return makeFailureOutcome(segments, result.errorMessage, 1)
   }
 
+  // context_exceeded は決定的エラー: プロンプト（＋max_tokens）がコンテキスト長を超えている限り、
+  // 同一内容を再送しても絶対に回復しない。単一セグメントまで分割済みならこれ以上入力を
+  // 小さくできないので、盲リトライせず理由を記録して諦める
+  // （実データで correctionRetryAttempts が全件2＝同一内容の盲リトライで2回とも失敗していた
+  // 事故の再発防止。複数セグメントならこの後の半割フローに委ねる＝分割トリガーとして扱う）。
+  if (result.errorCode === 'context_exceeded' && segments.length === 1) {
+    return makeFailureOutcome(segments, result.errorMessage, 1)
+  }
+
   // 単一セグメントまで分割済み → 最大 PER_LEAF_RETRY_MAX_ATTEMPTS 回までリトライ、それでも駄目なら諦める
   if (segments.length === 1) {
     let lastError = result.errorMessage
@@ -305,7 +337,9 @@ async function correctBatchWithFallback(
           attempts: [attempt],
         }
       }
-      if (retry.abortable) {
+      // abortable と同様、context_exceeded もここで判明したら即座に諦める
+      // （同一内容のこれ以上のリトライは無駄。分割済みで縮められる余地もない）。
+      if (retry.abortable || retry.errorCode === 'context_exceeded') {
         return makeFailureOutcome(segments, retry.errorMessage, attempt)
       }
       lastError = retry.errorMessage

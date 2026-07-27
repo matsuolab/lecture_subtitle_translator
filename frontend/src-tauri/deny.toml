@@ -16,19 +16,35 @@ allow = [
     "CC0-1.0",
     "OpenSSL",
     "Unicode-DFS-2016",
+    # ICU 系クレートが Unicode-DFS-2016 から移行した後継ライセンス（寛容系）
+    "Unicode-3.0",
     "Zlib",
+    # 弱コピーレフト（ファイル単位）。依存を改変せず利用する分には
+    # ソース開示義務は生じないため、バイナリ配布アプリでは一般に許容される
+    "MPL-2.0",
+    # 寛容系データライセンス
+    "CDLA-Permissive-2.0",
+    # LLVM 例外付き Apache-2.0（SPDX 上は別表現のため明示が必要）
+    "Apache-2.0 WITH LLVM-exception",
 ]
-# Deny list of licenses
-deny = [
-    "GPL-1.0",
-    "GPL-2.0",
-    "GPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
-    "AGPL-1.0",
-    "AGPL-3.0",
-]
+# 注: 旧バージョンにあった deny リストは cargo-deny の新仕様
+# (https://github.com/EmbarkStudios/cargo-deny/pull/611) でキー自体が削除された。
+# 現仕様では上記 allow リストに無いライセンスはすべて自動的に拒否されるため、
+# GPL/LGPL/AGPL 系の拒否は「allow に載せない」ことで引き続き担保される。
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
+# 保守終了 (unmaintained) 勧告は直接依存 (workspace) のみエラーにする。
+# GTK3 bindings (RUSTSEC-2024-041x) や fxhash 等は Tauri の Linux スタック由来の
+# 推移的依存で、こちらでは差し替え不能なため。直接依存が保守終了になった場合は
+# 引き続きエラーとして検出される。
+unmaintained = "workspace"
+ignore = [
+    # quick-xml の DoS 系脆弱性 2 件（信頼できない XML パース時の CPU/メモリ消費）。
+    # 2026-07 時点で修正版が存在しない (Solution: No safe upgrade is available)。
+    # 本アプリは信頼できない XML をパースしない（入力はローカル動画/PDF と
+    # OpenAI 互換 API の JSON のみ）ため実害なしと判断。
+    # 修正版リリース後に依存更新でこの ignore を外すこと。
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

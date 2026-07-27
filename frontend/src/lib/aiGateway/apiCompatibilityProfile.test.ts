@@ -7,6 +7,7 @@ import {
   createUserApiCompatibilityProfileFromBuiltin,
   formatApiCompatibilityProfileJson,
   resolveApiCompatibilityProfile,
+  resolveChatResponseFormatForDialect,
   validateApiCompatibilityProfileJson,
 } from './apiCompatibilityProfile'
 
@@ -49,7 +50,7 @@ describe('buildAiGatewayProfileSnapshot', () => {
 
     expect(snapshot.apiCompatibilityProfile.id).toBe('builtin:api:lmstudio')
     expect(snapshot.requestDialect.chat.tokenLimitParam).toBe('max_tokens')
-    expect(snapshot.requestDialect.chat.responseFormat).toBe('text')
+    expect(snapshot.requestDialect.chat.responseFormat).toBe('json_schema')
     expect(snapshot.models.chatText.profileId).toBe('gemma')
     expect(snapshot.models.chatVision.profileId).toBe('gemma')
   })
@@ -91,7 +92,7 @@ describe('buildAiGatewayProfileSnapshot', () => {
     expect(copy.id).toBe('user:api:lmstudio')
     expect(copy.origin).toBe('user')
     expect(copy.requestDialect.chat.tokenLimitParam).toBe('max_tokens')
-    expect(copy.requestDialect.chat.responseFormat).toBe('text')
+    expect(copy.requestDialect.chat.responseFormat).toBe('json_schema')
     expect(formatApiCompatibilityProfileJson(copy)).toContain('"origin": "user"')
   })
 
@@ -105,5 +106,36 @@ describe('buildAiGatewayProfileSnapshot', () => {
 
     expect(valid.ok).toBe(true)
     expect(valid.profile?.id).toBe('user:api:openai')
+  })
+})
+
+describe('resolveChatResponseFormatForDialect', () => {
+  it('builds a Structured Outputs response_format for a json_schema profile with a schema', () => {
+    const format = resolveChatResponseFormatForDialect(BUILTIN_API_COMPATIBILITY_PROFILES.lmStudio, {
+      name: 'glossary_entries',
+      schema: { type: 'object', properties: { term: { type: 'string' } }, required: ['term'], additionalProperties: false },
+    })
+
+    expect(format).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'glossary_entries',
+        strict: true,
+        schema: { type: 'object', properties: { term: { type: 'string' } }, required: ['term'], additionalProperties: false },
+      },
+    })
+  })
+
+  it('falls back to text for a json_schema profile when no schema is given', () => {
+    const format = resolveChatResponseFormatForDialect(BUILTIN_API_COMPATIBILITY_PROFILES.lmStudio)
+    expect(format).toEqual({ type: 'text' })
+  })
+
+  it('ignores a supplied schema for a json_object profile and keeps json_object', () => {
+    const format = resolveChatResponseFormatForDialect(BUILTIN_API_COMPATIBILITY_PROFILES.openai, {
+      name: 'ignored',
+      schema: { type: 'object' },
+    })
+    expect(format).toEqual({ type: 'json_object' })
   })
 })

@@ -21,10 +21,11 @@ import type {
   SelfMadeGlossaryPromptPolicy,
   SelfMadeGlossaryValueSource,
 } from '@/context/GlossaryContext'
-import { createAiGateway } from '@/lib/aiGateway'
-import type { ChatTextMessage, ChatVisionOptions } from '@/lib/aiGateway'
-import { requireChatModelForProvider, resolveChatCompletionTokenLimitForProvider, resolveJsonResponseFormatForProvider } from '@/lib/pipeline/aiProvider'
+import { buildLlmFailureCode, createAiGateway } from '@/lib/aiGateway'
+import type { ChatTextMessage, ChatVisionOptions, JsonSchemaSpec } from '@/lib/aiGateway'
+import { requireChatModelForProvider, resolveChatCompletionTokenLimitForProvider } from '@/lib/pipeline/aiProvider'
 import { parseJsonObjectFromLlmContent } from '@/lib/pipeline/jsonResponse'
+import { resolveModelProfile, withReasoningHeadroom } from '@/lib/pipeline/modelProfile'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import type { AdminSettings } from '@/types/adminSettings'
 
@@ -151,7 +152,16 @@ const MAX_GLOSSARY_OUTPUT_TOKENS = 16384
 /** 講義主題把握で読み込む最大ページ数 (タイトル・目次・はじめに想定) */
 const THEME_PROBE_MAX_PAGES = 5
 const THEME_PROBE_MAX_CHARS_PER_PAGE = 2_000
-const THEME_PROBE_MAX_OUTPUT_TOKENS = 512
+/**
+ * テーマ抽出 (subject/domain/keyConcepts) の「本文として欲しい」希望トークン数。
+ * 旧値 512 は reasoning 系モデルで reasoning が completion_tokens の 84〜87% を
+ * 消費する実測 (LM Studio + gemma-4-e4b-it-qat) を踏まえておらず、本文が空のまま
+ * length 切れになる事故が本番で発生した。この値自体は withReasoningHeadroom() を
+ * 通してから API に渡すため、reasoning 分の割り増しはそちらに任せる。
+ * ここでの引き上げは、reasoning を割り引いても subject+domain+keyConcepts(3〜10件)
+ * を書き切るには 512 だと余裕が無いための安全マージン。
+ */
+const THEME_PROBE_MAX_OUTPUT_TOKENS = 768
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -159,6 +169,30 @@ function clamp(value: number, min: number, max: number): number {
 
 function resolveGlossaryMaxOutputTokens(settings: AdminSettings): number {
   return clamp(Math.trunc(settings.glossaryMaxOutputTokens), MIN_GLOSSARY_OUTPUT_TOKENS, MAX_GLOSSARY_OUTPUT_TOKENS)
+}
+
+/**
+ * resolveGlossaryMaxOutputTokens() / THEME_PROBE_MAX_OUTPUT_TOKENS などが返す値は
+ * 「本文として欲しい出力トークン数 (希望値)」であり、実際に API へ渡す
+ * max_tokens/max_completion_tokens はこの希望値を withReasoningHeadroom() に
+ * 通した値を使う。
+ *
+ * クランプが効く順序:
+ *   1. 希望値側 — resolveGlossaryMaxOutputTokens 等が MIN_GLOSSARY_OUTPUT_TOKENS〜
+ *      MAX_GLOSSARY_OUTPUT_TOKENS で「ユーザーが設定したい量」を先にクランプする。
+ *   2. リクエスト値側 — withReasoningHeadroom がモデルプロファイルの reasoning 特性を見て
+ *      希望値を最大 REASONING_HEADROOM_MULTIPLIER 倍まで割り増し、
+ *      profile.maxOutputTokens (モデル自体のハード上限) でクランプする。
+ * (2) の結果が最終的に API へ送られる値になる。(1) はあくまで希望値の妥当性チェック。
+ */
+function resolveEffectiveMaxOutputTokens(
+  settings: AdminSettings,
+  desiredOutputTokens: number,
+  model: string,
+  capability: 'chatText' | 'chatVision',
+): number {
+  const profile = resolveModelProfile(settings, model, capability)
+  return withReasoningHeadroom(desiredOutputTokens, profile)
 }
 
 function resolveGlossaryConcurrency(settings: AdminSettings): number {
@@ -230,6 +264,227 @@ function formatPagesForPrompt(pages: ExtractedPdfPage[], maxChars: number): stri
 }
 
 // ============================================================
+// JSON Schema (Structured Outputs)
+//
+// LM Studio は json_object を拒否するため (HTTP 400)、response_format は
+// jsonSchema 指定に一本化する。strict:true 前提のため、任意項目も含め
+// 全プロパティを required に入れ、空文字を許容する形にしている。
+// スキーマとプロンプト内の JSON 形式記述が食い違うとモデルが混乱するため、
+// 各プロンプトの JSON 形式定義と必ず一致させること。
+// ============================================================
+
+const THEME_JSON_SCHEMA: JsonSchemaSpec = {
+  name: 'glossary_document_theme',
+  schema: {
+    type: 'object',
+    properties: {
+      subject: { type: 'string' },
+      domain: { type: 'string' },
+      keyConcepts: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['subject', 'domain', 'keyConcepts'],
+    additionalProperties: false,
+  },
+}
+
+const CANDIDATES_JSON_SCHEMA: JsonSchemaSpec = {
+  name: 'glossary_candidates',
+  schema: {
+    type: 'object',
+    properties: {
+      candidates: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            text: { type: 'string' },
+            category: { type: 'string', enum: ['term', 'proper_noun', 'formula', 'abbreviation', 'reference'] },
+            llmClaimedSource: { type: 'string', enum: ['document_text', 'page_image', 'unknown'] },
+            page: { type: 'integer' },
+            snippet: { type: 'string' },
+            ja: { type: 'string' },
+            en: { type: 'string' },
+            formula: { type: 'string' },
+            displayText: { type: 'string' },
+          },
+          required: ['text', 'category', 'llmClaimedSource', 'page', 'snippet', 'ja', 'en', 'formula', 'displayText'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['candidates'],
+    additionalProperties: false,
+  },
+}
+
+// buildDetailPrompt (499-516行付近) の JSON 形式定義と厳密に一致させること。
+// domain/desc/note/reviewReason/references はこの段では出力しない方針のため含めない。
+const ENTRIES_JSON_SCHEMA: JsonSchemaSpec = {
+  name: 'glossary_entries',
+  schema: {
+    type: 'object',
+    properties: {
+      entries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            category: { type: 'string', enum: ['term', 'proper_noun', 'formula', 'abbreviation', 'reference'] },
+            llmClaimedSource: { type: 'string', enum: ['document_text', 'page_image', 'unknown'] },
+            ja: { type: 'string' },
+            jaSource: { type: 'string', enum: ['document', 'vision', 'llm_inferred', 'missing'] },
+            en: { type: 'string' },
+            enSource: { type: 'string', enum: ['document', 'vision', 'llm_inferred', 'missing'] },
+            abbr: { type: 'string' },
+            formula: { type: 'string' },
+            latex: { type: 'string' },
+            displayText: { type: 'string' },
+            evidence: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  page: { type: 'integer' },
+                  snippet: { type: 'string' },
+                },
+                required: ['page', 'snippet'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['category', 'llmClaimedSource', 'ja', 'jaSource', 'en', 'enSource', 'abbr', 'formula', 'latex', 'displayText', 'evidence'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['entries'],
+    additionalProperties: false,
+  },
+}
+
+// buildFormulaMiniPrompt (559-571行付近) の JSON 形式定義と厳密に一致させること。
+const FORMULA_MINI_JSON_SCHEMA: JsonSchemaSpec = {
+  name: 'glossary_formula_review',
+  schema: {
+    type: 'object',
+    properties: {
+      formulas: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            candidateId: { type: 'string' },
+            formula: { type: 'string' },
+            latex: { type: 'string' },
+            displayText: { type: 'string' },
+            confidence: { type: 'number' },
+            evidence: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  page: { type: 'integer' },
+                  snippet: { type: 'string' },
+                },
+                required: ['page', 'snippet'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['candidateId', 'formula', 'latex', 'displayText', 'confidence', 'evidence'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['formulas'],
+    additionalProperties: false,
+  },
+}
+
+// ============================================================
+// 切り詰め (truncated) レスキュー用ヘルパー
+//
+// finish_reason=length で content が途中で切れた JSON を、
+// 「最後まで完全に受信できた配列要素の直後」でトリムして有効な JSON に整形する。
+// closeJsonCandidate (jsonResponse.ts) は文字列の途中で切れている場合 null を返し
+// 修復できないため、その手前の完全な要素までを残す専用のレスキューを用意する。
+//
+// 汎用化のポイント: 「配列の直接の子要素 (文字列・オブジェクト・配列) が閉じた直後」だけを
+// 安全な切り詰め位置として記録する。オブジェクトのプロパティ境界 (key/value) は対象にしない
+// — そこで切ると `{"text"}` のような壊れた JSON になり得るため。配列要素境界だけなら、
+// キーか値かの曖昧さが原理的に発生しない (配列にキーは無い) ので安全に判定できる。
+// ============================================================
+
+function trimTruncatedJsonToLastCompleteArrayElement(content: string): string | null {
+  const trimmed = content.trim()
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*)$/i)
+  const body = fenceMatch ? fenceMatch[1] : trimmed
+  const start = body.indexOf('{')
+  if (start === -1) return null
+
+  const stack: Array<'}' | ']'> = []
+  let inString = false
+  let escaped = false
+  let lastSafeEnd = -1
+  let lastSafeStack: Array<'}' | ']'> = []
+
+  for (let i = start; i < body.length; i += 1) {
+    const char = body[i]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+        if (stack[stack.length - 1] === ']') {
+          lastSafeEnd = i + 1
+          lastSafeStack = [...stack]
+        }
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      continue
+    }
+    if (char === '{') {
+      stack.push('}')
+      continue
+    }
+    if (char === '[') {
+      stack.push(']')
+      continue
+    }
+    if (char === '}' || char === ']') {
+      if (stack.pop() !== char) return null
+      if (stack[stack.length - 1] === ']') {
+        lastSafeEnd = i + 1
+        lastSafeStack = [...stack]
+      }
+    }
+  }
+
+  if (lastSafeEnd === -1) return null
+  return body.slice(start, lastSafeEnd) + lastSafeStack.slice().reverse().join('')
+}
+
+/**
+ * 切り詰められた JSON から、最後に完全に受信できた配列要素までを使って
+ * パース救済を試みる。救済できなければ null を返す (呼出元は諦めて次に進む)。
+ */
+function parseTruncatedJsonObject(content: string, label: string): Record<string, unknown> | null {
+  const trimmedJson = trimTruncatedJsonToLastCompleteArrayElement(content)
+  if (!trimmedJson) return null
+  try {
+    return parseJsonObjectFromLlmContent(trimmedJson, label)
+  } catch {
+    return null
+  }
+}
+
+// ============================================================
 // 処理 0: 講義主題の事前把握 (extractDocumentTheme)
 // ============================================================
 
@@ -278,12 +533,13 @@ export async function extractDocumentTheme(
   }
 
   const model = requireChatModelForProvider(settings, settings.translationModel, 'glossary document theme extraction')
+  const label = `Glossary document theme: ${document.source.name}`
 
   const json = await postGlossaryChatCompletion(settings, 'Glossary document theme API', {
     model,
     temperature: 0,
-    ...resolveChatCompletionTokenLimitForProvider(settings, THEME_PROBE_MAX_OUTPUT_TOKENS),
-    response_format: resolveJsonResponseFormatForProvider(settings),
+    ...resolveChatCompletionTokenLimitForProvider(settings, resolveEffectiveMaxOutputTokens(settings, THEME_PROBE_MAX_OUTPUT_TOKENS, model, 'chatText')),
+    jsonSchema: THEME_JSON_SCHEMA,
     messages: [
       {
         role: 'system',
@@ -296,15 +552,34 @@ export async function extractDocumentTheme(
     ],
   })
 
-  const content = json.choices?.[0]?.message?.content
+  const choice = json.choices?.[0]
+  const finishReason = choice?.finish_reason
+  const content = choice?.message?.content
   if (!content) {
     return { subject: '', domain: '', keyConcepts: [], promptContext: '' }
   }
 
-  let parsed: Record<string, unknown>
+  let parsed: Record<string, unknown> | null
   try {
-    parsed = parseJsonObjectFromLlmContent(content, `Glossary document theme: ${document.source.name}`)
+    parsed = parseJsonObjectFromLlmContent(content, label)
   } catch {
+    parsed = null
+  }
+  // finish_reason=length で通常パースが失敗した場合のみ、部分パース救済を試みてから諦める。
+  if (!parsed && finishReason === 'length') {
+    parsed = parseTruncatedJsonObject(content, label)
+    if (parsed) {
+      onProgress?.({
+        step: 'theme_done',
+        chunkIndex: 0,
+        chunkCount: 1,
+        pages: probePages.map(p => p.page),
+        pass: 'theme',
+        message: 'theme: rescued from truncated (length-limited) response via partial JSON recovery',
+      })
+    }
+  }
+  if (!parsed) {
     return { subject: '', domain: '', keyConcepts: [], promptContext: '' }
   }
 
@@ -639,6 +914,10 @@ async function postGlossaryChatCompletion(
   if (!model) throw new Error(`${context}: model is required`)
   if (messages.length === 0) throw new Error(`${context}: messages are required`)
 
+  const jsonSchema = body.jsonSchema as JsonSchemaSpec | undefined
+  // gateway 側 (chatText/chatVision) が jsonSchema 指定時は responseFormat: 'omit' より
+  // 優先するようになったため、ここではダミー値で分岐を迂回する必要はない。素直に
+  // 明示指定があればそれを、なければ 'omit' を渡すだけでよい。
   const responseFormat: 'json_object' | 'text' | 'omit' = (() => {
     const value = body.response_format as Record<string, unknown> | undefined
     if (value?.type === 'json_object' || value?.type === 'text') return value.type
@@ -651,6 +930,7 @@ async function postGlossaryChatCompletion(
     temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
     maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : undefined,
     responseFormat,
+    jsonSchema,
   }
   const result = hasImageMessageContent(messages)
     ? await gateway.chatVision({
@@ -663,8 +943,25 @@ async function postGlossaryChatCompletion(
         maxCompletionTokens: typeof body.max_completion_tokens === 'number' ? body.max_completion_tokens : undefined,
       })
 
-  if (result.errorMessage) {
-    throw new Error(`${context} ${result.errorMessage}`)
+  // 切り詰め (truncated) は回復可能な信号として扱う。呼出元の finishReason==='length'
+  // 分岐 (isLengthLimitError 等) が機能するよう、throw せず content と finishReason を
+  // そのまま返す。それ以外のエラー (http_error / refusal / content_filter /
+  // empty_response 等) は従来どおり throw する。
+  //
+  // throw する Error のメッセージには、result.errorMessage をそのまま使わない。
+  // http_error / context_exceeded / rate_limited の場合、result.errorMessage には
+  // formatAiGatewayHttpError が組み立てたプロバイダの生応答本文がそのまま含まれる
+  // （raw= 参照）。この Error は呼出元の catch で onProgress のログメッセージに
+  // そのまま埋め込まれ、UI の進捗ログ・保存されるプロジェクトデータに残るため、
+  // buildLlmFailureCode() が組み立てる短い分類コードに置き換える
+  // （429 応答の生 JSON が字幕テキストに漏洩した本番事故と同種の対策。
+  // translateEn.ts / correct.ts の同種の対応も参照）。
+  if (result.errorMessage && result.errorCode !== 'truncated') {
+    const isHttpClassifiedError = result.errorCode === 'http_error' || result.errorCode === 'context_exceeded' || result.errorCode === 'rate_limited'
+    const safeMessage = isHttpClassifiedError
+      ? buildLlmFailureCode({ errorCode: result.errorCode, httpStatus: result.httpStatus })
+      : result.errorMessage
+    throw new Error(`${context} ${safeMessage}`)
   }
 
   const usage = {
@@ -1457,8 +1754,8 @@ async function requestFormulaMiniReview(
   const json = await postGlossaryChatCompletion(settings, `Glossary formula mini review API page ${page.page}`, {
     model,
     temperature: 0,
-    ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
-    response_format: resolveJsonResponseFormatForProvider(settings),
+    ...resolveChatCompletionTokenLimitForProvider(settings, resolveEffectiveMaxOutputTokens(settings, resolveGlossaryMaxOutputTokens(settings), model, 'chatVision')),
+    jsonSchema: FORMULA_MINI_JSON_SCHEMA,
     messages: [
       {
         role: 'system',
@@ -1545,35 +1842,34 @@ async function applyFormulaMiniReviewIfNeeded(
 // LLM 呼び出し
 // ============================================================
 
-async function requestCandidateChunk(
+interface CandidateExtractionAttempt {
+  finishReason: string
+  content: string
+  /** finishReason==='length' のときのみ null。それ以外は (パース失敗時の空配列も含め) 必ず配列。 */
+  candidates: NormalizedGlossaryCandidate[] | null
+}
+
+async function runCandidateExtractionAttempt(
   settings: AdminSettings,
   document: ExtractedPdfDocument,
   pages: ExtractedPdfPage[],
   useVision: boolean,
   maxChars: number,
   themeContext: string,
+  model: string,
+  capability: 'chatText' | 'chatVision',
+  desiredOutputTokens: number,
   chunkIndex: number,
   chunkCount: number,
   pass: GlossaryExtractionPass,
+  pageNumbers: number[],
   onProgress?: GlossaryGenerationOptions['onProgress'],
-): Promise<NormalizedGlossaryCandidate[]> {
-  const requestedModel = useVision ? settings.pdfExtractionVisionModel : settings.translationModel
-  const model = requireChatModelForProvider(settings, requestedModel, 'self-made glossary candidate extraction')
-  const pageNumbers = pages.map(page => page.page)
-  onProgress?.({
-    step: 'chunk_start',
-    chunkIndex,
-    chunkCount,
-    pages: pageNumbers,
-    pass,
-    message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: pages ${pageNumbers.join(', ')}`,
-  })
-
+): Promise<CandidateExtractionAttempt> {
   const json = await postGlossaryChatCompletion(settings, `Glossary candidate extraction API pass=${pass} pages ${pageNumbers.join(', ')}`, {
     model,
     temperature: 0,
-    ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
-    response_format: resolveJsonResponseFormatForProvider(settings),
+    ...resolveChatCompletionTokenLimitForProvider(settings, resolveEffectiveMaxOutputTokens(settings, desiredOutputTokens, model, capability)),
+    jsonSchema: CANDIDATES_JSON_SCHEMA,
     messages: [
       {
         role: 'system',
@@ -1588,29 +1884,36 @@ async function requestCandidateChunk(
 
   const choice = json.choices?.[0]
   const finishReason = choice?.finish_reason ?? 'unknown'
-  const content = choice?.message?.content
+  const content = choice?.message?.content ?? ''
   onProgress?.({
     step: 'api_response',
     chunkIndex,
     chunkCount,
     pages: pageNumbers,
     pass,
-    message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: finish_reason=${finishReason}, content_chars=${content?.length ?? 0}${formatUsage(json)}`,
+    message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: finish_reason=${finishReason}, content_chars=${content.length}${formatUsage(json)}`,
   })
+
   if (finishReason === 'length') {
-    const err = new Error(`Glossary candidate extraction stopped by length limit at pass=${pass}, pages ${pageNumbers.join(', ')}.`)
-    ;(err as Error & { glossaryFinishReason?: string }).glossaryFinishReason = finishReason
-    throw err
+    return { finishReason, content, candidates: null }
   }
   if (!content) throw new Error('Glossary candidate extraction response did not include message content')
 
-  let candidates: NormalizedGlossaryCandidate[]
   try {
-    candidates = dedupeCandidates(
+    const candidates = dedupeCandidates(
       rawCandidates(parseJsonObjectFromLlmContent(content, `Glossary candidates ${pass} pages ${pageNumbers.join(', ')}`))
         .map(normalizeCandidate)
         .filter((candidate): candidate is NormalizedGlossaryCandidate => Boolean(candidate)),
     )
+    onProgress?.({
+      step: 'chunk_done',
+      chunkIndex,
+      chunkCount,
+      pages: pageNumbers,
+      pass,
+      message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: ${candidates.length} candidates`,
+    })
+    return { finishReason, content, candidates }
   } catch (error) {
     onProgress?.({
       step: 'chunk_done',
@@ -1620,17 +1923,113 @@ async function requestCandidateChunk(
       pass,
       message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: invalid JSON; skipped (${error instanceof Error ? error.message : String(error)})`,
     })
-    return []
+    return { finishReason, content, candidates: [] }
   }
+}
+
+function rescueTruncatedCandidates(content: string, label: string): NormalizedGlossaryCandidate[] | null {
+  const parsed = parseTruncatedJsonObject(content, label)
+  if (!parsed) return null
+  const candidates = dedupeCandidates(
+    rawCandidates(parsed)
+      .map(normalizeCandidate)
+      .filter((candidate): candidate is NormalizedGlossaryCandidate => Boolean(candidate)),
+  )
+  return candidates.length > 0 ? candidates : null
+}
+
+/**
+ * 候補抽出の 1 チャンク分。length 切れ (finish_reason=length) を回復可能な信号として扱い、
+ * 本番事故 (9ページ目が切り詰められただけでジョブ全体が0件保存になった) の再発を防ぐ:
+ *   1. 部分パース救済 — 切り詰められた content から最後まで完全に受信できた候補だけを拾う
+ *   2. 救済できなければ、出力上限を倍にして 1 回だけ再試行する
+ *   3. それでも駄目なら throw せず空配列を返し、ログに残してそのページだけスキップする
+ * 上記以外の失敗 (http_error 等) は postGlossaryChatCompletion がそのまま throw するため、
+ * 呼出元 (generateTwoStageSelfMadeGlossaryFromPdf 等) のチャンク単位 try/catch に委ねる。
+ */
+async function requestCandidateChunk(
+  settings: AdminSettings,
+  document: ExtractedPdfDocument,
+  pages: ExtractedPdfPage[],
+  useVision: boolean,
+  maxChars: number,
+  themeContext: string,
+  chunkIndex: number,
+  chunkCount: number,
+  pass: GlossaryExtractionPass,
+  onProgress?: GlossaryGenerationOptions['onProgress'],
+): Promise<NormalizedGlossaryCandidate[]> {
+  const requestedModel = useVision ? settings.pdfExtractionVisionModel : settings.translationModel
+  const model = requireChatModelForProvider(settings, requestedModel, 'self-made glossary candidate extraction')
+  const capability: 'chatText' | 'chatVision' = useVision ? 'chatVision' : 'chatText'
+  const pageNumbers = pages.map(page => page.page)
+  const label = `Glossary candidates ${pass} pages ${pageNumbers.join(', ')}`
+  onProgress?.({
+    step: 'chunk_start',
+    chunkIndex,
+    chunkCount,
+    pages: pageNumbers,
+    pass,
+    message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: pages ${pageNumbers.join(', ')}`,
+  })
+
+  const desiredTokens = resolveGlossaryMaxOutputTokens(settings)
+  const first = await runCandidateExtractionAttempt(
+    settings, document, pages, useVision, maxChars, themeContext, model, capability, desiredTokens,
+    chunkIndex, chunkCount, pass, pageNumbers, onProgress,
+  )
+  if (first.candidates !== null) return first.candidates
+
+  const rescued = rescueTruncatedCandidates(first.content, label)
+  if (rescued) {
+    onProgress?.({
+      step: 'chunk_done',
+      chunkIndex,
+      chunkCount,
+      pages: pageNumbers,
+      pass,
+      message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: rescued ${rescued.length} candidates from truncated (length-limited) response`,
+    })
+    return rescued
+  }
+
+  const retryTokens = clamp(desiredTokens * 2, MIN_GLOSSARY_OUTPUT_TOKENS, MAX_GLOSSARY_OUTPUT_TOKENS)
+  onProgress?.({
+    step: 'chunk_start',
+    chunkIndex,
+    chunkCount,
+    pages: pageNumbers,
+    pass,
+    message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: retrying once with doubled output limit (${desiredTokens} -> ${retryTokens}) after truncation`,
+  })
+  const second = await runCandidateExtractionAttempt(
+    settings, document, pages, useVision, maxChars, themeContext, model, capability, retryTokens,
+    chunkIndex, chunkCount, pass, pageNumbers, onProgress,
+  )
+  if (second.candidates !== null) return second.candidates
+
+  const rescuedRetry = rescueTruncatedCandidates(second.content, label)
+  if (rescuedRetry) {
+    onProgress?.({
+      step: 'chunk_done',
+      chunkIndex,
+      chunkCount,
+      pages: pageNumbers,
+      pass,
+      message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: rescued ${rescuedRetry.length} candidates from truncated retry response`,
+    })
+    return rescuedRetry
+  }
+
   onProgress?.({
     step: 'chunk_done',
     chunkIndex,
     chunkCount,
     pages: pageNumbers,
     pass,
-    message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: ${candidates.length} candidates`,
+    message: `${pass} candidate chunk ${chunkIndex + 1}/${chunkCount}: skipped after retry still truncated (pages ${pageNumbers.join(', ')})`,
   })
-  return candidates
+  return []
 }
 
 async function requestDetailBatch(
@@ -1659,8 +2058,8 @@ async function requestDetailBatch(
   const json = await postGlossaryChatCompletion(settings, `Glossary detail generation API pass=${pass} batch ${batchIndex + 1}/${batchCount}`, {
     model,
     temperature: 0,
-    ...resolveChatCompletionTokenLimitForProvider(settings, resolveGlossaryMaxOutputTokens(settings)),
-    response_format: resolveJsonResponseFormatForProvider(settings),
+    ...resolveChatCompletionTokenLimitForProvider(settings, resolveEffectiveMaxOutputTokens(settings, resolveGlossaryMaxOutputTokens(settings), model, 'chatText')),
+    jsonSchema: ENTRIES_JSON_SCHEMA,
     messages: [
       {
         role: 'system',
@@ -1795,21 +2194,50 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
     message: `${pass}: pass started (${chunks.length} pages, concurrency=${concurrency})`,
   })
 
+  // mapWithConcurrency は run() が 1 件でも reject すると Promise.all ごと失敗し、
+  // それまでに取得できていた他ページの候補が全部捨てられる (本番事故の直接原因)。
+  // ここでチャンク単位に try/catch し、1 ページの失敗が全体を道連れにしないようにする。
+  const failedPages: number[] = []
   const passEntries = await mapWithConcurrency(chunks.length, concurrency, async (i) => {
     const pages = chunks[i]
-    return requestCandidateChunk(
-      settings,
-      document,
-      pages,
-      useVision,
-      MAX_LOCAL_CHARS_PER_REQUEST,
-      themeContext,
-      i,
-      chunks.length,
-      pass,
-      options.onProgress,
-    )
+    try {
+      return await requestCandidateChunk(
+        settings,
+        document,
+        pages,
+        useVision,
+        MAX_LOCAL_CHARS_PER_REQUEST,
+        themeContext,
+        i,
+        chunks.length,
+        pass,
+        options.onProgress,
+      )
+    } catch (error) {
+      failedPages.push(...pages.map(page => page.page))
+      options.onProgress?.({
+        step: 'chunk_done',
+        chunkIndex: i,
+        chunkCount: chunks.length,
+        pages: pages.map(page => page.page),
+        pass,
+        message: `${pass} candidate chunk ${i + 1}/${chunks.length}: skipped after failure (${error instanceof Error ? error.message : String(error)})`,
+      })
+      return []
+    }
   })
+
+  if (failedPages.length > 0) {
+    const sortedFailedPages = [...new Set(failedPages)].sort((a, b) => a - b)
+    options.onProgress?.({
+      step: 'api_response',
+      chunkIndex: 0,
+      chunkCount: chunks.length,
+      pages: sortedFailedPages,
+      pass,
+      message: `${pass}: ${sortedFailedPages.length} page(s) skipped after failure: ${sortedFailedPages.join(', ')}`,
+    })
+  }
 
   const allCandidates = passEntries.flat()
   const filteredCandidates = allCandidates.filter(shouldExpandCandidate)
@@ -1883,21 +2311,46 @@ async function generateTwoStageSelfMadeGlossaryFromPdf(
   }
 
   const rawEntries: RawGlossaryEntry[] = []
+  const failedDetailBatchPages: number[] = []
   const batches = batchCandidates(mergedCandidates, LOCAL_DETAIL_BATCH_SIZE)
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-    const raw = await requestDetailBatchWithFallback(
-      settings,
-      document,
-      batches[batchIndex],
-      themeContext,
-      0,
-      chunks.length,
-      batchIndex,
-      batches.length,
+    try {
+      const raw = await requestDetailBatchWithFallback(
+        settings,
+        document,
+        batches[batchIndex],
+        themeContext,
+        0,
+        chunks.length,
+        batchIndex,
+        batches.length,
+        pass,
+        options.onProgress,
+      )
+      rawEntries.push(...raw)
+    } catch (error) {
+      const batchPages = batches[batchIndex].map(candidate => candidate.page).filter((page): page is number => typeof page === 'number')
+      failedDetailBatchPages.push(...batchPages)
+      options.onProgress?.({
+        step: 'chunk_done',
+        chunkIndex: 0,
+        chunkCount: chunks.length,
+        pages: batchPages,
+        pass,
+        message: `${pass} detail batch ${batchIndex + 1}/${batches.length}: skipped after failure (${error instanceof Error ? error.message : String(error)})`,
+      })
+    }
+  }
+  if (failedDetailBatchPages.length > 0) {
+    const sortedFailedPages = [...new Set(failedDetailBatchPages)].sort((a, b) => a - b)
+    options.onProgress?.({
+      step: 'api_response',
+      chunkIndex: 0,
+      chunkCount: chunks.length,
+      pages: sortedFailedPages,
       pass,
-      options.onProgress,
-    )
-    rawEntries.push(...raw)
+      message: `${pass}: detail generation skipped for ${sortedFailedPages.length} page(s) after failure: ${sortedFailedPages.join(', ')}`,
+    })
   }
 
   const normalizedEntries = rawEntries
@@ -1999,47 +2452,74 @@ async function generateNonVisionSelfMadeGlossaryFromPdf(
     message: `${pass}: pass started (${chunks.length} chunks)`,
   })
 
+  const failedPages: number[] = []
   for (let i = 0; i < chunks.length; i += 1) {
     const pages = chunks[i]
     const pageNumbers = pages.map(p => p.page)
-    const candidates = await requestCandidateChunk(
-      settings,
-      document,
-      pages,
-      false,
-      MAX_CHARS_PER_REQUEST,
-      themeContext,
-      i,
-      chunks.length,
-      pass,
-      options.onProgress,
-    )
-    if (candidates.length === 0) continue
-
-    const batches = batchCandidates(candidates, LOCAL_DETAIL_BATCH_SIZE)
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-      const raw = await requestDetailBatchWithFallback(
+    // チャンク単位 (候補抽出 + その詳細展開バッチすべて) を try/catch で包み、
+    // 1 チャンクの失敗が以降のチャンク・既に保存済みの entries を道連れにしないようにする。
+    try {
+      const candidates = await requestCandidateChunk(
         settings,
         document,
-        batches[batchIndex],
+        pages,
+        false,
+        MAX_CHARS_PER_REQUEST,
         themeContext,
         i,
         chunks.length,
-        batchIndex,
-        batches.length,
         pass,
         options.onProgress,
       )
-      const normalizedBatch = raw
-        .map(entry => normalizeEntry(entry, document, pagesByNumber))
-        .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
-      if (normalizedBatch.length > 0) {
-        const verification = verifyEntriesWithHaystack(normalizedBatch, haystack)
-        emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
-        entries.push(...verification.entries)
-        options.onEntries?.(verification.entries)
+      if (candidates.length === 0) continue
+
+      const batches = batchCandidates(candidates, LOCAL_DETAIL_BATCH_SIZE)
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        const raw = await requestDetailBatchWithFallback(
+          settings,
+          document,
+          batches[batchIndex],
+          themeContext,
+          i,
+          chunks.length,
+          batchIndex,
+          batches.length,
+          pass,
+          options.onProgress,
+        )
+        const normalizedBatch = raw
+          .map(entry => normalizeEntry(entry, document, pagesByNumber))
+          .filter((entry): entry is SelfMadeGlossaryEntry => Boolean(entry))
+        if (normalizedBatch.length > 0) {
+          const verification = verifyEntriesWithHaystack(normalizedBatch, haystack)
+          emitVerificationLog(verification, pageNumbers, pass, i, chunks.length, options.onProgress)
+          entries.push(...verification.entries)
+          options.onEntries?.(verification.entries)
+        }
       }
+    } catch (error) {
+      failedPages.push(...pageNumbers)
+      options.onProgress?.({
+        step: 'chunk_done',
+        chunkIndex: i,
+        chunkCount: chunks.length,
+        pages: pageNumbers,
+        pass,
+        message: `${pass} chunk ${i + 1}/${chunks.length}: skipped after failure (${error instanceof Error ? error.message : String(error)})`,
+      })
     }
+  }
+
+  if (failedPages.length > 0) {
+    const sortedFailedPages = [...new Set(failedPages)].sort((a, b) => a - b)
+    options.onProgress?.({
+      step: 'api_response',
+      chunkIndex: chunks.length - 1,
+      chunkCount: chunks.length,
+      pages: sortedFailedPages,
+      pass,
+      message: `${pass}: ${sortedFailedPages.length} page(s) skipped after failure: ${sortedFailedPages.join(', ')}`,
+    })
   }
 
   options.onProgress?.({

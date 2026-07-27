@@ -1,5 +1,6 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import { createAiGateway } from '@/lib/aiGateway'
+import type { JsonSchemaSpec, LlmErrorCode } from '@/lib/aiGateway'
 import { type LlmUsageSink } from './llmUsageSink'
 
 /**
@@ -15,9 +16,13 @@ import { type LlmUsageSink } from './llmUsageSink'
  *   - HTTP エラー / ネットワーク失敗 → errorMessage
  *   - finish_reason='content_filter' → finishReason + errorMessage='content_filter'（呼出元で即諦め判定）
  *   - message.refusal !== null → refusal + errorMessage='model_refusal:...'（呼出元で即諦め判定）
- *   - finish_reason='length' → finishReason + errorMessage='truncated_at_length_limit'（呼出元でリトライ判定）
- *   - 空 content → errorMessage='empty_response'
+ *   - finish_reason='length' → finishReason + errorMessage='truncated_at_length_limit (content_preview=...)'（呼出元でリトライ判定）
+ *   - 空 content → errorMessage='empty_response (payload_keys=...)'
  *   - 正常完了 → content + finishReason + usage tokens
+ *
+ * 重要: errorMessage は表示・ログ用の自由文字列であり、gateway 側で診断情報の suffix
+ * （content_preview= / payload_keys= 等）が付与されるため完全一致比較の対象にしてはならない。
+ * 呼出元が分岐判定に使うのは必ず errorCode（LlmErrorCode）の方。
  *
  * OpenAI API 仕様参照:
  *   https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
@@ -31,6 +36,8 @@ export interface LlmCallResult {
   refusal?: string | null
   /** 失敗理由（HTTP / refusal / content_filter / length / empty）*/
   errorMessage?: string
+  /** 分岐判定に使う構造化エラーコード。errorMessage は表示用のため判定には使わないこと */
+  errorCode?: LlmErrorCode
   /** HTTP ステータス（エラー時のみ）*/
   httpStatus?: number
   /** prompt tokens (usage.prompt_tokens) */
@@ -68,6 +75,11 @@ export interface LlmCallOptions {
    * `'omit'` を指定すると response_format フィールド自体を付けない。
    */
   responseFormat?: 'json_object' | 'text' | 'omit'
+  /**
+   * Structured Outputs 用の JSON Schema。指定するとプロファイル解決を優先する
+   * （json_schema 非対応プロファイルでは自動的に json_object / text へフォールバックする）。
+   */
+  jsonSchema?: JsonSchemaSpec
   /** ノード名（エラーメッセージ用識別子）*/
   nodeName: string
   /**
@@ -75,6 +87,13 @@ export interface LlmCallOptions {
    * pipeline 全体のコスト・トークン集計に使う。未指定なら no-op（テストや単体実行から呼べる）。
    */
   usageSink?: LlmUsageSink
+  /**
+   * chatText.ts の ChatTextOptions.resolveRuntimeContextLength をそのまま透過する。
+   * true にすると LM Studio 系プロファイルで実際の loaded_context_length を取得し、
+   * max_tokens クランプに反映する。既定 false（余計なネットワーク呼出をしない）。
+   * 実際の LLM 呼出を行うノード（correctJa 等）でのみ true にすること。
+   */
+  resolveRuntimeContextLength?: boolean
 }
 
 /**
@@ -102,7 +121,9 @@ export async function llmCallWithMeta(
     reasoningEffort: options.reasoningEffort,
     maxTokens: options.maxTokens,
     responseFormat: options.responseFormat,
+    jsonSchema: options.jsonSchema,
     usageSink: options.usageSink,
+    resolveRuntimeContextLength: options.resolveRuntimeContextLength,
   })
 }
 

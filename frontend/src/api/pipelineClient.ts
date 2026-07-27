@@ -2,10 +2,21 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { tauriFetch, type TauriFetchResponse } from '@/lib/tauriFetch'
 import type { AdminSettings } from '@/types/adminSettings'
 import { requireAiConnection } from '@/lib/pipeline/aiProvider'
-import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
+import { resetLlmConcurrency, setLlmConcurrencyLimit } from '@/lib/aiGateway/llmConcurrency'
+import { resetLmStudioContextLengthCache } from '@/lib/aiGateway/lmStudioContextLength'
+import { getLlmErrorLog, resetLlmErrorLog } from '@/lib/aiGateway/llmErrorLog'
+import { resetParamCompat } from '@/lib/aiGateway/paramCompat'
+import { setCurrentPipelineAbortController } from '@/lib/pipeline/pipelineAbort'
+import { createLlmUsageSink, setCurrentLlmUsageSink } from '@/lib/pipeline/llmUsageSink'
+import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecord, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
-import { getLocalPipelineDebugFailure, runLocalPostPipeline, type LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
+import {
+  getLocalPipelineDebugFailure,
+  runLocalPostPipeline,
+  type LocalPipelineGlossary,
+  type LocalPipelineProgressDetail,
+} from '@/lib/pipeline/localPipeline'
 
 interface BackendNodeTrace {
   node_id?: string
@@ -84,6 +95,29 @@ function attachPipelineClientDebug(
   return err
 }
 
+/**
+ * runPipelineViaApi の finally 直前で、その回の実行で集まった llmErrors / llmUsage を
+ * 失敗時に伝播する Error へマージして付与する。
+ *
+ * 既に attachPipelineClientDebug 等で pipelineClientDebug が付いている場合（localPipeline
+ * の失敗経路の大半はこちら）は、その内容を保ったまま llmErrors / llmUsage だけ追記する。
+ * 何も付いていない場合（設定不備等、どのノードも実行されずに落ちた早期失敗）は llmErrors /
+ * llmUsage だけを持つ最小限のオブジェクトを付与する（この場合は空配列になるだけで実害はない）。
+ */
+function attachLlmDebugToError(
+  error: unknown,
+  llmErrors: PipelineLlmErrorRecord[],
+  llmUsage: PipelineLlmUsageRecord[],
+): Error {
+  const err = error instanceof Error ? error : new Error(String(error))
+  const existing = (err as unknown as Record<string, unknown>).pipelineClientDebug
+  const merged = existing && typeof existing === 'object'
+    ? { ...(existing as Record<string, unknown>), llmErrors, llmUsage }
+    : { llmErrors, llmUsage }
+  Object.assign(err, { pipelineClientDebug: merged })
+  return err
+}
+
 export interface PipelineApiRunResult {
   blocks: SubtitleBlock[]
   traces: PipelineNodeTrace[]
@@ -94,6 +128,17 @@ export interface PipelineApiRunResult {
     traces?: PipelineNodeTrace[]
     stageSnapshots?: PipelineStageSnapshot[]
     mode: 'managed_service' | 'legacy_pipeline'
+    /**
+     * 各 LLM API 呼出の usage 記録（llmUsageSink.ts 参照）。runPipelineViaApi が実行終了時に
+     * sink から回収して埋める。
+     */
+    llmUsage?: PipelineLlmUsageRecord[]
+    /**
+     * LLM API 呼出失敗のデバッグ記録（llmErrorLog.ts 参照）。runPipelineViaApi が実行終了時に
+     * 回収して埋める。字幕テキストには一切流れないデバッグ専用の記録（PipelineLlmErrorRecord
+     * の JSDoc 参照）。
+     */
+    llmErrors?: PipelineLlmErrorRecord[]
   }
 }
 
@@ -104,6 +149,17 @@ export interface PipelineRunProgress {
   completedNodes: string[]
   totalNodes: number
   nodeElapsedSec: number | null
+  /**
+   * 現在応答待ちの LLM リクエスト数。ローカルパイプライン経路のみ埋まる
+   * （runLocalPostPipeline のハートビートが返す detail 由来）。managed service 経路（リモート
+   * API 経由でジョブをポーリングするだけ）はこの値を持たないため、常に optional として扱う。
+   */
+  inFlightLlmCalls?: number
+  /**
+   * 直近に LLM 応答が返ってからの経過秒数。1件も返っていない、またはこの経路で計測していない
+   * 場合は null。inFlightLlmCalls と同様、ローカルパイプライン経路のみ埋まる。
+   */
+  secondsSinceLastLlmResponse?: number | null
 }
 
 export interface PipelineSourceInput {
@@ -230,6 +286,27 @@ function buildManagedTranscriptError(jobId: string, result: ManagedTranscriptRes
   const workflow = typeof metadata.workflow === 'string' ? metadata.workflow : 'unknown'
   const detail = typeof metadata.error === 'string' && metadata.error.trim() ? metadata.error.trim() : 'transcript_segments is empty'
   return new Error(`managed transcript result is empty: ${detail} (job_id=${jobId}, workflow=${workflow}, final_node=${finalNode})`)
+}
+
+/**
+ * runLocalPostPipeline の onStep(step, detail) から PipelineRunProgress を組み立てる。
+ * ローカルパイプライン経路の2箇所（runLocalTranscriptPipeline / runManagedPipeline）で
+ * 同じ変換ロジックが重複していたため関数として切り出した。単体テストしやすくする狙いもある
+ * （detail 無し = ノード開始直後の通知、detail 有り = ハートビート由来の進捗）。
+ */
+export function buildLocalPipelineProgress(
+  base: Pick<PipelineRunProgress, 'runId' | 'completedNodes' | 'totalNodes'>,
+  step: string,
+  detail: LocalPipelineProgressDetail | undefined,
+): PipelineRunProgress {
+  return {
+    ...base,
+    status: 'running',
+    currentNode: step,
+    nodeElapsedSec: detail?.elapsedSec ?? null,
+    inFlightLlmCalls: detail?.inFlightLlmCalls,
+    secondsSinceLastLlmResponse: detail?.secondsSinceLastLlmResponse,
+  }
 }
 
 function normalizeProgressStatus(status: string | undefined): PipelineRunProgress['status'] {
@@ -487,15 +564,16 @@ async function runLocalTranscriptPipeline(
     localResult = await runLocalPostPipeline(
       transcriptSegments,
       settings,
-      (step) =>
-        onProgress?.({
-          runId: 'local-transcript',
-          status: 'running',
-          currentNode: step,
-          completedNodes: managedTraces.map((trace) => trace.nodeId),
-          totalNodes: managedTraces.length + 8,
-          nodeElapsedSec: null,
-        }),
+      (step, detail) =>
+        onProgress?.(buildLocalPipelineProgress(
+          {
+            runId: 'local-transcript',
+            completedNodes: managedTraces.map((trace) => trace.nodeId),
+            totalNodes: managedTraces.length + 8,
+          },
+          step,
+          detail,
+        )),
       glossary,
     )
   } catch (error) {
@@ -625,15 +703,16 @@ async function runManagedPipeline(
       localResult = await runLocalPostPipeline(
         transcriptSegments,
         settings,
-        (step) =>
-          onProgress?.({
-            runId: jobId,
-            status: 'running',
-            currentNode: step,
-            completedNodes: managedTraces.map((trace) => trace.nodeId),
-            totalNodes: managedTraces.length + localStepCountEstimate,
-            nodeElapsedSec: null,
-          }),
+        (step, detail) =>
+          onProgress?.(buildLocalPipelineProgress(
+            {
+              runId: jobId,
+              completedNodes: managedTraces.map((trace) => trace.nodeId),
+              totalNodes: managedTraces.length + localStepCountEstimate,
+            },
+            step,
+            detail,
+          )),
         glossary,
       )
     } catch (error) {
@@ -683,10 +762,53 @@ export async function runPipelineViaApi(
     throw new Error('service URL is not configured')
   }
 
-  if (settings.serviceMode === 'managed_service') {
-    return runManagedPipeline(apiBase, sourceName, settings, sourceInput, onProgress, glossary)
+  // 中断シグナルの生存期間はこの関数の実行中だけ。finally での解放を絶対に落とさないこと
+  // （解放漏れは「次回実行が開始直後に中断される」＝アプリが実行不能になる事故に直結する）。
+  const abortController = new AbortController()
+  setCurrentPipelineAbortController(abortController)
+  // gateway 層の全体同時実行数セマフォの上限をここで設定する。ノード単体の並列制御
+  // （mapWithConcurrency）だけでは、再帰的な追加 LLM 呼出（半割リトライ等）がノードの並列枠の
+  // 外側で増殖してしまうため（llmConcurrency.ts のコメント参照）。abortController と同じく、
+  // finally での解放（resetLlmConcurrency）を絶対に落とさないこと
+  // （解放漏れは待機中の Promise が残留し、次回実行のスロット確保が正しく動かなくなる事故に直結する）。
+  setLlmConcurrencyLimit(settings.apiRequestConcurrency)
+  // 前回実行のキャッシュが残らないよう、実行開始時にも必ずクリアする
+  // （lmStudioContextLength.ts のコメント参照。モデル単位でキャッシュするため、前回実行と
+  // 今回実行で同じモデルでもロード条件が変わりうる＝キャッシュを持ち越してはいけない）。
+  resetLmStudioContextLengthCache()
+  // 前回実行のデバッグ記録・学習結果を持ち越さない（llmErrorLog.ts / paramCompat.ts の
+  // JSDoc「運用ルール」参照）。
+  resetLlmErrorLog()
+  resetParamCompat()
+  // llmUsage sink の配線。setCurrentLlmUsageSink() を呼ぶ箇所がこれまで存在せず、各 LLM 呼出の
+  // safePush(getCurrentLlmUsageSink(), ...) が常に no-op になっていた（PipelineRunDebug.llmUsage
+  // が常に0件だったバグの原因。llmUsageSink.ts の JSDoc「運用ルール」参照）。
+  const llmUsageSink = createLlmUsageSink()
+  setCurrentLlmUsageSink(llmUsageSink)
+  try {
+    const result = settings.serviceMode === 'managed_service'
+      ? await runManagedPipeline(apiBase, sourceName, settings, sourceInput, onProgress, glossary)
+      : await runLocalTranscriptPipeline(apiBase, sourceName, settings, sourceInput, onProgress, glossary)
+    // 実行終了時に debug 用の器（llmErrorLog / llmUsageSink）から回収し、既存の
+    // stageSnapshots 等と同じ debug オブジェクトに載せる（App.tsx がここから
+    // pipelineRun.debug 経由でエクスポートまで運ぶ）。
+    return {
+      ...result,
+      debug: result.debug
+        ? { ...result.debug, llmErrors: getLlmErrorLog(), llmUsage: llmUsageSink.records() }
+        : { mode: settings.serviceMode === 'managed_service' ? 'managed_service' : 'legacy_pipeline', llmErrors: getLlmErrorLog(), llmUsage: llmUsageSink.records() },
+    }
+  } catch (error) {
+    // 失敗経路でも診断可能性を落とさない: 既に attachPipelineClientDebug 等で pipelineClientDebug
+    // が付いている場合はその内容を保ったまま llmErrors / llmUsage を追記する
+    // （attachLlmDebugToError の JSDoc参照）。
+    throw attachLlmDebugToError(error, getLlmErrorLog(), llmUsageSink.records())
+  } finally {
+    setCurrentPipelineAbortController(null)
+    resetLlmConcurrency()
+    resetLmStudioContextLengthCache()
+    setCurrentLlmUsageSink(undefined)
   }
-  return runLocalTranscriptPipeline(apiBase, sourceName, settings, sourceInput, onProgress, glossary)
 }
 
 function validateManagedServiceConnectionInputs(settings: AdminSettings): string {

@@ -68,6 +68,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     pdfExtractionParallel: false,
     glossaryMaxOutputTokens: 4096,
     apiRequestConcurrency: 7,
+    llmRequestTimeoutSec: 600,
     embeddingModel: 'text-embedding-3-small',
     semanticCheckMode: 'log_only',
     enMaxCharsPerLine: 80,
@@ -131,6 +132,15 @@ function normalizeBoundedInteger(value: unknown, fallback: number, min: number, 
   const rounded = Math.trunc(n)
   if (rounded < min || rounded > max) return fallback
   return rounded
+}
+
+// normalizeBoundedInteger と異なり範囲外の値を fallback へ捨てずに min/max へ丸め込む。
+// タイムアウトのような「ユーザーが極端な値を入れても安全な範囲に収めたい」設定向け。
+function normalizeClampedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' ? value : parseFloat(value as string)
+  if (!isFinite(n)) return fallback
+  const rounded = Math.trunc(n)
+  return Math.min(max, Math.max(min, rounded))
 }
 
 function normalizeServiceMode(value: unknown): ServiceMode {
@@ -222,6 +232,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pdfExtractionParallel: typeof raw.pdfExtractionParallel === 'boolean' ? raw.pdfExtractionParallel : defaults.pdfExtractionParallel,
     glossaryMaxOutputTokens: normalizeBoundedInteger(raw.glossaryMaxOutputTokens, defaults.glossaryMaxOutputTokens, 256, 16384),
     apiRequestConcurrency: normalizeConcurrency(raw.apiRequestConcurrency, defaults.apiRequestConcurrency),
+    llmRequestTimeoutSec: normalizeClampedInteger(raw.llmRequestTimeoutSec, defaults.llmRequestTimeoutSec, 30, 3600),
     embeddingModel: typeof raw.embeddingModel === 'string' && raw.embeddingModel ? raw.embeddingModel : defaults.embeddingModel,
     semanticCheckMode: normalizeSemanticCheckMode(raw.semanticCheckMode),
     enMaxCharsPerLine: normalizePositiveNumber(raw.enMaxCharsPerLine, defaults.enMaxCharsPerLine),

@@ -283,6 +283,10 @@ struct HttpRequestOptions {
     headers: HashMap<String, String>,
     body_text: Option<String>,
     body_file: Option<String>,
+    // ローカルLLM(LM Studio等)が応答を返さなくなった場合、reqwestはデフォルトで
+    // リクエストタイムアウトを持たないため無限に待ち続けてしまう。
+    // JS側(gateway)から明示的に渡された場合のみ設定し、未指定時は従来どおり無制限。
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -299,7 +303,11 @@ async fn http_request(options: HttpRequestOptions) -> Result<HttpResponsePayload
         .parse::<reqwest::Method>()
         .map_err(|e| format!("invalid HTTP method '{}': {e}", options.method))?;
 
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(ms) = options.timeout_ms {
+        client_builder = client_builder.timeout(Duration::from_millis(ms));
+    }
+    let client = client_builder
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
@@ -319,10 +327,16 @@ async fn http_request(options: HttpRequestOptions) -> Result<HttpResponsePayload
         req = req.body(body);
     }
 
-    let response = req
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request to {} failed: {e}", options.url))?;
+    let response = req.send().await.map_err(|e| {
+        // タイムアウト由来のエラーは他のネットワークエラーと区別できる専用メッセージにする。
+        // JS側(gateway)がこの文字列を見てリトライ対象の一時的失敗として扱えるようにするため。
+        if e.is_timeout() {
+            let ms = options.timeout_ms.unwrap_or(0);
+            format!("HTTP request to {} timed out after {ms}ms", options.url)
+        } else {
+            format!("HTTP request to {} failed: {e}", options.url)
+        }
+    })?;
 
     let status = response.status().as_u16();
     let response_headers: HashMap<String, String> = response

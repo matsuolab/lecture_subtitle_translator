@@ -34,6 +34,9 @@ export interface AdminSettings {
   pdfExtractionParallel: boolean
   glossaryMaxOutputTokens: number
   apiRequestConcurrency: number
+  // ローカルLLM(LM Studio等)が応答を返さなくなった場合の打ち切り時間（秒）。
+  // 0秒付近まで下げると正常な大バッチ処理まで誤って打ち切ってしまうため下限を設けている。
+  llmRequestTimeoutSec: number
   embeddingModel: string
   // セマンティックチェック（圧縮前後の意味類似度を Embedding で計測）
   semanticCheckMode: SemanticCheckMode

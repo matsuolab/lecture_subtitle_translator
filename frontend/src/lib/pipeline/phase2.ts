@@ -17,6 +17,7 @@ import { runGeneralRepairAgent } from './generalRepairAgent'
 import { redistributeJaSpan } from './redistributeJaSpan'
 import { tightenTiming } from './tightenTiming'
 import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
+import { buildPartialFailureWarning } from './partialFailureSummary'
 
 type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
 
@@ -37,6 +38,13 @@ export async function runPhase2(
   options: Phase2Options = {},
 ): Promise<EnBlock[]> {
   let blocks = await runNode('translateEn', () => translateEn(jaBlocks, settings, glossaryTerms))
+  // 部分失敗の誤報防止: correctJa と同じ仕組み（phase1.ts / partialFailureSummary.ts 参照）で、
+  // translateEn が例外を投げずに大量失敗しても trace に件数が残るようにする。
+  {
+    const failedTranslationCount = blocks.filter((b) => b.translationFailureReason !== undefined).length
+    const translationWarning = buildPartialFailureWarning('translation', failedTranslationCount, blocks.length)
+    if (translationWarning) onWarning?.('translateEn', translationWarning)
+  }
   if (settings.textNormalizationEnabled) {
     try {
       const config = parseTextNormalizationConfig(settings.textNormalizationRulesJson)

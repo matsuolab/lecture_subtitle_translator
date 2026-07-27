@@ -4,7 +4,13 @@ import type { AiGatewayProfileSnapshot } from '@/lib/aiGateway/apiCompatibilityP
 
 export type PipelineStep = 'idle' | 'transcribe' | 'correct' | 'translate' | 'subtitle' | 'done'
 
-export type PipelineStatus = 'idle' | 'queued' | 'running' | 'success' | 'error'
+/**
+ * 'cancelled' は次の2通りで付く:
+ *   - ユーザーが中断ボタンを押して協調的キャンセルが完了した
+ *   - 実行中のまま保存されたセッションを復元した（新しい画面プロセスでは実行継続がありえないため）
+ * いずれも異常ではないので 'error' とは区別する。
+ */
+export type PipelineStatus = 'idle' | 'queued' | 'running' | 'success' | 'error' | 'cancelled'
 
 export interface PipelineQualityMetrics {
   totalBlocks: number
@@ -119,6 +125,10 @@ export interface PipelineProgressEvent {
   completedNodes?: string[]
   totalNodes?: number
   nodeElapsedSec?: number | null
+  /** 現在応答待ちの LLM リクエスト数。ローカルパイプライン経路のみ埋まる（それ以外は undefined） */
+  inFlightLlmCalls?: number
+  /** 直近に LLM 応答が返ってからの経過秒数。1件も返っていない、または計測対象外の場合は null */
+  secondsSinceLastLlmResponse?: number | null
 }
 
 export interface PipelineStageSnapshot {
@@ -158,6 +168,33 @@ export interface PipelineLlmUsageRecord {
   at?: number
 }
 
+/**
+ * 1 回の LLM API 呼出失敗に対応するデバッグ記録。
+ *
+ * `detail` にはプロバイダの生のエラー応答本文（HTTP エラーボディそのもの、最大1000文字）を
+ * 入れてよい。**この記録はデバッグ専用領域であり、字幕テキスト・`[UNTRANSLATED: ...]` マーカー・
+ * translationFailureReason には決して流れない**（buildLlmFailureCode() が組み立てる短い
+ * 分類コードのみが字幕側に出る、という既存の情報漏洩対策はこの記録の追加によって一切変わらない。
+ * src/lib/aiGateway/llmErrorLog.ts の JSDoc、および errors.ts の buildLlmFailureCode 参照）。
+ *
+ * 本番事故の教訓: 以前は「字幕へ生応答本文を埋め込まない」対策を入れた際、デバッグ用途の
+ * 詳細情報まで一緒に消えてしまい、http_400 の中身がエクスポートのどこにも残らなくなった。
+ * このレコードはその診断可能性を、情報漏洩対策とは別の（UIに出さない）経路で復活させる。
+ */
+export interface PipelineLlmErrorRecord {
+  /** unix epoch ms */
+  at: number
+  /** 呼出元ノード識別子（例: 'translateEn[batch]'）*/
+  nodeName: string
+  /** 実際に API に投げられた model ID */
+  model: string
+  httpStatus?: number
+  /** src/lib/aiGateway/chatText.ts の LlmErrorCode、または 'param_compat_retry' 等の内部イベント名 */
+  errorCode?: string
+  /** プロバイダの生応答本文・例外メッセージ等（最大1000文字。llmErrorLog.ts で切り詰め済み）*/
+  detail: string
+}
+
 export interface PipelineRunDebug {
   sourceMedia?: {
     name: string
@@ -179,6 +216,23 @@ export interface PipelineRunDebug {
    * trace 側は per-attempt 詳細用に保持）。
    */
   llmUsage?: PipelineLlmUsageRecord[]
+  /**
+   * LLM API 呼出失敗のデバッグ記録（最大100件の有界バッファ。llmErrorLog.ts 参照）。
+   * http_400 等、字幕側には短コード化されて出ない失敗の生の原因をここから追える。
+   */
+  llmErrors?: PipelineLlmErrorRecord[]
+}
+
+/**
+ * 実行中ノードの LLM API 呼出アクティビティ。ローカルパイプライン経路の runNode ハートビート
+ * (localPipeline.ts) 由来で、「時間のかかる段階を正常に処理中」なのか「フリーズしている」のかを
+ * UI 側で判断するために使う。managed service 経路（リモートAPI）はこの値を埋めない。
+ */
+export interface PipelineRunLlmActivity {
+  /** 現在応答待ちの LLM リクエスト数 */
+  inFlightLlmCalls: number
+  /** 直近に LLM 応答が返ってからの経過秒数。1件も返っていなければ null */
+  secondsSinceLastLlmResponse: number | null
 }
 
 export interface PipelineRunResult {
@@ -192,4 +246,5 @@ export interface PipelineRunResult {
   metrics?: PipelineRunMetrics
   audit?: PipelineAuditReport
   debug?: PipelineRunDebug
+  llmActivity?: PipelineRunLlmActivity
 }

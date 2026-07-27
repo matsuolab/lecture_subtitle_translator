@@ -72,6 +72,11 @@ export interface EnBlock extends JaBlock {
   /** リトライ回数（0 = 初回成功、N = N 回追加でリトライした）*/
   translationRetryAttempts?: number
   /**
+   * 翻訳 API が JSON ラッパー無しの素の訳文を返したため、コード側で訳文として救済採用したことを示す。
+   * 訳文自体は正常だが、モデルが出力形式の指示に従えていない兆候なので、UI / ログで可視化する。
+   */
+  translationRescued?: boolean
+  /**
    * expandEn の途中で API 失敗した場合の理由（成功 / 不要時は undefined）。
    * 拡張は「短すぎる字幕の追記」なので失敗してもブロック全体は使えるが、
    * 改善の余地が残っていることを UI に表示するためのメタ情報。

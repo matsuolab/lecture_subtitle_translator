@@ -2,11 +2,15 @@ import type { TranscriptSegment } from './types'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
+import { resetLlmActivity } from '@/lib/aiGateway/llmActivity'
 
 import type { PipelineThresholds } from './blockTypes'
 import { runPhase1 } from './phase1'
 import { runPhase2 } from './phase2'
 import { runPhase3 } from './phase3'
+import { runNodeWithHeartbeat, type LocalPipelineProgressDetail } from './runNodeWithHeartbeat'
+
+export type { LocalPipelineProgressDetail } from './runNodeWithHeartbeat'
 
 export interface LocalPipelineResult {
   blocks: SubtitleBlock[]
@@ -180,9 +184,12 @@ function buildPipelineThresholds(settings: AdminSettings): PipelineThresholds {
 export async function runLocalPostPipeline(
   transcriptSegments: TranscriptSegment[],
   settings: AdminSettings,
-  onStep?: (step: string) => void,
+  onStep?: (step: string, detail?: LocalPipelineProgressDetail) => void,
   glossary: LocalPipelineGlossary = { correctionTerms: [], translationTerms: [] },
 ): Promise<LocalPipelineResult> {
+  // 前回実行のカウントが残らないよう、パイプライン開始時に必ずリセットする。
+  resetLlmActivity()
+
   const traces: PipelineNodeTrace[] = []
   const stageSnapshots: PipelineStageSnapshot[] = []
   const thresholds = buildPipelineThresholds(settings)
@@ -207,10 +214,9 @@ export async function runLocalPostPipeline(
   }
 
   const runNode = async <T>(nodeId: string, run: () => Promise<T> | T): Promise<T> => {
-    onStep?.(nodeId)
     const startedAt = Date.now()
     try {
-      const result = await run()
+      const result = await runNodeWithHeartbeat(nodeId, run, onStep)
       record(nodeId, 'success', Date.now() - startedAt)
       recordStageSnapshot(nodeId, result)
       return result

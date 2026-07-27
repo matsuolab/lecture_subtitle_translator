@@ -1,5 +1,5 @@
 import type { AdminSettings } from '@/types/adminSettings'
-import { createAiGateway } from '@/lib/aiGateway'
+import { buildLlmFailureCode, createAiGateway, type ChatTextResult, type JsonSchemaSpec } from '@/lib/aiGateway'
 import type { EnBlock, JaBlock, ViolationCode } from './blockTypes'
 import { computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
@@ -8,6 +8,8 @@ import { loadLanguageProfileConfig, resolveTargetCharMatcher, type LanguageProfi
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
+import { resolveModelProfile, withReasoningHeadroom } from './modelProfile'
+import { isPipelineAbortedError, throwIfPipelineAborted } from './pipelineAbort'
 
 const MAX_SEGMENTS_PER_REQUEST = 40
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
@@ -22,6 +24,81 @@ const COUNT_MISMATCH_RE = /translation API returned (\d+) segments for (\d+) inp
  * 改善見込みが薄く、コストだけ増えるため。
  */
 const PER_BLOCK_RETRY_MAX_ATTEMPTS = 2
+
+/**
+ * バッチ翻訳（callOpenAICompatible）・個別翻訳（callTranslationOnce）で使う Structured Outputs スキーマ。
+ * LM Studio は response_format:{"type":"json_object"} を HTTP 400 で拒否するため、
+ * "type":"json_schema"（Structured Outputs）をスキーマ付きで送る必要がある。
+ * OpenAI / Gemini プロファイルでは resolveChatResponseFormatForDialect が自動的に
+ * json_object へ読み替えるため、呼出元はこのスキーマを渡すだけでよい。
+ */
+const TRANSLATION_JSON_SCHEMA = {
+  name: 'translation',
+  schema: {
+    type: 'object',
+    properties: {
+      translations: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['translations'],
+    additionalProperties: false,
+  },
+} satisfies JsonSchemaSpec
+
+/** callContextGroupAllocation で使う Structured Outputs スキーマ。用途は TRANSLATION_JSON_SCHEMA と同じ。 */
+const CONTEXT_GROUP_TRANSLATION_JSON_SCHEMA = {
+  name: 'context_group_translation',
+  schema: {
+    type: 'object',
+    properties: {
+      groups: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            translations: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['id', 'translations'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['groups'],
+    additionalProperties: false,
+  },
+} satisfies JsonSchemaSpec
+
+/**
+ * 1 segment あたりの想定出力トークン数。字幕1行は概ね40文字前後（DEFAULT_PIPELINE_THRESHOLDS.maxLineLen
+ * 相当）で、英訳はそれよりやや長くなりうるため安全側に見積もった下限値。
+ * 文字数ベースの見積り（CHARS_TO_TOKENS_ESTIMATE_RATIO）が小さくなりすぎる短文セグメントの下支えに使う。
+ */
+const ESTIMATED_TOKENS_PER_SEGMENT = 60
+
+/** JSON構造のオーバーヘッド分（キー名・括弧・カンマなど）の余裕。 */
+const OUTPUT_TOKEN_ESTIMATE_OVERHEAD = 64
+
+/**
+ * 原文の文字数から「本文として欲しい出力トークン数」を見積もる係数。
+ * 日本語1文字が英語換算で1〜2トークン程度になりうる実測を踏まえ、余裕を持って1.5を採用する。
+ */
+const CHARS_TO_TOKENS_ESTIMATE_RATIO = 1.5
+
+/**
+ * 「本文として欲しい出力トークン数」を、原文の文字数とセグメント数から見積もる。
+ * ここで得た値を withReasoningHeadroom に渡し、thinking系モデルの reasoning 消費分を
+ * 加味した実際の max_tokens を求める（thinking系は completion_tokens の大半を reasoning が
+ * 消費するため、本文分だけを見積もっても reasoning に食い潰されてしまう実測事故があった）。
+ */
+function estimateDesiredOutputTokens(charCount: number, segmentCount: number): number {
+  const charBasedEstimate = Math.ceil(charCount * CHARS_TO_TOKENS_ESTIMATE_RATIO)
+  const segmentBasedEstimate = segmentCount * ESTIMATED_TOKENS_PER_SEGMENT
+  return Math.max(charBasedEstimate, segmentBasedEstimate) + OUTPUT_TOKEN_ESTIMATE_OVERHEAD
+}
+
+function sumTextLength(inputs: TranslationInput[]): number {
+  return inputs.reduce((sum, input) => sum + input.text.length, 0)
+}
 
 interface TranslationInput {
   text: string
@@ -52,6 +129,48 @@ class TranslationRetryableError extends Error {
     super(message)
     this.name = 'TranslationRetryableError'
   }
+}
+
+/**
+ * 設定起因（認証エラー・モデルID誤りなど）の致命的エラー。
+ * TranslationRetryableError と異なりリトライしても回復しないため、
+ * translateBatchWithFallback / translateInBatches の catch-all では握り潰さず、
+ * 呼出元（translateEn の外）まで即座に伝播させる（fail fast）。
+ * 改修前は 1 ブロックの一時的失敗も設定起因の致命エラーも区別せず同じ catch-all で
+ * 空文字へ降格させていたため、モデルID誤りのような即座に検知すべき失敗が
+ * 個別リトライの上限まで空振りしてから未翻訳終了するまで気づけず、数十分を浪費する
+ * 事故につながっていた。
+ */
+class TranslationFatalError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TranslationFatalError'
+  }
+}
+
+/**
+ * リトライしても回復する見込みが無い HTTP ステータス。
+ * - 401 Unauthorized / 403 Forbidden: APIキー等の認証情報の設定誤り
+ * - 404 Not Found: モデルID誤りやエンドポイント誤り
+ * これらは設定を直さない限り何度リクエストしても同じ結果になるため、
+ * バッチ単位のリトライ・catch-all に委ねず即座に致命エラーとして扱う。
+ * 判定は httpStatus（数値）ベースで行い、errorMessage の文字列比較は行わない
+ * （errorMessage は suffix 付与で内容が変わりうる自由文字列であり、文字列比較に
+ * 依存した分岐が原因で 42 分無駄にした事故が別ノードで起きているため）。
+ */
+const FATAL_HTTP_STATUSES: ReadonlySet<number> = new Set([401, 403, 404])
+
+/**
+ * 401/403/404 に加えて、errorCode === 'quota_exhausted'（HTTP 429 のうち OpenAI 公式仕様の
+ * insufficient_quota。aiGateway/errors.ts の classifyHttpErrorCode 参照）も同格の致命エラーとして
+ * 扱う。課金設定（支払い方法・利用枠）を直さない限り絶対に回復しないため、gateway 側は既に
+ * バックオフリトライを一切行っていない（chatText.ts 参照）。ここでさらにバッチ半割・個別リトライへ
+ * 委ねると、全ブロックが同じ理由で失敗し続けるだけで時間を空費するため、401/403/404 と同様に
+ * 即座に TranslationFatalError を投げて translateEn 全体を fail fast させる。
+ */
+function isFatalTranslationHttpError(result: Pick<ChatTextResult, 'errorCode' | 'httpStatus'>): boolean {
+  if (result.errorCode === 'quota_exhausted') return true
+  return result.errorCode === 'http_error' && result.httpStatus !== undefined && FATAL_HTTP_STATUSES.has(result.httpStatus)
 }
 
 // 出力にターゲット言語の特徴文字がこの比率を下回ると「未翻訳（ソース言語のまま）」とみなす。
@@ -102,6 +221,7 @@ function resolveApiConfig(settings: AdminSettings): {
   fewShotTranslations: string[]
   maxSegmentsPerRequest: number
   requestConcurrency: number
+  modelProfile: ReturnType<typeof resolveModelProfile>
 } {
   const connection = requireAiConnection(settings)
   const model = requireChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel), 'translation')
@@ -118,6 +238,9 @@ function resolveApiConfig(settings: AdminSettings): {
     ...resolveTranslationFewShot(settings.translationFewShotJson, languages),
     maxSegmentsPerRequest,
     requestConcurrency: normalizeConcurrency(settings.apiRequestConcurrency, 1),
+    // thinking系モデルの出力上限見積り（withReasoningHeadroom）に使う。呼出のたびに解決すると
+    // 無駄なので resolveApiConfig で一度だけ解決し、各 chatText 呼出箇所で使い回す。
+    modelProfile: resolveModelProfile(settings, model, 'chatText'),
   }
 }
 
@@ -239,7 +362,15 @@ function withContextInstruction(systemPrompt: string): string {
   return systemPrompt +
     '\n\nIf context_groups are provided, use them only as surrounding meaning for translation consistency. ' +
     'Return exactly one translation for each item in segments, in the same order. ' +
-    'Do not merge multiple segments into one output, and do not add context that is outside the current segment.'
+    'Do not merge multiple segments into one output, and do not add context that is outside the current segment. ' +
+    // OpenAI の response_format:{"type":"json_object"} は、system/user いずれかのメッセージに
+    // 語 "JSON" が含まれていないと HTTP 400 で拒否する仕様がある
+    // （https://developers.openai.com/api/docs/guides/error-codes）。この関数が組み立てる
+    // system prompt は TRANSLATION_JSON_SCHEMA 付きで json_object モードになりうる
+    // （callOpenAICompatible / callTranslationOnce の両方から使われる）が、ベースの
+    // buildFullTranslateSystemPrompt / buildFtTranslateSystemPrompt には語 "JSON" が含まれない
+    // ため、出力仕様自体は変えずにこの一文だけを追加して要件を満たす。
+    'Respond only with JSON matching the given schema.'
 }
 
 function buildGlossaryInstruction(glossaryTerms: string[], languages: LanguageProfileConfig): string {
@@ -267,17 +398,69 @@ function buildTranslationFewShotMessages(
   ]
 }
 
+/**
+ * バッチ翻訳の結果。texts と rescued は同じ長さ・同じ並び順で対応する。
+ * rescued[i]===true は、texts[i] が F（JSONラッパー無しの素テキスト救済）で採用された
+ * ことを示す。blockTypes.ts に新フィールドを追加せずに「救済が働いた」ことを呼出元
+ * （translateEn）へ伝えるための内部的な仕組み。
+ */
+interface BatchTranslationOutcome {
+  texts: string[]
+  rescued: boolean[]
+}
+
+/**
+ * F: JSONラッパー無しの素の訳文がそのまま返るケースの救済。
+ *
+ * 実測事故: LM Studio + gemma-4-e4b-it-qat が `{"translations":[...]}` で包まずに
+ * 訳文そのもの（例: "Based on my review of each domain's current state, ..."）を返し、
+ * parseJsonObjectFromLlmContent が `{` を見つけられず失敗 → リトライ → 1件まで
+ * 縮退した時点で throw → パイプライン全体が死んだ。訳文自体は完璧なことが多いため、
+ * 条件を満たす場合はそのまま採用する。
+ *
+ * 採用条件（すべて満たす場合のみ）:
+ * - 入力が1件だけ（複数入力では、どの文がどの入力に対応するか特定できないため救済しない）
+ * - content が空でない
+ * - content が JSON の壊れかけに見えない（`{` や `"translations"` を含む場合は、
+ *   閉じ忘れ・カンマ欠落などの「修復すれば直る」壊れ方の可能性があるため、
+ *   誤った素テキスト採用を避けて従来どおりリトライへ委ねる）
+ * - 訳文としてターゲット言語の体を成している（looksUntranslated が false）。
+ *   ソース言語のまま（未翻訳）の文字列を誤って「救済」しないためのガード
+ *
+ * @returns 採用する訳文（normalizeSpaces 済み）。条件を満たさない場合は undefined。
+ */
+function rescuePlainTextTranslation(
+  inputs: TranslationInput[],
+  content: string,
+  target: LanguageRoleProfile,
+): string | undefined {
+  if (inputs.length !== 1) return undefined
+  const trimmed = content.trim()
+  if (!trimmed) return undefined
+  if (trimmed.includes('{') || trimmed.includes('"translations"')) return undefined
+  if (looksUntranslated(inputs[0].text, trimmed, target)) return undefined
+  return normalizeSpaces(trimmed)
+}
+
 async function callOpenAICompatible(
   inputs: TranslationInput[],
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
-): Promise<string[]> {
+): Promise<BatchTranslationOutcome> {
   const glossaryInstruction = buildGlossaryInstruction(glossaryTerms, config.languages)
+  const maxTokens = withReasoningHeadroom(
+    estimateDesiredOutputTokens(sumTextLength(inputs), inputs.length),
+    config.modelProfile,
+  )
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[batch]',
     model: config.model,
     temperature: 0.0,
-    responseFormat: 'omit',
+    jsonSchema: TRANSLATION_JSON_SCHEMA,
+    maxTokens,
+    // 実際のコンテキスト長を反映してクランプする（LM Studio 系プロファイルのみ有効。
+    // modelProfile.ts の CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS の JSDoc 参照）。
+    resolveRuntimeContextLength: true,
     messages: [
       { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
       ...buildTranslationFewShotMessages(config),
@@ -288,17 +471,31 @@ async function callOpenAICompatible(
     ],
   })
 
-  if (result.finishReason === 'length') {
+  // 設定起因の致命エラーはリトライ・半分割・catch-all のいずれにも委ねず即座に伝播させる。
+  // メッセージには buildLlmFailureCode() の短い分類コードのみを使う。result.errorMessage
+  // には formatAiGatewayHttpError の raw= （プロバイダの生応答本文）が含まれうるため
+  // （translateEn の他箇所・correct.ts の同種の対応も参照）。
+  if (isFatalTranslationHttpError(result)) {
+    throw new TranslationFatalError(`translation API returned a non-recoverable status. error=${buildLlmFailureCode({ errorCode: result.errorCode, httpStatus: result.httpStatus })}`)
+  }
+  if (result.errorCode === 'truncated') {
     throw new TranslationRetryableError(`translation API stopped because output length was reached. content=${result.content.slice(0, 500)}`)
   }
-  if (result.errorMessage || !result.content.trim()) {
-    throw new TranslationRetryableError(`translation API response did not include message content. error=${result.errorMessage ?? 'empty_response'}`)
+  if (result.errorCode || !result.content.trim()) {
+    const code = result.errorCode
+      ? buildLlmFailureCode({ errorCode: result.errorCode, httpStatus: result.httpStatus })
+      : 'empty_response'
+    throw new TranslationRetryableError(`translation API response did not include message content. error=${code}`)
   }
 
   let parsed: Record<string, unknown>
   try {
     parsed = parseJsonObjectFromLlmContent(result.content, 'translation')
   } catch (error) {
+    const rescued = rescuePlainTextTranslation(inputs, result.content, config.languages.subtitle)
+    if (rescued !== undefined) {
+      return { texts: [rescued], rescued: [true] }
+    }
     throw new TranslationRetryableError(
       `${error instanceof Error ? error.message : String(error)}. content=${result.content.slice(0, 500)}`,
     )
@@ -315,7 +512,8 @@ async function callOpenAICompatible(
     throw new TranslationRetryableError(`translation API returned ${translations.length} segments for ${inputs.length} inputs`)
   }
 
-  return coalesced.map((item) => normalizeSpaces(String(item)))
+  const texts = coalesced.map((item) => normalizeSpaces(String(item)))
+  return { texts, rescued: texts.map(() => false) }
 }
 
 /**
@@ -375,11 +573,16 @@ async function callContextGroupAllocation(
           },
         ]
       : []
+  const charCount = groups.reduce((sum, group) => sum + group.text.length, 0)
+  const itemCount = groups.reduce((sum, group) => sum + group.items.length, 0)
+  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(charCount, itemCount), config.modelProfile)
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[contextGroupAllocation]',
     model: config.model,
     temperature: 0.0,
-    responseFormat: 'omit',
+    jsonSchema: CONTEXT_GROUP_TRANSLATION_JSON_SCHEMA,
+    maxTokens,
+    resolveRuntimeContextLength: true,
     messages: [
       { role: 'system', content: withContextGroupAllocationInstruction(config.systemPrompt, config.languages) + glossaryInstruction },
       ...allocationFewShotMessages,
@@ -390,10 +593,10 @@ async function callContextGroupAllocation(
     ],
   })
 
-  if (result.finishReason === 'length') {
+  if (result.errorCode === 'truncated') {
     throw new TranslationRetryableError(`context group translation stopped because output length was reached. content=${result.content.slice(0, 500)}`)
   }
-  if (result.errorMessage || !result.content.trim()) {
+  if (result.errorCode || !result.content.trim()) {
     throw new TranslationRetryableError(`context group translation response did not include message content. error=${result.errorMessage ?? 'empty_response'}`)
   }
 
@@ -455,8 +658,11 @@ async function translateContextGroups(
     config.requestConcurrency,
     async (index) => {
       try {
+        throwIfPipelineAborted()
         return await callContextGroupAllocation(batches[index], config, glossaryTerms)
-      } catch {
+      } catch (error) {
+        // 中断は失敗ではないので、この段の「失敗しても空 Map で続行」には載せない。
+        if (isPipelineAbortedError(error)) throw error
         return new Map<number, string>()
       }
     },
@@ -485,6 +691,10 @@ interface SingleCallResult {
   finishReason?: string
   refusal?: string | null
   errorMessage?: string
+  /** 分岐判定に使う構造化エラーコード。'context_exceeded' は決定的エラー（同一内容の盲リトライ禁止）。 */
+  errorCode?: ChatTextResult['errorCode']
+  /** HTTP エラー時のステータス。buildLlmFailureCode で短い分類コードを組み立てる際に使う。 */
+  httpStatus?: number
 }
 
 async function callTranslationOnce(
@@ -493,11 +703,16 @@ async function callTranslationOnce(
   glossaryTerms: string[],
 ): Promise<SingleCallResult> {
   const glossaryInstruction = buildGlossaryInstruction(glossaryTerms, config.languages)
+  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(input.text.length, 1), config.modelProfile)
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[single]',
     model: config.model,
     temperature: 0.0,
-    responseFormat: 'omit',
+    jsonSchema: TRANSLATION_JSON_SCHEMA,
+    maxTokens,
+    // 実際のコンテキスト長を反映してクランプする（LM Studio 系プロファイルのみ有効。
+    // modelProfile.ts の CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS の JSDoc 参照）。
+    resolveRuntimeContextLength: true,
     messages: [
       { role: 'system', content: withContextInstruction(config.systemPrompt) + glossaryInstruction },
       ...buildTranslationFewShotMessages(config),
@@ -508,18 +723,18 @@ async function callTranslationOnce(
     ],
   })
 
-  // 即諦め分岐: content_filter / refusal / length
-  if (result.finishReason === 'content_filter') {
-    return { translation: '', finishReason: result.finishReason, refusal: result.refusal, errorMessage: 'content_filter' }
+  // 即諦め分岐: content_filter / refusal / length（errorMessage の文字列比較ではなく errorCode で分岐する）
+  if (result.errorCode === 'content_filter') {
+    return { translation: '', finishReason: result.finishReason, refusal: result.refusal, errorMessage: result.errorMessage ?? 'content_filter', errorCode: result.errorCode, httpStatus: result.httpStatus }
   }
-  if (result.refusal) {
-    return { translation: '', finishReason: result.finishReason, refusal: result.refusal, errorMessage: `model_refusal: ${result.refusal.slice(0, 200)}` }
+  if (result.errorCode === 'model_refusal' || result.refusal) {
+    return { translation: '', finishReason: result.finishReason, refusal: result.refusal, errorMessage: result.errorMessage ?? `model_refusal: ${(result.refusal ?? '').slice(0, 200)}`, errorCode: result.errorCode, httpStatus: result.httpStatus }
   }
-  if (result.finishReason === 'length') {
-    return { translation: '', finishReason: result.finishReason, errorMessage: `truncated_at_length_limit (content_preview=${result.content.slice(0, 100)})` }
+  if (result.errorCode === 'truncated') {
+    return { translation: '', finishReason: result.finishReason, errorMessage: result.errorMessage ?? `truncated_at_length_limit (content_preview=${result.content.slice(0, 100)})`, errorCode: result.errorCode, httpStatus: result.httpStatus }
   }
-  if (result.errorMessage || !result.content.trim()) {
-    return { translation: '', finishReason: result.finishReason, errorMessage: result.errorMessage ?? 'empty_response' }
+  if (result.errorCode || !result.content.trim()) {
+    return { translation: '', finishReason: result.finishReason, errorMessage: result.errorMessage ?? 'empty_response', errorCode: result.errorCode, httpStatus: result.httpStatus }
   }
 
   // JSON 解析
@@ -527,6 +742,11 @@ async function callTranslationOnce(
   try {
     parsed = parseJsonObjectFromLlmContent(result.content, 'translation single')
   } catch (err) {
+    // F と同じ素テキスト救済。1入力のみのリクエストなので条件はそのまま流用できる。
+    const rescued = rescuePlainTextTranslation([input], result.content, config.languages.subtitle)
+    if (rescued !== undefined) {
+      return { translation: rescued, finishReason: result.finishReason, refusal: result.refusal }
+    }
     return {
       translation: '',
       finishReason: result.finishReason,
@@ -587,10 +807,49 @@ async function retranslateBlockIndividually(
         reason: `model_refusal_at_attempt_${attempt}: ${result.refusal.slice(0, 200)}`,
       }
     }
+    // context_exceeded は決定的エラー: 1入力まで縮退済みなのでこれ以上入力を小さくできず、
+    // 同一内容を再送しても絶対に回復しない（盲リトライしても無駄。本番事故の再発防止:
+    // 実データで translationRetryAttempts が全件2＝同一内容の盲リトライで失敗していた）。
+    //
+    // reason の組み立てには必ず buildLlmFailureCode() を経由し、プロバイダの生応答本文を含めない。
+    // この reason は最終的に enText（字幕本文そのもの）の [UNTRANSLATED: ...] マーカーに
+    // 埋め込まれる（後段の block 構築部参照）ため、生の HTTP エラー本文（組織ID等を含みうる）を
+    // 直接埋め込むと字幕ファイル・共有されるプロジェクト JSON に情報漏洩する
+    // （本番事故: 429 応答の生 JSON がそのまま字幕テキストに出力されていた）。
+    if (result.errorCode === 'context_exceeded') {
+      return {
+        translation: '',
+        attempts: attempt,
+        succeeded: false,
+        reason: `${buildLlmFailureCode({ errorCode: result.errorCode, httpStatus: result.httpStatus })}_at_attempt_${attempt} (retry_futile)`,
+      }
+    }
+    // quota_exhausted も同じ理由で即諦める（防御的な多重チェック）。通常はバッチ段の
+    // callOpenAICompatible が isFatalTranslationHttpError 経由で先に TranslationFatalError を
+    // 投げて translateEn 全体を止めるため、ここに到達するのは稀（例: バッチ成功後、個別リトライ
+    // の最中にちょうどクォータが尽きた場合）だが、その場合でも盲リトライで空費しない。
+    if (result.errorCode === 'quota_exhausted') {
+      return {
+        translation: '',
+        attempts: attempt,
+        succeeded: false,
+        reason: `${buildLlmFailureCode({ errorCode: result.errorCode, httpStatus: result.httpStatus })}_at_attempt_${attempt} (retry_futile)`,
+      }
+    }
 
-    // 一般エラー: リトライ可能
+    // 一般エラー: リトライ可能。
+    // errorCode が 'http_error' | 'rate_limited' の場合のみ buildLlmFailureCode() の短い
+    // 分類コードに置き換える（この2つは formatAiGatewayHttpError 経由でプロバイダの生応答本文が
+    // errorMessage に含まれうるため。上の context_exceeded 分岐と同じ理由）。
+    // それ以外（timeout / fetch_failed / response_json_parse_failed / json_parse_failed など、
+    // callTranslationOnce 自身が err.message やモデル出力から組み立てたメッセージ）は
+    // プロバイダの生応答本文を含まない安全な文字列なので、従来どおり詳細を残す
+    // （translateEn.test.ts の json_parse_failed 検証など、診断用途で使われているため）。
     if (result.errorMessage) {
-      lastReason = `attempt_${attempt}_${result.errorMessage}`
+      const safeReason = result.errorCode === 'http_error' || result.errorCode === 'rate_limited'
+        ? buildLlmFailureCode({ errorCode: result.errorCode, httpStatus: result.httpStatus })
+        : result.errorMessage
+      lastReason = `attempt_${attempt}_${safeReason}`
       continue
     }
 
@@ -622,35 +881,38 @@ function isRetryableTranslationError(error: unknown): boolean {
   return COUNT_MISMATCH_RE.test(message)
 }
 
-function formatTranslationFailure(text: string, error: unknown): Error {
-  const message = error instanceof Error ? error.message : String(error ?? '')
-  return new Error(`translation failed for source=${text.slice(0, 500)}: ${message}`)
-}
-
 async function translateBatchWithFallback(
   inputs: TranslationInput[],
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
-): Promise<string[]> {
-  if (inputs.length === 0) return []
+): Promise<BatchTranslationOutcome> {
+  if (inputs.length === 0) return { texts: [], rescued: [] }
   try {
     return await callOpenAICompatible(inputs, config, glossaryTerms)
   } catch (error) {
     if (!isRetryableTranslationError(error)) throw error
-    if (inputs.length === 1) throw formatTranslationFailure(inputs[0].text, error)
+    if (inputs.length === 1) {
+      // G: 単一入力まで縮退したバッチ失敗はここで throw しない。
+      // 以前はここで `throw formatTranslationFailure(...)` していたため、TranslationRetryableError
+      // ではない新規の Error が split 再帰を素通りして translateInBatches の外まで伝播し、
+      // 1ブロックの失敗で 72分のパイプライン全体が全損する事故につながっていた。
+      // 空文字を返せば translateEn 側の looksUntranslated が確実に「未翻訳」と判定し、
+      // 既存の個別リトライ経路（retranslateBlockIndividually → callTranslationOnce）に載る。
+      return { texts: [''], rescued: [false] }
+    }
   }
 
   const splitAt = Math.ceil(inputs.length / 2)
   const left = await translateBatchWithFallback(inputs.slice(0, splitAt), config, glossaryTerms)
   const right = await translateBatchWithFallback(inputs.slice(splitAt), config, glossaryTerms)
-  return [...left, ...right]
+  return { texts: [...left.texts, ...right.texts], rescued: [...left.rescued, ...right.rescued] }
 }
 
 async function translateInBatches(
   inputs: TranslationInput[],
   config: ReturnType<typeof resolveApiConfig>,
   glossaryTerms: string[],
-): Promise<string[]> {
+): Promise<BatchTranslationOutcome> {
   const batches: TranslationInput[][] = []
   for (let start = 0; start < inputs.length; start += config.maxSegmentsPerRequest) {
     batches.push(inputs.slice(start, start + config.maxSegmentsPerRequest))
@@ -658,9 +920,29 @@ async function translateInBatches(
   const results = await mapWithConcurrency(
     batches.length,
     config.requestConcurrency,
-    (index) => translateBatchWithFallback(batches[index], config, glossaryTerms),
+    async (index): Promise<BatchTranslationOutcome> => {
+      try {
+        // 協調的キャンセルの検知点。中断済みなら次のバッチを始めない。
+        throwIfPipelineAborted()
+        return await translateBatchWithFallback(batches[index], config, glossaryTerms)
+      } catch (error) {
+        // 中断は失敗ではないので降格させず、呼出元まで伝播させる。
+        if (isPipelineAbortedError(error)) throw error
+        // 設定起因の致命エラー（認証誤り・モデルID誤り等）はここで握り潰さない。
+        // 降格させると全ブロックが個別リトライを空振りしてから未翻訳で終わるため、
+        // 即座に検知すべき失敗の通知が数十分遅れる。
+        if (error instanceof TranslationFatalError) throw error
+        // H: 最後の砦。バッチ全体が（非リトライ対象のエラーなど）想定外の理由で落ちても、
+        // 他バッチやパイプライン全体を巻き込まない。空文字は looksUntranslated で
+        // 「未翻訳」と判定され、後段の個別リトライ（retranslateBlockIndividually）に委ねられる。
+        return { texts: batches[index].map(() => ''), rescued: batches[index].map(() => false) }
+      }
+    },
   )
-  return results.flat()
+  return {
+    texts: results.flatMap((r) => r.texts),
+    rescued: results.flatMap((r) => r.rescued),
+  }
 }
 
 export async function translateEn(blocks: JaBlock[], settings: AdminSettings, glossaryTerms: string[] = []): Promise<EnBlock[]> {
@@ -679,6 +961,9 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
     contextGroupReason: block.contextGroupReason,
   }))
   const translatedTexts = new Array<string>(inputs.length)
+  // F: バッチがJSONラッパー無しの素テキストをそのまま返し、それを救済採用した block の index。
+  // EnBlock.translationRescued として可視化する（詳細は下の block 構築部）。
+  const rescuedBlockIndices = new Set<number>()
   const groupTranslations = await translateContextGroups(inputs, config, glossaryTerms)
   for (const [index, text] of groupTranslations.entries()) {
     translatedTexts[index] = text
@@ -688,9 +973,10 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
     .map((_, index) => index)
     .filter(index => translatedTexts[index] === undefined)
   if (fallbackIndices.length > 0) {
-    const fallbackTexts = await translateInBatches(fallbackIndices.map(index => inputs[index]), config, glossaryTerms)
+    const fallbackOutcome = await translateInBatches(fallbackIndices.map(index => inputs[index]), config, glossaryTerms)
     fallbackIndices.forEach((blockIndex, fallbackIndex) => {
-      translatedTexts[blockIndex] = fallbackTexts[fallbackIndex] ?? ''
+      translatedTexts[blockIndex] = fallbackOutcome.texts[fallbackIndex] ?? ''
+      if (fallbackOutcome.rescued[fallbackIndex]) rescuedBlockIndices.add(blockIndex)
     })
   }
 
@@ -729,6 +1015,9 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
     let violation: ViolationCode = 'ok'
     let translationFailureReason: string | undefined
     let translationRetryAttempts: number | undefined
+    // F の救済で採用された訳文かどうか。translationRetryAttempts は「実際にリトライした回数」
+    // という本来の意味だけを持たせ、救済の有無はこの専用フラグで表す。
+    const translationRescued = rescuedBlockIndices.has(index)
 
     if (retry) {
       translationRetryAttempts = retry.attempts
@@ -761,6 +1050,7 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
     }
     if (translationFailureReason !== undefined) result.translationFailureReason = translationFailureReason
     if (translationRetryAttempts !== undefined) result.translationRetryAttempts = translationRetryAttempts
+    if (translationRescued) result.translationRescued = true
     return result
   })
 }
@@ -772,4 +1062,6 @@ export const __testing = {
   buildContextGroupTranslationDrafts,
   buildContextGroupTranslationPayload,
   coalesceTranslations,
+  rescuePlainTextTranslation,
+  estimateDesiredOutputTokens,
 }

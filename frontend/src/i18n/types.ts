@@ -164,6 +164,7 @@ export interface LocaleStrings {
   settingsPipelineMergeContinuationMaxTranscriptChars: string
   settingsIncompleteEndDetectionModel: string
   settingsIncompleteEndDetectionBatchSize: string
+  settingsLlmRequestTimeoutSec: string
   settingsCompressModel: string
   settingsMicroModel: string
   settingsExpandModel: string
