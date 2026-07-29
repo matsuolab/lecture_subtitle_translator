@@ -156,7 +156,7 @@ export function HelpTab() {
           <SectionCard title="基本的な作業の流れ">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                このツールは日本語講義動画から英語字幕を作成し、字幕ブロックごとに内容・タイミング・用語・自動処理結果を確認して承認するための字幕エディタです。
+                このツールは講義動画から字幕を作成し、字幕ブロックごとに内容・タイミング・用語・自動処理結果を確認して承認するための字幕エディタです。書きおこし・字幕の言語は設定タブで指定します（既定は 日本語 → English）。
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
                 <strong style={{ color: theme.textPrimary }}>① 動画を読み込む</strong>（左パネルにドロップ、またはボタンから選択）→
@@ -166,7 +166,7 @@ export function HelpTab() {
                 <strong style={{ color: theme.textPrimary }}> ⑤ JSONまたはSRTとして書き出す</strong>
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                プロジェクトJSONには日本語原文、英語字幕、レビュー状態、自動処理ログ、編集履歴が保存されます。SRTは英語字幕の提出・確認用です。
+                プロジェクトJSONには書きおこし原文、字幕、レビュー状態、自動処理ログ、編集履歴が保存されます。SRTは字幕の提出・確認用です。
               </p>
             </div>
           </SectionCard>
@@ -174,7 +174,7 @@ export function HelpTab() {
           <SectionCard title="パイプライン（自動書き起こし・翻訳）">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
-                <strong style={{ color: theme.textPrimary }}>字幕生成タブ</strong>から字幕生成パイプラインを実行できます。動画を読み込んだ状態で「字幕生成を実行」ボタンを押すと、書き起こし → 日本語補正 → 英語翻訳 → 字幕ブロック生成を自動で行います。
+                <strong style={{ color: theme.textPrimary }}>字幕生成タブ</strong>から字幕生成パイプラインを実行できます。動画を読み込んだ状態で「字幕生成を実行」ボタンを押すと、書き起こし → 書きおこし補正 → 翻訳 → 字幕ブロック生成を自動で行います。
               </p>
               <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.7, margin: 0 }}>
                 初回は設定タブで実行先と接続先AIプロバイダを設定します。リモート実行する場合は Service URL と Service Auth Token を入力し、接続テストで OK が表示されることを確認してから実行します。

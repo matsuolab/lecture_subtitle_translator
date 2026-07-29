@@ -199,6 +199,20 @@ export function loadLanguageProfileConfig(settings: AdminSettings): LanguageProf
   }
 }
 
+/**
+ * ラベルが英語を指すか。
+ *
+ * script === 'latin' は「ラテン文字を使う言語」であって英語とは限らない（ドイツ語・フランス語等）。
+ * 英語専用の組み込み few-shot を当てる判定には script ではなくこちらを使う。
+ */
+export function isEnglishLabel(label: string): boolean {
+  const normalized = label.trim().toLowerCase()
+  return normalized === 'en'
+    || normalized.startsWith('en-')
+    || normalized.startsWith('english')
+    || normalized === '英語'
+}
+
 export function matchesPattern(text: string, pattern: string | undefined): boolean {
   const re = compilePattern(pattern)
   return re ? re.test(text.trim()) : false

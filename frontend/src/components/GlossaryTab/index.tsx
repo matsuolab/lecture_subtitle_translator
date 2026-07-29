@@ -426,7 +426,7 @@ export function GlossaryTab({
         {/* 共有辞書（チームでCSV/XLSXとして共有する用語集） */}
         <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>共有辞書</div>
         <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-          この分野の専門用語集（日本語⇄英語）。<strong>書きおこしの修正・英訳の用語統一</strong>に使われ、<strong>字幕のスペルチェックでも「正しい語」として扱われます</strong>（誤検出から除外）。CSV/XLSX でチームと共有できます。
+          この分野の専門用語集（日本語⇄英語）。<strong>書きおこしの修正・訳文の用語統一</strong>に使われ、<strong>字幕のスペルチェックでも「正しい語」として扱われます</strong>（誤検出から除外）。CSV/XLSX でチームと共有できます。
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           <button

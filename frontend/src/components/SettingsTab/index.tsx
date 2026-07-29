@@ -1059,7 +1059,7 @@ export function SettingsTab({
           <SettingsGroupLabel
             theme={theme}
             title="基本モデル"
-            hint="日本語書き起こしの補正と、英語字幕への翻訳に使う主モデルです。高品質な処理が必要な段階です。"
+            hint="書き起こしの補正と、字幕言語への翻訳に使う主モデルです。高品質な処理が必要な段階です。"
           />
           <ComboField
             theme={theme}
@@ -1123,7 +1123,7 @@ export function SettingsTab({
           />
           <ComboField
             theme={theme}
-            label="日本語分割モデル (splitJa)"
+            label="書きおこし分割モデル (splitJa)"
             value={adminSettings.splitJaModel}
             placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
             listId="available-models-list"
@@ -1705,7 +1705,7 @@ export function SettingsTab({
         <SettingsGroupLabel
           theme={theme}
           title="字幕の自動調整（文字量・速度）"
-          hint="英訳の文字量や読む速さを判定し、短縮・展開する基準です。英日文字比やCPSのしきい値で制御します。"
+          hint="字幕の文字量や読む速さを判定し、短縮・展開する基準です。書きおこしとの文字数比やCPSのしきい値で制御します。"
         />
         <FieldCard theme={theme}>
           <NumberField
@@ -1765,7 +1765,7 @@ export function SettingsTab({
         <SettingsGroupLabel
           theme={theme}
           title="未完結な文の結合（前処理）"
-          hint="文の途中で切れた字幕を次の字幕と結合してから翻訳し、英訳のあふれやCPS違反を防ぎます。"
+          hint="文の途中で切れた字幕を次の字幕と結合してから翻訳し、訳文のあふれやCPS違反を防ぎます。"
         />
         <FieldCard theme={theme}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

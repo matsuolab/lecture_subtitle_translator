@@ -6,8 +6,8 @@ import { requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta, isAbortableFailure } from './llmCallWithMeta'
-import { DEFAULT_CORRECTION_FEW_SHOT_JSON } from './prompts'
-import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
+import { DEFAULT_CORRECTION_FEW_SHOT_JSON, DEFAULT_EN_CORRECTION_FEW_SHOT_JSON } from './prompts'
+import { isEnglishLabel, loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 
 const MAX_SEGMENTS_PER_REQUEST = 20
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 4
@@ -107,8 +107,16 @@ function buildCorrectionSystemPrompt(settings: AdminSettings): string {
 function resolveCorrectionFewShotMessages(settings: AdminSettings): Array<{ role: 'user' | 'assistant'; content: string }> {
   // 組み込み few-shot は日本語の例なので、transcript が日本語スクリプト以外の構成では使わない
   // （ユーザーが correctionFewShotJson で対象言語の例を与えた場合のみ few-shot を挿入する）。
-  const transcriptIsJapanese = loadLanguageProfileConfig(settings).transcript.script === 'japanese'
-  const raw = settings.correctionFewShotJson.trim() || (transcriptIsJapanese ? DEFAULT_CORRECTION_FEW_SHOT_JSON : '')
+  const transcript = loadLanguageProfileConfig(settings).transcript
+  const transcriptIsJapanese = transcript.script === 'japanese'
+  // 組み込み例は「その言語の例」なので、ラテン文字であれば何でも良いわけではない。
+  // 英語以外のラテン言語（ドイツ語等）に英語の例を当てると出力言語を引きずる。
+  const builtInFewShot = transcriptIsJapanese
+    ? DEFAULT_CORRECTION_FEW_SHOT_JSON
+    : isEnglishLabel(transcript.label)
+      ? DEFAULT_EN_CORRECTION_FEW_SHOT_JSON
+      : ''
+  const raw = settings.correctionFewShotJson.trim() || builtInFewShot
   if (!raw) return []
   try {
     const parsed = JSON.parse(raw) as { segments?: unknown; corrections?: unknown }
@@ -121,6 +129,7 @@ function resolveCorrectionFewShotMessages(settings: AdminSettings): Array<{ role
   } catch {
     // Fall back to the stable built-in example below (Japanese transcript only).
   }
+  // JSON が壊れていた場合の最終フォールバックは日本語構成のみ（安定した組み込み例）。
   if (!transcriptIsJapanese) return []
   return [
     { role: 'user', content: FEW_SHOT_USER_CONTENT },

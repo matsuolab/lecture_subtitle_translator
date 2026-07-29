@@ -3,8 +3,13 @@ import { buildLlmFailureCode, createAiGateway, type ChatTextResult, type JsonSch
 import type { EnBlock, JaBlock, ViolationCode } from './blockTypes'
 import { computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
-import { DEFAULT_TRANSLATION_FEW_SHOT_JSON, pickTranslateSystemPrompt, resolveTranslateModelId } from './prompts'
-import { loadLanguageProfileConfig, resolveTargetCharMatcher, type LanguageProfileConfig, type LanguageRoleProfile } from './languageProfileConfig'
+import {
+  DEFAULT_EN_TO_JA_TRANSLATION_FEW_SHOT_JSON,
+  DEFAULT_TRANSLATION_FEW_SHOT_JSON,
+  pickTranslateSystemPrompt,
+  resolveTranslateModelId,
+} from './prompts'
+import { isEnglishLabel, loadLanguageProfileConfig, resolveTargetCharMatcher, type LanguageProfileConfig, type LanguageRoleProfile } from './languageProfileConfig'
 import { requireAiConnection, requireChatModelForProvider, resolveAiProvider } from './aiProvider'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
@@ -248,16 +253,28 @@ function resolveTranslationFewShot(
   rawJson: string,
   languages: LanguageProfileConfig,
 ): { fewShotSegments: string[]; fewShotTranslations: string[] } {
-  // 組み込み few-shot は日本語→英語の例なので、transcript が日本語スクリプト以外の構成では使わない
-  // （誤った言語ペアの例示は出力言語を引きずるため、ユーザー指定が無ければ few-shot なしで翻訳する）。
+  // 組み込み few-shot は言語ペアごとに用意する。対応する例が無い構成では few-shot なしで翻訳する
+  // （誤った言語ペアの例示は出力言語を引きずるため）。
   const transcriptIsJapanese = languages.transcript.script === 'japanese'
+  // 組み込み例は英→日のもの。ドイツ語→日本語などに当てないよう、ラベルで英語を確認する。
+  const isEnToJa = isEnglishLabel(languages.transcript.label) && languages.subtitle.script === 'japanese'
   const fallback = transcriptIsJapanese
     ? {
         fewShotSegments: ['機械学習とは何ですか。', 'ディープラーニングについて説明します。'],
         fewShotTranslations: ['What is machine learning?', 'I will explain deep learning.'],
       }
-    : { fewShotSegments: [], fewShotTranslations: [] }
-  const raw = rawJson.trim() || (transcriptIsJapanese ? DEFAULT_TRANSLATION_FEW_SHOT_JSON : '')
+    : isEnToJa
+      ? {
+          fewShotSegments: ['What is machine learning?', 'I will explain deep learning.'],
+          fewShotTranslations: ['機械学習とは何か。', 'ディープラーニングについて説明する。'],
+        }
+      : { fewShotSegments: [], fewShotTranslations: [] }
+  const builtInFewShot = transcriptIsJapanese
+    ? DEFAULT_TRANSLATION_FEW_SHOT_JSON
+    : isEnToJa
+      ? DEFAULT_EN_TO_JA_TRANSLATION_FEW_SHOT_JSON
+      : ''
+  const raw = rawJson.trim() || builtInFewShot
   if (!raw) return fallback
   try {
     const parsed = JSON.parse(raw) as { segments?: unknown; translations?: unknown }
@@ -1056,6 +1073,7 @@ export async function translateEn(blocks: JaBlock[], settings: AdminSettings, gl
 }
 
 export const __testing = {
+  resolveTranslationFewShot,
   looksUntranslated,
   computeTargetCharRatio,
   buildTranslationUserPayload,

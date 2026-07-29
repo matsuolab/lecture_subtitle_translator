@@ -102,6 +102,54 @@ export const DEFAULT_TRANSLATION_FEW_SHOT_JSON = JSON.stringify({
   ],
 }, null, 2)
 
+/**
+ * 英語書きおこし → 日本語字幕 の既定 few-shot。
+ *
+ * 日本語字幕としての作法を例示する:
+ * - 常体（である調）で簡潔に。字幕は文字数制約が厳しいため敬体は使わない
+ * - 技術用語・固有名詞は原綴りのまま残す（LSTM / softmax など）
+ * - 主語や指示語を補って、その字幕単独で意味が通るようにする
+ * - 冗長な前置きや相づちは落とす
+ */
+export const DEFAULT_EN_TO_JA_TRANSLATION_FEW_SHOT_JSON = JSON.stringify({
+  segments: [
+    'So what we do here is we compute the gradient of the loss with respect to each parameter.',
+    'The Long Short-Term Memory model was proposed to overcome these challenges.',
+    'and then we apply a softmax to turn the scores into a probability distribution.',
+    'This is, you know, basically the same idea as before, just applied in reverse.',
+  ],
+  translations: [
+    'ここでは損失の勾配を各パラメータについて計算する。',
+    'これらの課題を解決するために提案されたのがLSTMである。',
+    '次にsoftmaxを適用し、スコアを確率分布に変換する。',
+    'これは先ほどと同じ考え方を逆向きに適用したものである。',
+  ],
+}, null, 2)
+
+/**
+ * 英語書きおこしの補正指示。日本語版と同じ役割（表記ゆれ・数式・専門用語の整形）を
+ * 英語の書きおこしに対して行う。
+ */
+export const DEFAULT_EN_CORRECTION_ADDITIONAL_INSTRUCTIONS =
+  'Additional policy:\n' +
+  '- Render formulas, subscripts, variables, and function names in LaTeX when the context makes them clear (e.g. X1 -> $x_1$, FI -> $f_i$)\n' +
+  '- Normalize technical terms and acronyms to their standard spelling (e.g. Long Short-Term Memory (LSTM), BiLSTM, Jacobian matrix, Hadamard product)\n' +
+  '- Fix only what is needed for the transcript to read correctly; never add information that is not spoken\n'
+
+/**
+ * 英語書きおこしの補正 few-shot。ASR が崩しやすい専門用語・数式の復元を例示する。
+ */
+export const DEFAULT_EN_CORRECTION_FEW_SHOT_JSON = JSON.stringify({
+  segments: [
+    { id: 1, text: 'the jacobian matrix is the matrix of the transformation from n dimensional variables x1 through xn to m dimensional variables z1 through zm expressed as f1 through fm.' },
+    { id: 2, text: 'the model proposed to solve these problems is called l s t m long short term memory.' },
+  ],
+  corrections: [
+    { id: 1, text: 'The Jacobian matrix is the matrix of the transformation from $n$-dimensional variables $x_1$ through $x_n$ to $m$-dimensional variables $z_1$ through $z_m$, expressed as $f_1$ through $f_m$.' },
+    { id: 2, text: 'The model proposed to solve these problems is called Long Short-Term Memory (LSTM).' },
+  ],
+}, null, 2)
+
 function appendAdditionalInstructions(base: string, additional?: string): string {
   const trimmed = additional?.trim()
   return trimmed ? `${base}\n\n${trimmed}` : base
