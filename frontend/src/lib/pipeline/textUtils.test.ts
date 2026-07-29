@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   __testing,
+  stripJapaneseInterCharSpaces,
   joinSubtitleParts,
   normalizeSpaces,
   splitSubtitleLines,
@@ -170,5 +171,55 @@ describe('isValidJaBreak', () => {
 describe('normalizeSpaces（既存動作の維持）', () => {
   it('連続空白を1つにまとめて trim する', () => {
     expect(normalizeSpaces('  a   b  ')).toBe('a b')
+  })
+})
+
+describe('stripJapaneseInterCharSpaces', () => {
+  it('和文どうしに挟まれた空白を落とす（LLM 出力の混入対策）', () => {
+    expect(stripJapaneseInterCharSpaces('実際、逆伝播は 各重みの損失勾配を計算します'))
+      .toBe('実際、逆伝播は各重みの損失勾配を計算します')
+  })
+
+  it('全角空白・連続空白も落とす', () => {
+    expect(stripJapaneseInterCharSpaces('勾配を\u3000計算する')).toBe('勾配を計算する')
+    expect(stripJapaneseInterCharSpaces('勾配を   計算する')).toBe('勾配を計算する')
+  })
+
+  it('英字用語に隣接する空白は残す', () => {
+    expect(stripJapaneseInterCharSpaces('softmax 関数を適用する')).toBe('softmax 関数を適用する')
+    expect(stripJapaneseInterCharSpaces('適用する softmax 関数')).toBe('適用する softmax 関数')
+  })
+
+  it('約物の前後も対象にする', () => {
+    expect(stripJapaneseInterCharSpaces('計算します 。')).toBe('計算します。')
+    expect(stripJapaneseInterCharSpaces('これは 「重要」 です')).toBe('これは「重要」です')
+  })
+
+  it('ラテン文字だけのテキストは変えない', () => {
+    expect(stripJapaneseInterCharSpaces('we compute the gradient')).toBe('we compute the gradient')
+  })
+})
+
+describe('splitSubtitleLines — 日本語出力に空白を残さない', () => {
+  it('LLM 由来の語間空白は行分割時に除去される', () => {
+    expect(splitSubtitleLines('実際、逆伝播は 各重みの損失勾配を計算します', 40, 'japanese'))
+      .toBe('実際、逆伝播は各重みの損失勾配を計算します')
+  })
+
+  it('ラテン系は従来どおり空白を保つ', () => {
+    expect(splitSubtitleLines('we compute the gradient', 40, 'latin'))
+      .toBe('we compute the gradient')
+  })
+})
+
+describe('joinSubtitleParts — 結合後も和文空白を残さない', () => {
+  it('断片内部の和文空白も落とす', () => {
+    expect(joinSubtitleParts(['実際、逆伝播は 各重みの', '損失勾配を 計算します'], 'japanese'))
+      .toBe('実際、逆伝播は各重みの損失勾配を計算します')
+  })
+
+  it('英字用語の空白は保持する', () => {
+    expect(joinSubtitleParts(['softmax 関数を', '適用します'], 'japanese'))
+      .toBe('softmax 関数を適用します')
   })
 })

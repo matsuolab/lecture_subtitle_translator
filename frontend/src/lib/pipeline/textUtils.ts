@@ -22,9 +22,9 @@ export function joinSubtitleParts(parts: Array<string | undefined | null>, scrip
     .map((part) => (part ?? '').trim())
     .filter((part) => part.length > 0)
   if (usesWordSpacing(script)) return normalizeSpaces(cleaned.join(' '))
-  // 日本語: 連結時に空白を挟まない。各断片内部の空白（"softmax 関数" など）は保持したいので
-  // 全除去はせず、連続空白の圧縮だけ行う。
-  return cleaned.join('').replace(/[ \t]+/g, ' ').trim()
+  // 日本語: 連結時に空白を挟まない。英字用語の前後の空白（"softmax 関数" など）は
+  // 組版上の意味があるため保持し、和文どうしに挟まれた空白だけを落とす。
+  return stripJapaneseInterCharSpaces(cleaned.join('').replace(/[ \t]+/g, ' ')).trim()
 }
 
 /**
@@ -34,6 +34,24 @@ export function joinSubtitleParts(parts: Array<string | undefined | null>, scrip
 export function unwrapSubtitleLines(text: string, script: LanguageScript): string {
   if (usesWordSpacing(script)) return normalizeSpaces(text.replace(/\n+/g, ' '))
   return text.replace(/\n+/g, '').replace(/[ \t]+/g, ' ').trim()
+}
+
+/** 日本語文字（かな・漢字）と、和文の約物。これらに挟まれた空白は不要。 */
+const JA_TEXT_CHAR = '぀-ヿ㐀-䶿一-鿿、。！？・「」『』（）［］｛｝〈〉《》〔〕'
+
+/**
+ * 日本語テキスト中の不要な空白を取り除く。
+ *
+ * LLM は日本語字幕を返すときも語間に空白を混ぜてくることがあり
+ * （例: 「逆伝播は 各重みの…」）、normalizeSpaces は連続空白を1つに畳むだけなので残ってしまう。
+ * 和文文字どうしに挟まれた空白のみを除去し、英字・数字に隣接する空白
+ * （例: 「softmax 関数」）は組版上の意味があるため残す。
+ */
+export function stripJapaneseInterCharSpaces(text: string): string {
+  return text.replace(
+    new RegExp(`([${JA_TEXT_CHAR}])[ \\t\\u3000]+(?=[${JA_TEXT_CHAR}])`, 'g'),
+    '$1',
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +119,9 @@ function collectJaBreakCandidates(text: string): JaBreakCandidate[] {
  * どの候補も使えない場合は、禁則を守りつつ中央付近で機械的に切る。
  */
 function splitJapaneseLines(text: string, maxChars: number): string {
-  const compact = text.trim()
+  // LLM 由来の語間空白をここで落とす。formatLines は全ての字幕が通る唯一の共通経路なので、
+  // 圧縮・翻訳・分割など出所を問わず一箇所で正規化できる。
+  const compact = stripJapaneseInterCharSpaces(text.trim()).trim()
   if (compact.length <= maxChars) return compact
 
   const half = compact.length / 2
