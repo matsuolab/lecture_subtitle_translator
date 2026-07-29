@@ -1,4 +1,4 @@
-import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider, WhisperxModel } from '@/types/adminSettings'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
 import {
   DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,
@@ -101,6 +101,8 @@ export function getDefaultAdminSettings(): AdminSettings {
     transcribeLanguageCode: DEFAULT_WHISPERX_LANGUAGE,
     subtitleLanguageLabel: 'English',
     transcriptLanguageLabel: 'Japanese',
+    whisperxDevice: 'cuda',
+    whisperxModel: 'large-v3',
     // 既定は空欄。言語ラベルから script・作法パターンを導出できるため、英日構成では不要。
     // 事前充填すると「ラベルだけ入れ替えた」利用者の設定に別言語の作法が残り続ける
     // （languageProfileConfig 側の stale 判定で無害化しているが、UI 上も空欄が正しい状態）。
@@ -123,6 +125,12 @@ export function getDefaultAdminSettings(): AdminSettings {
     correctionDebugEmbedding: false,
     workLogDir: '',
   }
+}
+
+function normalizeWhisperxModel(value: unknown, fallback: WhisperxModel): WhisperxModel {
+  return value === 'large-v3' || value === 'medium' || value === 'small' || value === 'base' || value === 'tiny'
+    ? value
+    : fallback
 }
 
 function normalizePositiveNumber(value: unknown, fallback: number): number {
@@ -275,6 +283,8 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
       : defaults.transcribeLanguageCode,
     subtitleLanguageLabel: typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel ? raw.subtitleLanguageLabel : defaults.subtitleLanguageLabel,
     transcriptLanguageLabel: typeof raw.transcriptLanguageLabel === 'string' && raw.transcriptLanguageLabel ? raw.transcriptLanguageLabel : defaults.transcriptLanguageLabel,
+    whisperxDevice: raw.whisperxDevice === 'cpu' ? 'cpu' : defaults.whisperxDevice,
+    whisperxModel: normalizeWhisperxModel(raw.whisperxModel, defaults.whisperxModel),
     languageProfileConfigJson: typeof raw.languageProfileConfigJson === 'string' && raw.languageProfileConfigJson ? raw.languageProfileConfigJson : defaults.languageProfileConfigJson,
     textNormalizationEnabled: typeof raw.textNormalizationEnabled === 'boolean' ? raw.textNormalizationEnabled : defaults.textNormalizationEnabled,
     textNormalizationRulesJson: typeof raw.textNormalizationRulesJson === 'string' ? raw.textNormalizationRulesJson : defaults.textNormalizationRulesJson,

@@ -5,7 +5,7 @@ import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useToast } from '@/context/ToastContext'
-import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ServiceMode, TranslationProvider, WhisperxDevice, WhisperxModel } from '@/types/adminSettings'
 import { createSharedAdminSettingsExport, parseSharedAdminSettingsExport } from '@/api/adminSettings'
 import { createAiGateway } from '@/lib/aiGateway'
 import type { AiGatewayProbeName } from '@/lib/aiGateway'
@@ -569,17 +569,19 @@ export function SettingsTab({
               />
             </>
           ) : (
-            <div style={{
-              padding: '10px 12px',
-              borderRadius: 8,
-              border: `1px solid ${theme.panelBorder}`,
-              background: theme.panelBg,
-              color: theme.textSecondary,
-              fontSize: 12,
-              lineHeight: 1.6,
-            }}>
-              ローカル実行に必要なサービスはアプリが自動で起動します。
-            </div>
+            <>
+              <div style={{
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textSecondary,
+                fontSize: 12,
+                lineHeight: 1.6,
+              }}>
+                ローカル実行に必要なサービスはアプリが自動で起動します。
+              </div>
+            </>
           )}
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
             {serviceHelpText}
@@ -1206,6 +1208,37 @@ export function SettingsTab({
                     ? resolveWhisperxImage(adminSettings.transcribeLanguageCode)
                     : '—'}
                 </div>
+              </div>
+              <SelectField
+                theme={theme}
+                label="書きおこしの実行デバイス"
+                value={adminSettings.whisperxDevice}
+                onChange={(value) => onAdminSettingsChange({ whisperxDevice: value as WhisperxDevice })}
+                options={[
+                  { value: 'cuda', label: 'GPU (NVIDIA CUDA)' },
+                  { value: 'cpu', label: 'CPU（GPUなし / Apple Silicon）' },
+                ]}
+              />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                NVIDIA GPU が無い環境では CPU を選びます。GPU 指定のままだと Docker が
+                「GPU ベンダーを検出できない」というエラーで失敗します。
+              </div>
+              <SelectField
+                theme={theme}
+                label="書きおこしモデル"
+                value={adminSettings.whisperxModel}
+                onChange={(value) => onAdminSettingsChange({ whisperxModel: value as WhisperxModel })}
+                options={[
+                  { value: 'large-v3', label: 'large-v3（最高精度 / GPU 推奨）' },
+                  { value: 'medium', label: 'medium' },
+                  { value: 'small', label: 'small（CPU 実行の推奨）' },
+                  { value: 'base', label: 'base（動作確認向け）' },
+                  { value: 'tiny', label: 'tiny' },
+                ]}
+              />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                CPU 実行では large-v3 は実時間の約5.7倍かかります（60分の講義で5時間以上）。
+                small なら実時間とほぼ同等です。GPU があれば large-v3 のままで構いません。
               </div>
             </>
           ) : (
@@ -2227,6 +2260,7 @@ function NumberField({
   )
 }
 
+// 値の型は呼び出し側の options から推論する（翻訳プロバイダ以外の列挙にも使うため）。
 function SelectField<T extends string>({
   theme,
   label,
