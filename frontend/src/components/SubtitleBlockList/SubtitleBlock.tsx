@@ -4,7 +4,15 @@ import { TermHighlight, type SearchHighlightRange } from './TermHighlight'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary } from '@/context/GlossaryContext'
-import { findMissingTranslations, findMatchedGlossaryEntries, toSourceTerms, toTargetTerms, findTypoCandidates } from '@/utils/glossaryApply'
+import {
+  findMissingTranslations,
+  findMatchedGlossaryEntries,
+  toSubtitleTerms,
+  toTranscriptTerms,
+  findTypoCandidates,
+  DEFAULT_GLOSSARY_ROLES,
+  type GlossaryRoles,
+} from '@/utils/glossaryApply'
 import { spellIssuesToTerms, type SpellIssue } from '@/lib/pipeline/spellCheck'
 import type { Theme } from '@/themes'
 
@@ -27,6 +35,8 @@ interface SubtitleBlockProps {
   onDraftChange: (id: number, text: string | null) => void
   /** このブロックのスペル校正結果（承認/出力時に算出） */
   spellIssues?: SpellIssue[]
+  /** 用語辞書の ja/en フィールドと字幕・書きおこしロールの対応（翻訳方向で入れ替わる） */
+  glossaryRoles?: GlossaryRoles
   /** 誤検知語をユーザー個人辞書へ登録 */
   onAddToSpellDictionary: (word: string) => void
   canMergePrevious: boolean
@@ -256,6 +266,7 @@ function SubtitleBlockInner({
   onDraftChange,
   spellIssues,
   onAddToSpellDictionary,
+  glossaryRoles = DEFAULT_GLOSSARY_ROLES,
   canMergePrevious,
   canMergeNext,
   onMergeWithPrevious,
@@ -274,17 +285,17 @@ function SubtitleBlockInner({
 
   // ライブ用語集からマッチエントリを色付きで取得（色は日英共通）
   const matchedWithColors = useMemo(
-    () => findMatchedGlossaryEntries(block.subtitle, block.transcript, deferredGlossary),
-    [block.subtitle, block.transcript, deferredGlossary],
+    () => findMatchedGlossaryEntries(block.subtitle, block.transcript, deferredGlossary, glossaryRoles),
+    [block.subtitle, block.transcript, deferredGlossary, glossaryRoles],
   )
-  const matchedTermsEn = useMemo(() => toSourceTerms(matchedWithColors), [matchedWithColors])
-  const matchedTermsJa = useMemo(() => toTargetTerms(matchedWithColors), [matchedWithColors])
+  const matchedSubtitleTerms = useMemo(() => toSubtitleTerms(matchedWithColors), [matchedWithColors])
+  const matchedTranscriptTerms = useMemo(() => toTranscriptTerms(matchedWithColors), [matchedWithColors])
   const shouldEvaluateMissing = isActive || (block.ignoredMissing?.length ?? 0) > 0
   const allMissingTerms = useMemo(
     () => shouldEvaluateMissing
-      ? findMissingTranslations(block.transcript, block.subtitle, deferredGlossary)
+      ? findMissingTranslations(block.transcript, block.subtitle, deferredGlossary, glossaryRoles)
       : [],
-    [shouldEvaluateMissing, block.transcript, block.subtitle, deferredGlossary],
+    [shouldEvaluateMissing, block.transcript, block.subtitle, deferredGlossary, glossaryRoles],
   )
   const missingTerms = useMemo(
     () => allMissingTerms.filter(m => !(block.ignoredMissing ?? []).includes(m.entry.id)),
@@ -295,8 +306,8 @@ function SubtitleBlockInner({
     [allMissingTerms, block.ignoredMissing],
   )
   const allTypoCandidates = useMemo(
-    () => isActive ? findTypoCandidates(block.subtitle, deferredGlossary) : [],
-    [isActive, block.subtitle, deferredGlossary],
+    () => isActive ? findTypoCandidates(block.subtitle, deferredGlossary, glossaryRoles.subtitle) : [],
+    [isActive, block.subtitle, deferredGlossary, glossaryRoles],
   )
   const typoCandidates = useMemo(
     () => allTypoCandidates.filter(c => !(block.ignoredTypos ?? []).includes(`${c.found}::${c.entry.en}`)),
@@ -324,15 +335,15 @@ function SubtitleBlockInner({
     [spellIssues, block.ignoredTypos, spellIgnoreKey],
   )
   const spellTerms = useMemo(() => spellIssuesToTerms(activeSpellIssues), [activeSpellIssues])
-  // 英語ソース表示用: 辞書マッチ + タイポ候補 + スペル誤り を合成（後ろに追加して重複排除）
+  // 字幕表示用: 辞書マッチ + タイポ候補 + スペル誤り を合成（後ろに追加して重複排除）
   const subtitleTerms = useMemo(() => {
     const taken = new Set([
       ...typoCandidates.map(c => c.found.toLowerCase()),
       ...spellTerms.map(t => t.word.toLowerCase()),
     ])
-    const filtered = matchedTermsEn.filter(t => !taken.has(t.word.toLowerCase()))
+    const filtered = matchedSubtitleTerms.filter(t => !taken.has(t.word.toLowerCase()))
     return [...filtered, ...typoTerms, ...spellTerms]
-  }, [matchedTermsEn, typoTerms, typoCandidates, spellTerms])
+  }, [matchedSubtitleTerms, typoTerms, typoCandidates, spellTerms])
   const [showTypoList, setShowTypoList] = useState(false)
   const [showSpellList, setShowSpellList] = useState(false)
   const [showMissingList, setShowMissingList] = useState(false)
@@ -341,8 +352,8 @@ function SubtitleBlockInner({
   const [editText, setEditText] = useState(block.subtitle)
   // 編集中のタイポ候補（editText に対してライブ計算）
   const editTypoCandidates = useMemo(
-    () => isEditing ? findTypoCandidates(editText, deferredGlossary) : [],
-    [isEditing, editText, deferredGlossary],
+    () => isEditing ? findTypoCandidates(editText, deferredGlossary, glossaryRoles.subtitle) : [],
+    [isEditing, editText, deferredGlossary, glossaryRoles],
   )
   const [isEditingTranscript, setIsEditingTranscript] = useState(false)
   const [editTranscriptText, setEditTranscriptText] = useState(block.transcript)
@@ -713,7 +724,7 @@ function SubtitleBlockInner({
           title={isApproved ? undefined : 'クリックで訳文を編集'}
         >
           {block.transcript
-            ? <TermHighlight text={block.transcript} terms={matchedTermsJa} searchRanges={searchRangesTranscript} />
+            ? <TermHighlight text={block.transcript} terms={matchedTranscriptTerms} searchRanges={searchRangesTranscript} />
             : <span style={{ color: theme.textDisabled, fontStyle: 'italic' }}>（訳文なし）</span>
           }
         </div>
