@@ -9,7 +9,7 @@ import {
   resolveChatCompletionTokenLimitForProvider,
 } from './aiProvider'
 import { resolveSplitJaModelId } from './prompts'
-import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
+import { loadLanguageProfileConfig, type LanguageProfileConfig, type LanguageScript } from './languageProfileConfig'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta } from './llmCallWithMeta'
@@ -159,6 +159,10 @@ function mapAlignConf(confidence: AlignedSpan['confidence']): 'exact' | 'no_word
  * `AlignedSpan` のマッチ済みASR文字範囲（`firstCharIndex`〜`lastCharIndex`）を
  * `WordTimestamp[]` へ復元する。日本語ASRは1文字=1wordとして扱われるため、
  * ASR文字をそのまま word として詰め直せばよい。マッチ無し（interpolated）は空配列。
+ *
+ * ラテン文字（`script: 'latin'`）では `asrStream` の1エントリが既に単語単位
+ * （`buildAsrCharStream` 参照）なので、このスライスがそのまま単語単位の
+ * `WordTimestamp[]` になる（1文字ずつの粒度より正確になる改善）。
  */
 function spanToWords(span: AlignedSpan, asrStream: readonly AsrChar[]): WordTimestamp[] {
   if (span.firstCharIndex === null || span.lastCharIndex === null) return []
@@ -233,11 +237,12 @@ function alignFragmentsWithinParentSlice(
   fragments: readonly RawSemanticUnit[],
   parentSpan: AlignedSpan,
   asrStream: readonly AsrChar[],
+  script: LanguageScript,
 ): AlignedSpan[] {
   const sliceStart = parentSpan.firstCharIndex as number
   const sliceEnd = parentSpan.lastCharIndex as number
   const slice = asrStream.slice(sliceStart, sliceEnd + 1)
-  const spans = alignCuesToAsr(fragments.map(fragment => fragment.jaText), slice)
+  const spans = alignCuesToAsr(fragments.map(fragment => fragment.jaText), slice, { script })
   return spans.map(span => clampSpanToParent(
     {
       ...span,
@@ -257,11 +262,12 @@ function alignFragmentsWithinParent(
   fragments: readonly RawSemanticUnit[],
   parentSpan: AlignedSpan,
   asrStream: readonly AsrChar[],
+  script: LanguageScript,
 ): AlignedSpan[] {
   if (parentSpan.firstCharIndex === null || parentSpan.lastCharIndex === null) {
     return proportionalSpansForFragments(fragments, parentSpan)
   }
-  return alignFragmentsWithinParentSlice(fragments, parentSpan, asrStream)
+  return alignFragmentsWithinParentSlice(fragments, parentSpan, asrStream, script)
 }
 
 interface OverlongScanEntry {
@@ -293,8 +299,9 @@ function alignUnitsGlobally(
   asrStream: readonly AsrChar[],
   thresholds: PipelineThresholds,
   glossaryTerms: string[],
+  script: LanguageScript = 'japanese',
 ): AlignedUnit[] {
-  const initialSpans = alignCuesToAsr(units.map(unit => unit.jaText), asrStream)
+  const initialSpans = alignCuesToAsr(units.map(unit => unit.jaText), asrStream, { script })
   let entries: OverlongScanEntry[] = units.map((unit, index) => ({
     unit,
     span: initialSpans[index],
@@ -315,7 +322,7 @@ function alignUnitsGlobally(
       entries = [...entries.slice(0, overlongIndex), { ...entry, accepted: true }, ...entries.slice(overlongIndex + 1)]
       continue
     }
-    const fragmentSpans = alignFragmentsWithinParent(fragments, entry.span, asrStream)
+    const fragmentSpans = alignFragmentsWithinParent(fragments, entry.span, asrStream, script)
     const fragmentEntries = fragments.map((fragment, index) => ({
       unit: fragment,
       span: fragmentSpans[index],
@@ -541,6 +548,9 @@ export async function semanticSplitJa(
   thresholds: PipelineThresholds,
   glossaryTerms: string[] = [],
 ): Promise<JaBlock[]> {
+  // 書きおこし（元言語）の script。ラテン文字はWhisperXが単語単位でタイムスタンプを
+  // 返すため、buildAsrCharStream/alignCuesToAsr の両方に伝える必要がある（asrAlignment.ts参照）。
+  const transcriptScript = loadLanguageProfileConfig(settings).transcript.script
   const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
     ? LOCAL_MAX_SEGMENTS_PER_REQUEST
     : MAX_SEGMENTS_PER_REQUEST
@@ -585,10 +595,10 @@ export async function semanticSplitJa(
     orderedUnits.push(...segmentUnits)
   }
 
-  const asrStream = buildAsrCharStream(segments)
+  const asrStream = buildAsrCharStream(segments, { script: transcriptScript })
   const aligned = asrStream.length === 0
     ? alignUnitsProportionalFallback(orderedUnits, segments, thresholds, glossaryTerms)
-    : alignUnitsGlobally(orderedUnits, asrStream, thresholds, glossaryTerms)
+    : alignUnitsGlobally(orderedUnits, asrStream, thresholds, glossaryTerms, transcriptScript)
 
   return buildJaBlocks(aligned)
 }

@@ -1,8 +1,19 @@
-import { diffChars, type Change } from 'diff'
+import { diffArrays, type ArrayChange } from 'diff'
 import type { TranscriptSegment, WordTimestamp } from './types'
+import type { LanguageScript } from './languageProfileConfig'
 
 /**
- * WhisperXの単語タイムスタンプを1文字単位に展開したASR文字ストリームの要素。
+ * ASR文字ストリームの1エントリ。`script`（AsrCharStreamOptions参照）によって粒度が変わる:
+ * - `japanese` / `generic`（既定）: WhisperXの1単語トークンを正規化後の文字数に分解し、
+ *   1文字=1エントリにする（従来どおり）。
+ * - `latin`: WhisperXの1単語トークン=1エントリ（分解しない）。`char` にはトークンの
+ *   元テキスト（trimのみ）を保持し、比較キー（小文字化＋前後句読点除去）は比較時に
+ *   都度算出する（`normalizeLatinToken` 参照）。
+ *
+ * 型名・フィールド名は script によらず共通（`AlignedSpan.firstCharIndex`/`lastCharIndex`
+ * も含め「文字インデックス」という名前のまま「トークンインデックス」の意味で使う）。
+ * `script` を追加した際に呼び出し側の破壊的変更を避けるための意図的な選択。
+ *
  * `score` は WhisperX の word-level confidence（0-1）。欠損時は 1（高信頼）扱いにする。
  */
 export interface AsrChar {
@@ -52,17 +63,47 @@ export interface AsrCharStreamOptions {
    * 吸収されたポーズを除去しつつ、正当な長音（伸ばし棒など）の長さは保持できる値として選定。
    */
   maxWordDurationSec?: number
+  /**
+   * 書きおこし言語の文字体系。デフォルト `'japanese'`（後方互換）。
+   *
+   * 根拠（実データ: Sam Altman 70分・英語音声）: WhisperXはラテン文字では単語単位で
+   * タイムスタンプを返す（1トークンの中央長4文字）。これを日本語と同じ1文字単位に
+   * 分解すると、実測の単語時刻を線形補間で捨ててしまい、開始時刻のズレが1秒超のキューが
+   * 54件→373件（51%）に激増する不具合が実測された。`latin` はこれを避けるため単語を
+   * 分解しない。`japanese`/`generic` は従来どおり1文字単位（日本語は1文字=1トークンが
+   * 実測でも大半のため分解の必要がない）。
+   */
+  script?: LanguageScript
 }
 
 export interface AlignCuesToAsrOptions extends AsrCharStreamOptions {
-  /** ASR側の窓幅（正規化後の文字数）。デフォルト 4000。 */
+  /**
+   * ASR側の窓幅（トークン数。japanese/genericは文字数、latinは単語数）。
+   * 未指定時は `DEFAULT_WINDOW_SEC` を、渡された `asr` の実測密度（トークン数/秒）で
+   * トークン数へ換算する（`computeAsrDensityPerSec` 参照）。明示指定時は常にそちらを優先する
+   * （既存テスト・呼び出し側の互換性のため）。
+   */
   windowChars?: number
-  /** 窓の前後に持たせるマージン（正規化後の文字数）。セグメント跨ぎの融合を吸収する。デフォルト 800。 */
+  /**
+   * 窓の前後に持たせるマージン（トークン数）。セグメント跨ぎの融合を吸収する。
+   * `windowChars` と同様、未指定時は `DEFAULT_WINDOW_MARGIN_SEC` を実測密度で換算する。
+   */
   windowMarginChars?: number
-  /** jsdiff diffChars に渡す maxEditLength。巨大な非類似テキストでの計算コスト爆発を防ぐ安全弁。 */
+  /** jsdiff diffArrays に渡す maxEditLength。巨大な非類似テキストでの計算コスト爆発を防ぐ安全弁。 */
   maxEditLength?: number
 }
 
+// 秒基準の窓幅・マージン。トークンの密度が言語で異なる（実測: 英語191トークン/分 vs
+// 日本語295文字/分、約1.5倍差）ため、トークン数固定の窓幅では言語ごとに実際の時間幅が
+// ずれてしまう。渡された asr ストリームの実測密度（トークン数/秒）でトークン数へ換算する
+// ことで、どの言語でも「概ね同じ時間幅の窓」になるようにする。
+// 800秒・160秒は、日本語の実測密度（295文字/分≒4.92文字/秒）で換算すると
+// 800*4.92≈3933 / 160*4.92≈787 となり、従来の固定値(4000/800)とほぼ一致する
+// （＝日本語の既存挙動を変えないように選定した値）。
+const DEFAULT_WINDOW_SEC = 800
+const DEFAULT_WINDOW_MARGIN_SEC = 160
+// asr が空、または start===end（密度0除算）等で密度を計算できない場合のフォールバック。
+// 旧実装の固定デフォルト値をそのまま踏襲する。
 const DEFAULT_WINDOW_CHARS = 4000
 const DEFAULT_WINDOW_MARGIN_CHARS = 800
 // 窓幅(4000) + 前後マージン(800*2) 規模のテキスト同士を比較しても十分に打ち切られない値。
@@ -113,10 +154,12 @@ interface ResolvedOptions {
   windowChars: number
   windowMarginChars: number
   maxEditLength: number
+  script: LanguageScript
 }
 
 interface ResolvedAsrCharStreamOptions {
   maxWordDurationSec: number
+  script: LanguageScript
 }
 
 interface CueBound {
@@ -147,7 +190,7 @@ interface TimedSpan {
   endSec: number
 }
 
-/** キュー文字インデックス→ASR文字インデックスの1対応ペア。cueCharIndex は cueConcat 上の絶対位置。 */
+/** キュー文字インデックス→ASR文字インデックスの1対応ペア。cueCharIndex は cueTokensFlat 上の絶対位置。 */
 interface CharPair {
   cueCharIndex: number
   asrIndex: number
@@ -169,6 +212,56 @@ function normalizeTimingText(text: string): string {
   return normalizeSpacesLocal(text).replace(/[。、「」『』（）()［］[\]！？!?・,，、.\s]/g, '')
 }
 
+/**
+ * ラテン文字トークンの比較キー: 小文字化し、前後の句読点（英数字・アポストロフィ・
+ * ハイフン以外の文字）を除去する。語中のアポストロフィ（`I'm`）やハイフン
+ * （`co-founder`）は正しい単語の一部として保持する（前後だけを剥がす）。
+ * 記号のみのトークン（例: `...`）は結果が空文字列になり、呼び出し側で捨てられる。
+ */
+function normalizeLatinToken(raw: string): string {
+  return raw.toLowerCase().replace(/^[^a-z0-9'-]+|[^a-z0-9'-]+$/g, '')
+}
+
+/**
+ * ラテン文字キューの分割規則: 先に空白で単語へ分割してから、単語ごとに
+ * `normalizeLatinToken` で正規化する。
+ *
+ * 既存の `normalizeTimingText` は句読点だけでなく空白も除去するため、先に正規化してから
+ * 分割しようとすると英語では単語境界が失われる（実測: "Today I'm sitting down" が
+ * "TodayImsittingdown" のように連結され、"the"/"and" 等の短い文字列が無数に再出現して
+ * 遠方への誤マッチが大量発生した）。分割してから正規化することでこれを避ける。
+ * 正規化結果が空文字になる語（記号のみの語）は捨てる。
+ */
+function tokenizeLatinCueText(text: string): string[] {
+  return normalizeSpacesLocal(text)
+    .split(' ')
+    .filter(Boolean)
+    .map(normalizeLatinToken)
+    .filter(key => key.length > 0)
+}
+
+/**
+ * キューを比較用トークン配列へ変換する。`japanese`/`generic` は従来どおり1文字ずつ
+ * （句読点・空白は除去）、`latin` は空白分割後に単語ごと正規化する。
+ */
+function tokenizeCueText(text: string, script: LanguageScript): string[] {
+  if (script === 'latin') return tokenizeLatinCueText(text)
+  return Array.from(normalizeTimingText(text))
+}
+
+/**
+ * ASR側トークンとキュー側トークンの一致判定。`latin` はASR側トークン（単語の元テキスト、
+ * 未正規化）を都度 `normalizeLatinToken` して比較する（キュー側は既に正規化済みの比較
+ * キー配列として渡ってくる）。`japanese`/`generic` は文字そのものの一致で十分
+ * （両側とも既に `normalizeTimingText` 済みの1文字）。
+ */
+function makeAsrTokenComparator(script: LanguageScript): (asrToken: string, cueToken: string) => boolean {
+  if (script === 'latin') {
+    return (asrToken, cueToken) => normalizeLatinToken(asrToken) === cueToken
+  }
+  return (asrToken, cueToken) => asrToken === cueToken
+}
+
 function wordToChars(word: WordTimestamp, maxWordDurationSec: number): AsrChar[] {
   const text = normalizeTimingText(String(word.word ?? ''))
   const length = text.length
@@ -186,78 +279,113 @@ function wordToChars(word: WordTimestamp, maxWordDurationSec: number): AsrChar[]
   }))
 }
 
+/**
+ * ラテン文字用: WhisperXの単語トークンを分解せず1エントリのまま採用する。
+ * 実測（Sam Altman 70分・英語音声）: 1トークンの中央長は4文字で、日本語のような
+ * 1文字=1トークン分解を行うと単語単位の実測タイムスタンプを線形補間で捨ててしまう。
+ * `start` はそのまま、`end` は他の script と同様 `maxWordDurationSec` でCAPする。
+ * 比較キー（`normalizeLatinToken`）が空文字になるトークン（記号のみ等）は捨てる。
+ */
+function wordToAsrToken(word: WordTimestamp, maxWordDurationSec: number): AsrChar[] {
+  const raw = String(word.word ?? '').trim()
+  if (!raw || normalizeLatinToken(raw).length === 0) return []
+  const effectiveEnd = Math.min(word.end, word.start + maxWordDurationSec)
+  const score = typeof word.score === 'number' && Number.isFinite(word.score) ? word.score : 1
+  return [{ char: raw, start: word.start, end: effectiveEnd, score }]
+}
+
 function resolveAsrCharStreamOptions(options?: AsrCharStreamOptions): ResolvedAsrCharStreamOptions {
   return {
     maxWordDurationSec: options?.maxWordDurationSec ?? DEFAULT_MAX_WORD_DURATION_SEC,
+    script: options?.script ?? 'japanese',
   }
 }
 
 /**
- * WhisperXのセグメント列から、ASR文字ストリーム（1文字=1エントリ、時刻つき）を構築する。
- * セグメント跨ぎの補正結果を大域アライメントで扱えるよう、講義全体を1本の文字列とみなす。
+ * WhisperXのセグメント列から、ASR文字ストリーム（時刻つきトークン列）を構築する。
+ * セグメント跨ぎの補正結果を大域アライメントで扱えるよう、講義全体を1本の列とみなす。
+ * `script`（既定 `japanese`）によって粒度が変わる。詳細は `AsrCharStreamOptions.script` 参照。
  */
 export function buildAsrCharStream(
   segments: readonly TranscriptSegment[],
   options?: AsrCharStreamOptions,
 ): AsrChar[] {
-  const { maxWordDurationSec } = resolveAsrCharStreamOptions(options)
+  const { maxWordDurationSec, script } = resolveAsrCharStreamOptions(options)
+  const isLatin = script === 'latin'
   return segments.flatMap(segment => {
     const words = [...(segment.words ?? [])]
       .filter(word => Number.isFinite(word.start) && Number.isFinite(word.end))
       .sort((a, b) => a.start - b.start || a.end - b.end)
-    return words.flatMap(word => wordToChars(word, maxWordDurationSec))
+    return words.flatMap(word => (isLatin ? wordToAsrToken(word, maxWordDurationSec) : wordToChars(word, maxWordDurationSec)))
   })
 }
 
-function resolveOptions(options?: AlignCuesToAsrOptions): ResolvedOptions {
+function computeAsrDensityPerSec(asr: readonly AsrChar[]): number {
+  if (asr.length === 0) return 0
+  const span = asr[asr.length - 1].end - asr[0].start
+  if (!(span > 0)) return 0
+  return asr.length / span
+}
+
+/**
+ * 秒基準の窓幅定数を、渡された `asr` の実測密度（トークン数/秒）でトークン数へ換算する。
+ * `explicit` が指定されていれば常にそちらを優先する（既存オプション・テストの互換性のため）。
+ * 密度を計算できない（asr が空、または start===end）場合は `fallback`（旧来の固定値）を使う。
+ */
+function resolveWindowSize(explicit: number | undefined, sec: number, density: number, fallback: number): number {
+  if (explicit !== undefined) return explicit
+  if (density <= 0) return fallback
+  return Math.max(1, Math.round(sec * density))
+}
+
+function resolveOptions(options: AlignCuesToAsrOptions | undefined, asr: readonly AsrChar[]): ResolvedOptions {
+  const density = computeAsrDensityPerSec(asr)
   return {
-    windowChars: options?.windowChars ?? DEFAULT_WINDOW_CHARS,
-    windowMarginChars: options?.windowMarginChars ?? DEFAULT_WINDOW_MARGIN_CHARS,
+    windowChars: resolveWindowSize(options?.windowChars, DEFAULT_WINDOW_SEC, density, DEFAULT_WINDOW_CHARS),
+    windowMarginChars: resolveWindowSize(options?.windowMarginChars, DEFAULT_WINDOW_MARGIN_SEC, density, DEFAULT_WINDOW_MARGIN_CHARS),
     maxEditLength: options?.maxEditLength ?? DEFAULT_MAX_EDIT_LENGTH,
+    script: options?.script ?? 'japanese',
   }
 }
 
-function charsToString(chars: readonly AsrChar[]): string {
-  return chars.map(c => c.char).join('')
-}
-
-function computeCueBounds(normCues: readonly string[]): CueBound[] {
+function computeCueBounds(cueLengths: readonly number[]): CueBound[] {
   const bounds: CueBound[] = []
   let cursor = 0
-  for (const text of normCues) {
-    bounds.push({ start: cursor, end: cursor + text.length })
-    cursor += text.length
+  for (const length of cueLengths) {
+    bounds.push({ start: cursor, end: cursor + length })
+    cursor += length
   }
   return bounds
 }
 
 /**
- * キューを正規化後の文字数で `windowChars` 以下になるようグルーピングする。
+ * キューをトークン数で `windowChars` 以下になるようグルーピングする。
  * 1キュー単独で `windowChars` を超える場合はそのキューだけで1グループにする（分割しない）。
  */
-function chunkCueGroups(normCues: readonly string[], windowChars: number): number[][] {
+function chunkCueGroups(cueLengths: readonly number[], windowChars: number): number[][] {
   const groups: number[][] = []
   let current: number[] = []
   let currentLen = 0
-  normCues.forEach((text, index) => {
-    if (current.length > 0 && currentLen + text.length > windowChars) {
+  cueLengths.forEach((length, index) => {
+    if (current.length > 0 && currentLen + length > windowChars) {
       groups.push(current)
       current = []
       currentLen = 0
     }
     current.push(index)
-    currentLen += text.length
+    currentLen += length
   })
   if (current.length > 0) groups.push(current)
   return groups
 }
 
 /**
- * 1窓分の diffChars 結果を走査し、キュー文字インデックス→ASR文字インデックスの対応を
- * globalMatches に書き込む。added（キュー側のみ）/removed（ASR側のみ）は対応なしとして無視する。
+ * 1窓分の diffArrays 結果を走査し、キュートークンインデックス→ASRトークンインデックスの
+ * 対応を globalMatches に書き込む。added（キュー側のみ）/removed（ASR側のみ）は
+ * 対応なしとして無視する。
  */
 function applyWindowMatches(
-  changes: readonly Change[],
+  changes: readonly ArrayChange<string>[],
   windowStartA: number,
   groupCueStart: number,
   globalMatches: Map<number, number>,
@@ -287,41 +415,49 @@ function applyWindowMatches(
 }
 
 /**
- * ASR文字ストリームとキュー全体を、窓処理しながら diffChars で突き合わせ、
- * キュー文字インデックス→ASR文字インデックスの対応表を作る。
+ * ASR文字ストリームとキュー全体を、窓処理しながら diffArrays で突き合わせ、
+ * キュートークンインデックス→ASRトークンインデックスの対応表を作る。
  *
- * 窓はASR側の文字数（`windowChars`）を基準に区切り、前後に `windowMarginChars` の
+ * 窓はASR側のトークン数（`windowChars`）を基準に区切り、前後に `windowMarginChars` の
  * マージンを持たせる。マージンにより、キューがセグメントを跨いで融合していても
- * 直前の窓で使い切れなかったASR文字を次の窓でも参照でき、対応が途切れない。
+ * 直前の窓で使い切れなかったASRトークンを次の窓でも参照でき、対応が途切れない。
+ *
+ * `diffChars` から `diffArrays` への切り替え: ラテン文字では1トークン=1単語になるため、
+ * 文字列比較ではなく比較キー配列同士の比較が必要。`comparator` オプションでASR側トークン
+ * （未正規化）とキュー側トークン（正規化済み）の一致を判定する。
  */
 function buildGlobalMatches(
   asr: readonly AsrChar[],
-  normCues: readonly string[],
+  cueTokenLists: readonly string[][],
   cueBounds: readonly CueBound[],
-  cueConcat: string,
+  cueTokensFlat: readonly string[],
   resolved: ResolvedOptions,
 ): Map<number, number> {
   const globalMatches = new Map<number, number>()
-  if (asr.length === 0 || cueConcat.length === 0) return globalMatches
+  if (asr.length === 0 || cueTokensFlat.length === 0) return globalMatches
 
-  const asrText = charsToString(asr)
-  const groups = chunkCueGroups(normCues, resolved.windowChars)
-  const asrCharsPerCueChar = asr.length / cueConcat.length
+  const asrTokens = asr.map(c => c.char)
+  const comparator = makeAsrTokenComparator(resolved.script)
+  const groups = chunkCueGroups(cueTokenLists.map(tokens => tokens.length), resolved.windowChars)
+  const asrTokensPerCueToken = asr.length / cueTokensFlat.length
   let asrCursor = 0
 
   for (const group of groups) {
     const groupCueStart = cueBounds[group[0]].start
     const groupCueEnd = cueBounds[group[group.length - 1]].end
-    const cueWindowText = cueConcat.slice(groupCueStart, groupCueEnd)
+    const cueWindowTokens = cueTokensFlat.slice(groupCueStart, groupCueEnd)
     const estimatedAsrLen = Math.max(
-      cueWindowText.length,
-      Math.round(cueWindowText.length * asrCharsPerCueChar),
+      cueWindowTokens.length,
+      Math.round(cueWindowTokens.length * asrTokensPerCueToken),
     )
     const windowStart = Math.max(0, asrCursor - resolved.windowMarginChars)
     const windowEnd = Math.min(asr.length, asrCursor + estimatedAsrLen + resolved.windowMarginChars)
-    const asrWindowText = asrText.slice(windowStart, windowEnd)
+    const asrWindowTokens = asrTokens.slice(windowStart, windowEnd)
 
-    const changes = diffChars(asrWindowText, cueWindowText, { maxEditLength: resolved.maxEditLength })
+    const changes = diffArrays(asrWindowTokens, cueWindowTokens, {
+      comparator,
+      maxEditLength: resolved.maxEditLength,
+    })
     if (!changes) {
       // 打ち切り（maxEditLength超過）。この窓のキューは対応なしのまま残り、
       // 後段の buildProvisionalSpans で matchedChars=0 となって自動的に interpolated 扱いになる。
@@ -695,12 +831,12 @@ export function alignCuesToAsr(
   options?: AlignCuesToAsrOptions,
 ): AlignedSpan[] {
   if (cueTexts.length === 0) return []
-  const resolved = resolveOptions(options)
-  const normCues = cueTexts.map(normalizeTimingText)
-  const cueBounds = computeCueBounds(normCues)
-  const cueConcat = normCues.join('')
+  const resolved = resolveOptions(options, asr)
+  const cueTokenLists = cueTexts.map(text => tokenizeCueText(text, resolved.script))
+  const cueBounds = computeCueBounds(cueTokenLists.map(tokens => tokens.length))
+  const cueTokensFlat = cueTokenLists.flat()
 
-  const globalMatches = buildGlobalMatches(asr, normCues, cueBounds, cueConcat, resolved)
+  const globalMatches = buildGlobalMatches(asr, cueTokenLists, cueBounds, cueTokensFlat, resolved)
   const provisional = buildProvisionalSpans(asr, cueBounds, globalMatches)
   const interpolated = interpolateSpans(provisional, asr)
   const monotonic = enforceMonotonicSpans(interpolated)
@@ -710,6 +846,8 @@ export function alignCuesToAsr(
 
 export const __testing = {
   normalizeTimingText,
+  normalizeLatinToken,
+  tokenizeCueText,
   chunkCueGroups,
   trimEnvelopeByScore,
   longestNonDecreasingSubsequence,
@@ -719,4 +857,6 @@ export const __testing = {
   distributeRun,
   interpolateSpans,
   enforceMonotonicSpans,
+  computeAsrDensityPerSec,
+  resolveOptions,
 }

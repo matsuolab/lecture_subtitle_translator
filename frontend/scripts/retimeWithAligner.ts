@@ -5,11 +5,17 @@
  *
  * 使い方:
  *   cd frontend && npx tsx scripts/retimeWithAligner.ts \
- *     <whisperx_raw.json> <project.json> <出力先.json>
+ *     <whisperx_raw.json> <project.json> <出力先.json> [script]
+ *
+ *   [script] は 'japanese' | 'latin' | 'generic'（省略時 'japanese'）。
+ *   英語音声を計測する場合は 'latin' を指定する（WhisperXが単語単位でタイムスタンプを
+ *   返すため、日本語と同じ1文字単位分解では実測の単語時刻を捨ててしまう。詳細は
+ *   src/lib/pipeline/asrAlignment.ts の AsrCharStreamOptions.script 参照）。
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 
 import { alignCuesToAsr, buildAsrCharStream, type AlignedSpan } from '../src/lib/pipeline/asrAlignment'
+import type { LanguageScript } from '../src/lib/pipeline/languageProfileConfig'
 import type { TranscriptSegment, WordTimestamp } from '../src/lib/pipeline/types'
 
 interface WhisperXRawWord {
@@ -78,12 +84,23 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf-8')) as T
 }
 
-function parseArgs(argv: readonly string[]): { whisperxPath: string; projectPath: string; outPath: string } {
-  const [whisperxPath, projectPath, outPath] = argv
+const VALID_SCRIPTS: ReadonlySet<LanguageScript> = new Set(['japanese', 'latin', 'generic'])
+
+function parseScriptArg(raw: string | undefined): LanguageScript {
+  return raw && VALID_SCRIPTS.has(raw as LanguageScript) ? (raw as LanguageScript) : 'japanese'
+}
+
+function parseArgs(argv: readonly string[]): {
+  whisperxPath: string
+  projectPath: string
+  outPath: string
+  script: LanguageScript
+} {
+  const [whisperxPath, projectPath, outPath, scriptArg] = argv
   if (!whisperxPath || !projectPath || !outPath) {
-    throw new Error('Usage: retimeWithAligner.ts <whisperx_raw.json> <project.json> <out.json>')
+    throw new Error('Usage: retimeWithAligner.ts <whisperx_raw.json> <project.json> <out.json> [script]')
   }
-  return { whisperxPath, projectPath, outPath }
+  return { whisperxPath, projectPath, outPath, script: parseScriptArg(scriptArg) }
 }
 
 function summarizeConfidence(spans: readonly RetimedSpan[]): Record<AlignedSpan['confidence'], number> {
@@ -95,16 +112,16 @@ function summarizeConfidence(spans: readonly RetimedSpan[]): Record<AlignedSpan[
 }
 
 function main(): void {
-  const { whisperxPath, projectPath, outPath } = parseArgs(process.argv.slice(2))
+  const { whisperxPath, projectPath, outPath, script } = parseArgs(process.argv.slice(2))
 
   const raw = readJson<WhisperXRaw>(whisperxPath)
   const project = readJson<ProjectJson>(projectPath)
 
   const segments = toTranscriptSegments(raw)
-  const asr = buildAsrCharStream(segments)
+  const asr = buildAsrCharStream(segments, { script })
 
   const cueTexts = project.blocks.map(block => block.transcript ?? '')
-  const aligned = alignCuesToAsr(cueTexts, asr)
+  const aligned = alignCuesToAsr(cueTexts, asr, { script })
 
   const spans: RetimedSpan[] = project.blocks.map((block, index) => {
     const span = aligned[index]
@@ -121,7 +138,7 @@ function main(): void {
 
   const summary = summarizeConfidence(spans)
   console.log(
-    `retimed ${spans.length} blocks -> ${outPath} ` +
+    `retimed ${spans.length} blocks (script=${script}) -> ${outPath} ` +
       `(exact=${summary.exact}, partial=${summary.partial}, interpolated=${summary.interpolated})`,
   )
 }

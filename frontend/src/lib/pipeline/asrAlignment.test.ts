@@ -772,3 +772,199 @@ describe('3. セグメント跨ぎの融合（本命・実データフィクス�
     expect(charsPerSec).toBeLessThanOrEqual(8.5)
   })
 })
+
+describe('ラテン文字（script: "latin"）のトークン化', () => {
+  function makeWordChar(word: string, start: number, end: number, score = 1): AsrChar {
+    return { char: word, start, end, score }
+  }
+
+  describe('__testing.normalizeLatinToken', () => {
+    it('小文字化し、前後の句読点を除去する（末尾カンマ）', () => {
+      expect(__testing.normalizeLatinToken('Today,')).toBe('today')
+    })
+
+    it('語中のアポストロフィは保持される（I\'m）', () => {
+      expect(__testing.normalizeLatinToken("I'm")).toBe("i'm")
+    })
+
+    it('語中のハイフンは保持される（co-founder）', () => {
+      expect(__testing.normalizeLatinToken('co-founder')).toBe('co-founder')
+    })
+
+    it('記号のみのトークンは空文字になる', () => {
+      expect(__testing.normalizeLatinToken('...')).toBe('')
+    })
+  })
+
+  describe('__testing.tokenizeCueText', () => {
+    it('script=latin: 空白で分割してから正規化し、空になった語は捨てる', () => {
+      expect(__testing.tokenizeCueText('Today, I am — excited!', 'latin')).toEqual([
+        'today',
+        'i',
+        'am',
+        'excited',
+      ])
+    })
+
+    it('script=japanese: 既存どおり1文字ずつ（句読点・空白は除去）', () => {
+      expect(__testing.tokenizeCueText('これは、テストです。', 'japanese')).toEqual(Array.from('これはテストです'))
+    })
+
+    it('script=generic: japaneseと同じ1文字ずつの扱い', () => {
+      expect(__testing.tokenizeCueText('これは、テストです。', 'generic')).toEqual(Array.from('これはテストです'))
+    })
+  })
+
+  describe('buildAsrCharStream: 単語トークンを分解しない', () => {
+    it('WhisperXの単語をそのまま1エントリとして採用し、実測のstart/endを使う', () => {
+      const segments: TranscriptSegment[] = [
+        {
+          id: 1,
+          start: 0,
+          end: 2,
+          text: "Today, I'm excited",
+          words: [
+            { word: 'Today,', start: 0, end: 0.4, score: 0.9 },
+            { word: "I'm", start: 0.4, end: 0.6, score: 0.9 },
+            { word: 'excited', start: 0.6, end: 1.2, score: 0.9 },
+          ],
+        },
+      ]
+      const chars = buildAsrCharStream(segments, { script: 'latin' })
+      // 分解されず、単語数と同じ3エントリのまま（日本語なら文字数ぶんに分解される）。
+      expect(chars).toHaveLength(3)
+      expect(chars[0]).toEqual({ char: 'Today,', start: 0, end: 0.4, score: 0.9 })
+      expect(chars[1]).toEqual({ char: "I'm", start: 0.4, end: 0.6, score: 0.9 })
+      expect(chars[2]).toEqual({ char: 'excited', start: 0.6, end: 1.2, score: 0.9 })
+    })
+
+    it('比較キーが空になるトークン（記号のみ）は捨てる', () => {
+      const segments: TranscriptSegment[] = [
+        { id: 1, start: 0, end: 1, text: '...', words: [{ word: '...', start: 0, end: 1 }] },
+      ]
+      expect(buildAsrCharStream(segments, { script: 'latin' })).toEqual([])
+    })
+
+    it('単語durationのCAP（maxWordDurationSec）はラテン文字でも適用される', () => {
+      const segments: TranscriptSegment[] = [
+        { id: 1, start: 10, end: 18, text: 'today', words: [{ word: 'today', start: 10, end: 18 }] },
+      ]
+      const chars = buildAsrCharStream(segments, { script: 'latin' })
+      expect(chars).toHaveLength(1)
+      expect(chars[0].start).toBeCloseTo(10, 5)
+      expect(chars[0].end).toBeCloseTo(10.6, 5)
+    })
+  })
+
+  describe('alignCuesToAsr: 大文字小文字・末尾句読点の差を吸収して一致する', () => {
+    it('"Today," と "today" が一致し、confidence が exact になる', () => {
+      const asr: AsrChar[] = [
+        makeWordChar('Today', 0, 1),
+        makeWordChar('I', 1, 2),
+        makeWordChar('am', 2, 3),
+        makeWordChar('excited', 3, 4),
+      ]
+      const spans = alignCuesToAsr(['today, I am excited.'], asr, { script: 'latin' })
+      expect(spans).toHaveLength(1)
+      expect(spans[0].confidence).toBe('exact')
+      expect(spans[0].startSec).toBeCloseTo(0, 5)
+      expect(spans[0].endSec).toBeCloseTo(4, 5)
+    })
+
+    it('語中のアポストロフィ・ハイフンを保持したまま一致する（I\'m / co-founder）', () => {
+      // MIN_MATCHED_CHARS_FLOOR(4トークン)を満たすため、4トークン以上のキューで検証する。
+      const asr: AsrChar[] = [
+        makeWordChar("I'm", 0, 1),
+        makeWordChar('a', 1, 2),
+        makeWordChar('co-founder', 2, 3),
+        makeWordChar('here', 3, 4),
+      ]
+      const spans = alignCuesToAsr(["I'm a co-founder here"], asr, { script: 'latin' })
+      expect(spans).toHaveLength(1)
+      expect(spans[0].confidence).toBe('exact')
+      expect(spans[0].startSec).toBeCloseTo(0, 5)
+      expect(spans[0].endSec).toBeCloseTo(4, 5)
+    })
+
+    it('空白分割が単語境界を保つため、短い単語（am）が正しい位置にマッチする', () => {
+      // 旧実装の欠陥: normalizeTimingTextが空白も除去するため、
+      // "Today I am sitting down" が "TodayIamsittingdown" に連結され、
+      // "am" のような短い断片が遠方へ誤マッチしやすくなっていた。
+      const asr: AsrChar[] = [
+        makeWordChar('Today', 0, 1),
+        makeWordChar('I', 1, 2),
+        makeWordChar('am', 2, 3),
+        makeWordChar('sitting', 3, 4),
+        makeWordChar('down', 4, 5),
+      ]
+      const spans = alignCuesToAsr(['Today I am sitting down'], asr, { script: 'latin' })
+      expect(spans).toHaveLength(1)
+      expect(spans[0].confidence).toBe('exact')
+      expect(spans[0].startSec).toBeCloseTo(0, 5)
+      expect(spans[0].endSec).toBeCloseTo(5, 5)
+    })
+  })
+
+  describe('日本語（既定）の非退行: script省略時はscript:"japanese"指定時と同じ結果', () => {
+    it('buildAsrCharStream', () => {
+      const segments: TranscriptSegment[] = [
+        {
+          id: 1,
+          start: 0,
+          end: 2,
+          text: 'ABCD',
+          words: [{ word: 'AB', start: 0, end: 1 }, { word: 'CD', start: 1, end: 2 }],
+        },
+      ]
+      expect(buildAsrCharStream(segments)).toEqual(buildAsrCharStream(segments, { script: 'japanese' }))
+    })
+
+    it('alignCuesToAsr', () => {
+      const asr: AsrChar[] = Array.from('これはテストです').map((char, i) => makeChar(char, i, i + 1))
+      expect(alignCuesToAsr(['これはテストです'], asr)).toEqual(
+        alignCuesToAsr(['これはテストです'], asr, { script: 'japanese' }),
+      )
+    })
+  })
+})
+
+describe('窓幅の秒基準換算（DEFAULT_WINDOW_SEC / DEFAULT_WINDOW_MARGIN_SEC）', () => {
+  it('密度1トークン/秒のASRストリームでは、DEFAULT_WINDOW_SEC(800)がそのままwindowCharsになる', () => {
+    const asr: AsrChar[] = Array.from({ length: 100 }, (_, i) => makeChar('x', i, i + 1))
+    const resolved = __testing.resolveOptions(undefined, asr)
+    expect(resolved.windowChars).toBe(800)
+    expect(resolved.windowMarginChars).toBe(160)
+  })
+
+  it('密度10トークン/秒のASRストリームでは、windowChars/windowMarginCharsが10倍になる', () => {
+    const asr: AsrChar[] = Array.from({ length: 100 }, (_, i) => makeChar('x', i * 0.1, i * 0.1 + 0.1))
+    const resolved = __testing.resolveOptions(undefined, asr)
+    expect(resolved.windowChars).toBe(8000)
+    expect(resolved.windowMarginChars).toBe(1600)
+  })
+
+  it('windowChars/windowMarginCharsを明示指定した場合は密度換算より優先される', () => {
+    const asr: AsrChar[] = Array.from({ length: 100 }, (_, i) => makeChar('x', i * 0.1, i * 0.1 + 0.1))
+    const resolved = __testing.resolveOptions({ windowChars: 50, windowMarginChars: 20 }, asr)
+    expect(resolved.windowChars).toBe(50)
+    expect(resolved.windowMarginChars).toBe(20)
+  })
+
+  it('空配列や密度0除算（span<=0）ではフォールバック値（旧来の固定値4000/800）を使う', () => {
+    expect(__testing.resolveOptions(undefined, [])).toMatchObject({ windowChars: 4000, windowMarginChars: 800 })
+    const zeroSpanAsr: AsrChar[] = [makeChar('x', 5, 5)]
+    expect(__testing.resolveOptions(undefined, zeroSpanAsr)).toMatchObject({ windowChars: 4000, windowMarginChars: 800 })
+  })
+
+  it('黒箱テスト: windowCharsを明示指定した場合、実際のalignCuesToAsrの窓処理でも優先される', () => {
+    // 密度換算(1文字/秒)ではwindowChars=800相当になるはずだが、明示指定50を優先させても
+    // 複数窓に跨る既存の「窓処理」テスト（別describe参照）と同じ結果になることを確認する。
+    const filler = 'ん'.repeat(60)
+    const target = '目印テキスト'
+    const text = filler + target + filler
+    const asr: AsrChar[] = Array.from(text).map((char, i) => makeChar(char, i, i + 1))
+    const spans = alignCuesToAsr([target], asr, { windowChars: 50, windowMarginChars: 20 })
+    expect(spans[0].startSec).toBeCloseTo(60, 5)
+    expect(spans[0].endSec).toBeCloseTo(66, 5)
+  })
+})
