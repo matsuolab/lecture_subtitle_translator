@@ -24,6 +24,12 @@ export interface JaBlock {
   jaText: string
   jaChars: number
   alignConf: AlignConf
+  /**
+   * `alignCuesToAsr` が求めたキュー文字マッチ率（0-1）。診断・レビュー用の任意フィールドで、
+   * 下流の分類ロジック（metrics.ts 等）はこれを参照しない。「アンカーは取れたが言い換えが
+   * 強い」ブロックを後から識別できるようにするための情報。
+   */
+  alignMatchRate?: number
   words?: WordTimestamp[]
   merged?: boolean
   /**

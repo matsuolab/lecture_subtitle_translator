@@ -13,9 +13,12 @@ import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languag
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta } from './llmCallWithMeta'
+import { alignCuesToAsr, buildAsrCharStream, type AlignedSpan, type AsrChar } from './asrAlignment'
 
 const MAX_SEGMENTS_PER_REQUEST = 4
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 2
+// オーバーロング分割の再アライン回数上限。旧実装(alignUnits)のループ回数を踏襲。
+const MAX_OVERLONG_SPLIT_LOOPS = 8
 
 interface RawSemanticUnit {
   unitId: string
@@ -28,8 +31,9 @@ interface AlignedUnit {
   unit: RawSemanticUnit
   start: number
   end: number
-  alignConf: 'exact' | 'proportional' | 'no_words'
+  alignConf: 'exact' | 'no_words'
   words: WordTimestamp[]
+  matchRate: number
 }
 
 function round(value: number): number {
@@ -37,7 +41,10 @@ function round(value: number): number {
 }
 
 function normalizeTimingText(text: string): string {
-  return normalizeSpaces(text).replace(/[。、「」『』（）()［］\[\]！？!?・,，、.\s]/g, '')
+  // asrAlignment.ts の normalizeTimingText と同じ規則（正規化のズレを防ぐため意図的に同期）。
+  // `\[` は文字クラス内では不要なエスケープで ESLint(no-useless-escape) に引っかかるため、
+  // 挙動を変えずに `[` へ修正。
+  return normalizeSpaces(text).replace(/[。、「」『』（）()［］[\]！？!?・,，、.\s]/g, '')
 }
 
 function lcsLength(a: string, b: string): number {
@@ -53,45 +60,6 @@ function lcsLength(a: string, b: string): number {
     previous = current
   }
   return previous[b.length]
-}
-
-function findBoundaryWordIndex(
-  wordNormTexts: string[],
-  wordConcat: string,
-  pieceNormText: string,
-  searchAfterWordIdx: number,
-): number | null {
-  const prefix = pieceNormText.substring(0, Math.min(6, pieceNormText.length))
-  if (!prefix) return null
-  let afterCharPos = 0
-  for (let i = 0; i < Math.min(searchAfterWordIdx, wordNormTexts.length); i += 1) {
-    afterCharPos += wordNormTexts[i].length
-  }
-  const matchCharPos = wordConcat.indexOf(prefix, afterCharPos)
-  if (matchCharPos === -1) return null
-  let cum = 0
-  for (let i = 0; i < wordNormTexts.length; i += 1) {
-    if (cum + wordNormTexts[i].length > matchCharPos) return i
-    cum += wordNormTexts[i].length
-  }
-  return null
-}
-
-function charProportionalWordIndex(
-  wordNormChars: number[],
-  totalWordChars: number,
-  pieceCharCounts: number[],
-  pieceIndex: number,
-  totalPieceChars: number,
-): number {
-  const charsBefore = pieceCharCounts.slice(0, pieceIndex).reduce((sum, count) => sum + Math.max(1, count), 0)
-  const targetChars = (charsBefore / Math.max(1, totalPieceChars)) * totalWordChars
-  let cum = 0
-  for (let index = 0; index < wordNormChars.length; index += 1) {
-    if (cum > targetChars) return index
-    cum += wordNormChars[index]
-  }
-  return wordNormChars.length
 }
 
 function noBreakRanges(text: string, glossaryTerms: string[]): Array<{ start: number; end: number }> {
@@ -171,87 +139,252 @@ function splitOverlongUnit(unit: RawSemanticUnit, duration: number, maxDuration:
   }))
 }
 
-function alignUnitsOnce(segment: CorrectedSegmentLite, units: RawSemanticUnit[]): AlignedUnit[] {
-  const words = (segment.words ?? [])
-    .filter(word => Number.isFinite(word.start) && Number.isFinite(word.end))
-    .sort((a, b) => a.start - b.start || a.end - b.end)
-  const segmentDuration = Math.max(0.001, segment.end - segment.start)
-  const pieceCharCounts = units.map(unit => normalizeTimingText(unit.jaText).length)
-  const totalPieceChars = pieceCharCounts.reduce((sum, count) => sum + Math.max(1, count), 0)
+/**
+ * `AlignedSpan.confidence` → `AlignConf`（'exact' | 'no_words'）の写像。
+ *
+ * 'exact' と 'partial' はいずれも実単語タイムスタンプにアンカーされている
+ * （実測: seg6/seg7フィクスチャ含む検証データで partial 17件中 Δstart が
+ * 許容誤差を超えた逸脱は0件）。'partial' を独立扱いにして 'proportional' 相当へ
+ * 落とすと、17/38 が誤って `metrics.ts` の proportional_ts 違反として扱われ、
+ * 両ブロックとも 'exact' を要求する `finalSafeMerge.ts` の結合条件も不必要に
+ * 阻害される。一方 'interpolated' のみが実測値を持たない真の推定（前後の
+ * 確定キューから按分した時刻）であるため、既存の proportional_ts 判定に
+ * そのまま乗るよう 'no_words' に写像する。
+ */
+function mapAlignConf(confidence: AlignedSpan['confidence']): 'exact' | 'no_words' {
+  return confidence === 'interpolated' ? 'no_words' : 'exact'
+}
 
-  if (words.length === 0) {
+/**
+ * `AlignedSpan` のマッチ済みASR文字範囲（`firstCharIndex`〜`lastCharIndex`）を
+ * `WordTimestamp[]` へ復元する。日本語ASRは1文字=1wordとして扱われるため、
+ * ASR文字をそのまま word として詰め直せばよい。マッチ無し（interpolated）は空配列。
+ */
+function spanToWords(span: AlignedSpan, asrStream: readonly AsrChar[]): WordTimestamp[] {
+  if (span.firstCharIndex === null || span.lastCharIndex === null) return []
+  return asrStream.slice(span.firstCharIndex, span.lastCharIndex + 1).map(asrChar => ({
+    word: asrChar.char,
+    start: asrChar.start,
+    end: asrChar.end,
+    score: asrChar.score,
+  }))
+}
+
+function toAlignedUnit(unit: RawSemanticUnit, span: AlignedSpan, asrStream: readonly AsrChar[]): AlignedUnit {
+  return {
+    unit,
+    start: round(span.startSec),
+    end: round(Math.max(span.startSec + 0.05, span.endSec)),
+    alignConf: mapAlignConf(span.confidence),
+    words: spanToWords(span, asrStream),
+    matchRate: span.matchRate,
+  }
+}
+
+/**
+ * 分割断片の時刻を親スパイン（分割前のユニットが占めていたASR範囲）の中に
+ * 文字数比で按分する。親スパン自体が `interpolated`（`firstCharIndex`/`lastCharIndex`
+ * が null、つまりASR実測にアンカーできていない）の場合はスライスする対象が無いため、
+ * 全ストリームへの再アラインではなく、この按分にフォールバックする。
+ */
+function proportionalSpansForFragments(fragments: readonly RawSemanticUnit[], parentSpan: AlignedSpan): AlignedSpan[] {
+  const charCounts = fragments.map(fragment => Math.max(1, normalizeTimingText(fragment.jaText).length))
+  const totalChars = charCounts.reduce((sum, count) => sum + count, 0)
+  const span = Math.max(0, parentSpan.endSec - parentSpan.startSec)
+  let cursor = parentSpan.startSec
+  return fragments.map((_, index) => {
+    const isLast = index === fragments.length - 1
+    const start = cursor
+    const end = isLast ? parentSpan.endSec : Math.min(parentSpan.endSec, cursor + span * (charCounts[index] / totalChars))
+    cursor = end
+    return {
+      startSec: start,
+      endSec: Math.max(start, end),
+      matchedChars: 0,
+      totalChars: charCounts[index],
+      matchRate: 0,
+      confidence: 'interpolated',
+      firstCharIndex: null,
+      lastCharIndex: null,
+    }
+  })
+}
+
+/**
+ * 分割断片の時刻を、親スパンの時刻範囲 `[parentSpan.startSec, parentSpan.endSec]` の
+ * 内側にクランプする。スライスされたASR範囲に対してアラインしている限り理論上は
+ * 範囲外に出ないが、`interpolateSpans` のフォールバック境界計算等の余地を考慮し
+ * 念のため明示的に閉じ込める。
+ */
+function clampSpanToParent(span: AlignedSpan, parentSpan: AlignedSpan): AlignedSpan {
+  const startSec = Math.min(Math.max(span.startSec, parentSpan.startSec), parentSpan.endSec)
+  const endSec = Math.min(Math.max(span.endSec, parentSpan.startSec), parentSpan.endSec)
+  return { ...span, startSec, endSec: Math.max(startSec, endSec) }
+}
+
+/**
+ * 分割断片を、親ユニットが占めていたASR文字範囲（`parentSpan.firstCharIndex`〜
+ * `lastCharIndex`）のスライスに対してのみアラインする。`alignCuesToAsr` が返す
+ * `firstCharIndex`/`lastCharIndex` はスライス相対のインデックスなので、スライス
+ * 開始位置のオフセットを加算して `asrStream` 全体のインデックスに戻す
+ * （`startSec`/`endSec` はASR文字が保持する絶対時刻のためオフセット不要）。
+ */
+function alignFragmentsWithinParentSlice(
+  fragments: readonly RawSemanticUnit[],
+  parentSpan: AlignedSpan,
+  asrStream: readonly AsrChar[],
+): AlignedSpan[] {
+  const sliceStart = parentSpan.firstCharIndex as number
+  const sliceEnd = parentSpan.lastCharIndex as number
+  const slice = asrStream.slice(sliceStart, sliceEnd + 1)
+  const spans = alignCuesToAsr(fragments.map(fragment => fragment.jaText), slice)
+  return spans.map(span => clampSpanToParent(
+    {
+      ...span,
+      firstCharIndex: span.firstCharIndex === null ? null : span.firstCharIndex + sliceStart,
+      lastCharIndex: span.lastCharIndex === null ? null : span.lastCharIndex + sliceStart,
+    },
+    parentSpan,
+  ))
+}
+
+/**
+ * 分割断片を親スパンの範囲内にのみアラインする（ASRストリーム全体への再アラインはしない）。
+ * 親が実測アンカー（`firstCharIndex`/`lastCharIndex`）を持つ場合はそのスライスに対して
+ * `alignCuesToAsr` を行い、持たない場合（親自体が interpolated）は文字数比按分にフォールバックする。
+ */
+function alignFragmentsWithinParent(
+  fragments: readonly RawSemanticUnit[],
+  parentSpan: AlignedSpan,
+  asrStream: readonly AsrChar[],
+): AlignedSpan[] {
+  if (parentSpan.firstCharIndex === null || parentSpan.lastCharIndex === null) {
+    return proportionalSpansForFragments(fragments, parentSpan)
+  }
+  return alignFragmentsWithinParentSlice(fragments, parentSpan, asrStream)
+}
+
+interface OverlongScanEntry {
+  unit: RawSemanticUnit
+  span: AlignedSpan
+  /** 分割済み、または分割不能で確定した断片。以降のオーバーロング走査から除外する。*/
+  accepted: boolean
+}
+
+/**
+ * 全ユニットのテキストを ASR 文字ストリーム全体に一括で大域アライメントする。
+ * セグメント境界に縛られないため、補正LLMがセグメントを跨いで文を再構成しても
+ * 各ユニットの時刻を正しく求められる（詳細は asrAlignment.ts 参照）。
+ *
+ * アライン結果が `mergedLongDurationSec` を超えるユニットは `splitOverlongUnit` で
+ * 安全な位置から分割する。分割は「長すぎるキューを短くする」ための処理であり、
+ * 分割後の断片が分割前の親スパンより長くなってはならない。かつて（修正前）は
+ * 分割のたびにユニット列全体を ASR ストリーム全体へ再アラインしていたが、これは
+ * 分割断片が補正LLMの言い換えが強い遠方の領域と誤対応する余地を生み、実測で
+ * `mergedLongDurationSec: 7.0` に対し 11.924 秒のブロックが発生していた
+ * （分割前の親スパンより長くなる = 分割の目的に反する不具合）。
+ * そのため断片は必ず親ユニットが占めていたASR範囲（`alignFragmentsWithinParent`）に
+ * 閉じ込め、確定済みの断片スパンは以降のループで上書きしない
+ * （`OverlongScanEntry.accepted` で管理し、残りの超過ユニットのみ走査を続ける）。
+ * 最大8回のループで打ち切る（旧実装 `alignUnits` のループ回数を踏襲）。
+ */
+function alignUnitsGlobally(
+  units: RawSemanticUnit[],
+  asrStream: readonly AsrChar[],
+  thresholds: PipelineThresholds,
+  glossaryTerms: string[],
+): AlignedUnit[] {
+  const initialSpans = alignCuesToAsr(units.map(unit => unit.jaText), asrStream)
+  let entries: OverlongScanEntry[] = units.map((unit, index) => ({
+    unit,
+    span: initialSpans[index],
+    accepted: false,
+  }))
+
+  for (let loop = 0; loop < MAX_OVERLONG_SPLIT_LOOPS; loop += 1) {
+    const overlongIndex = entries.findIndex(
+      entry => !entry.accepted && entry.span.endSec - entry.span.startSec > thresholds.mergedLongDurationSec,
+    )
+    if (overlongIndex < 0) break
+    const entry = entries[overlongIndex]
+    const duration = entry.span.endSec - entry.span.startSec
+    const fragments = splitOverlongUnit(entry.unit, duration, thresholds.mergedLongDurationSec, glossaryTerms)
+    if (fragments.length <= 1) {
+      // これ以上分割できない（短すぎる等）。超過を受け入れて確定し、他の超過ユニットの
+      // 走査を続ける（旧実装は先頭の分割不能ユニットでループ全体を打ち切っていた）。
+      entries = [...entries.slice(0, overlongIndex), { ...entry, accepted: true }, ...entries.slice(overlongIndex + 1)]
+      continue
+    }
+    const fragmentSpans = alignFragmentsWithinParent(fragments, entry.span, asrStream)
+    const fragmentEntries = fragments.map((fragment, index) => ({
+      unit: fragment,
+      span: fragmentSpans[index],
+      accepted: false,
+    }))
+    entries = [...entries.slice(0, overlongIndex), ...fragmentEntries, ...entries.slice(overlongIndex + 1)]
+  }
+
+  return entries.map(entry => toAlignedUnit(entry.unit, entry.span, asrStream))
+}
+
+/**
+ * ASR文字ストリームが完全に空（`words` が全セグメントで欠損。WhisperXアライメント総崩れ
+ * or 非WhisperX入力）の場合の最小限フォールバック。セグメントごとに文字数比例配分し、
+ * 全ユニットを正直に `alignConf: 'no_words'` とする（旧 `alignUnitsOnce` の
+ * `words.length === 0` 分岐を踏襲）。
+ */
+function alignUnitsProportionalFallback(
+  units: RawSemanticUnit[],
+  segments: readonly CorrectedSegmentLite[],
+  thresholds: PipelineThresholds,
+  glossaryTerms: string[],
+): AlignedUnit[] {
+  const unitsBySegment = new Map<number, RawSemanticUnit[]>()
+  for (const unit of units) {
+    const list = unitsBySegment.get(unit.sourceSegmentId) ?? []
+    list.push(unit)
+    unitsBySegment.set(unit.sourceSegmentId, list)
+  }
+
+  const result: AlignedUnit[] = []
+  for (const segment of segments) {
+    let segmentUnits = unitsBySegment.get(segment.id) ?? []
+    if (segmentUnits.length === 0) continue
+
+    // 文字数比例配分の見積もりが長すぎるユニットは、安全な位置から分割してやり直す。
+    for (let loop = 0; loop < MAX_OVERLONG_SPLIT_LOOPS; loop += 1) {
+      const segmentDuration = Math.max(0.001, segment.end - segment.start)
+      const charCounts = segmentUnits.map(unit => Math.max(1, normalizeTimingText(unit.jaText).length))
+      const totalChars = charCounts.reduce((sum, count) => sum + count, 0)
+      const overlongIndex = charCounts.findIndex(count => segmentDuration * (count / totalChars) > thresholds.mergedLongDurationSec)
+      if (overlongIndex < 0) break
+      const estimatedDuration = segmentDuration * (charCounts[overlongIndex] / totalChars)
+      const split = splitOverlongUnit(segmentUnits[overlongIndex], estimatedDuration, thresholds.mergedLongDurationSec, glossaryTerms)
+      if (split.length <= 1) break
+      segmentUnits = [...segmentUnits.slice(0, overlongIndex), ...split, ...segmentUnits.slice(overlongIndex + 1)]
+    }
+
+    const segmentDuration = Math.max(0.001, segment.end - segment.start)
+    const charCounts = segmentUnits.map(unit => Math.max(1, normalizeTimingText(unit.jaText).length))
+    const totalChars = charCounts.reduce((sum, count) => sum + count, 0)
     let cursor = segment.start
-    return units.map((unit, index) => {
-      const isLast = index === units.length - 1
+    segmentUnits.forEach((unit, index) => {
+      const isLast = index === segmentUnits.length - 1
       const end = isLast
         ? segment.end
-        : Math.min(segment.end, cursor + segmentDuration * (Math.max(1, pieceCharCounts[index]) / Math.max(1, totalPieceChars)))
-      const aligned: AlignedUnit = {
+        : Math.min(segment.end, cursor + segmentDuration * (charCounts[index] / totalChars))
+      result.push({
         unit,
         start: round(cursor),
         end: round(Math.max(cursor + 0.05, end)),
         alignConf: 'no_words',
         words: [],
-      }
+        matchRate: 0,
+      })
       cursor = end
-      return aligned
     })
   }
-
-  const wordNormTexts = words.map(word => normalizeTimingText(String(word.word ?? '')))
-  const wordConcat = wordNormTexts.join('')
-  const wordNormChars = wordNormTexts.map(text => Math.max(1, text.length))
-  const totalWordChars = wordNormChars.reduce((sum, count) => sum + count, 0)
-  const startWordIndexes: number[] = new Array(units.length).fill(0)
-  const exactBoundary: boolean[] = new Array(units.length).fill(true)
-
-  for (let index = 1; index < units.length; index += 1) {
-    const previous = startWordIndexes[index - 1]
-    const matched = findBoundaryWordIndex(wordNormTexts, wordConcat, normalizeTimingText(units[index].jaText), previous)
-    if (matched !== null && matched > previous) {
-      startWordIndexes[index] = matched
-      continue
-    }
-    const fallback = charProportionalWordIndex(wordNormChars, totalWordChars, pieceCharCounts, index, totalPieceChars)
-    startWordIndexes[index] = Math.min(Math.max(previous + 1, fallback), words.length - 1)
-    exactBoundary[index] = false
-  }
-
-  return units.map((unit, index) => {
-    const wordStart = startWordIndexes[index]
-    const wordEnd = index < units.length - 1 ? startWordIndexes[index + 1] : words.length
-    const slicedWords = words.slice(wordStart, wordEnd)
-    const charsBefore = pieceCharCounts.slice(0, index).reduce((sum, count) => sum + Math.max(1, count), 0)
-    const charsUpTo = pieceCharCounts.slice(0, index + 1).reduce((sum, count) => sum + Math.max(1, count), 0)
-    const propStart = index === 0 ? segment.start : segment.start + segmentDuration * (charsBefore / Math.max(1, totalPieceChars))
-    const propEnd = index === units.length - 1 ? segment.end : segment.start + segmentDuration * (charsUpTo / Math.max(1, totalPieceChars))
-    const hasWordTime = slicedWords.length > 0 && Number.isFinite(slicedWords[0].start) && Number.isFinite(slicedWords[slicedWords.length - 1].end)
-    const start = hasWordTime ? slicedWords[0].start : propStart
-    const end = hasWordTime ? slicedWords[slicedWords.length - 1].end : propEnd
-    const endExact = index === units.length - 1 || exactBoundary[index + 1]
-    return {
-      unit,
-      start: round(start),
-      end: round(Math.max(start + 0.05, end)),
-      alignConf: hasWordTime && exactBoundary[index] && endExact ? 'exact' : 'proportional',
-      words: slicedWords,
-    }
-  })
-}
-
-function alignUnits(segment: CorrectedSegmentLite, rawUnits: RawSemanticUnit[], thresholds: PipelineThresholds, glossaryTerms: string[]): AlignedUnit[] {
-  let units = rawUnits
-  let aligned = alignUnitsOnce(segment, units)
-  for (let loop = 0; loop < 8; loop += 1) {
-    const overlongIndex = aligned.findIndex(unit => unit.end - unit.start > thresholds.mergedLongDurationSec)
-    if (overlongIndex < 0) break
-    const overlong = aligned[overlongIndex]
-    const split = splitOverlongUnit(overlong.unit, overlong.end - overlong.start, thresholds.mergedLongDurationSec, glossaryTerms)
-    if (split.length <= 1) break
-    units = [...units.slice(0, overlongIndex), ...split, ...units.slice(overlongIndex + 1)]
-    aligned = alignUnitsOnce(segment, units)
-  }
-  return aligned
+  return result
 }
 
 function parseUnits(payload: Record<string, unknown>): RawSemanticUnit[] {
@@ -433,8 +566,9 @@ export async function semanticSplitJa(
     unitsBySegment.set(unit.sourceSegmentId, list)
   }
 
-  const blocks: JaBlock[] = []
-  let nextId = 1
+  // セグメント順にユニットを収集し、フォールバック込みで全セグメント分をフラットな
+  // 時系列順リストにする。アライメントはこのあとセグメント境界を無視して一括で行う。
+  const orderedUnits: RawSemanticUnit[] = []
   for (const segment of segments) {
     let segmentUnits = unitsBySegment.get(segment.id) ?? []
     // LLM 失敗 or カバレッジ不足 → 原文をそのまま 1 ユニットとして fallback
@@ -448,20 +582,35 @@ export async function semanticSplitJa(
         canMergeWithNext: false,
       }]
     }
-    for (const aligned of alignUnits(segment, segmentUnits, thresholds, glossaryTerms)) {
-      const jaText = normalizeSpaces(aligned.unit.jaText)
-      if (!jaText) continue
-      blocks.push({
-        id: nextId,
-        start: aligned.start,
-        end: aligned.end,
-        jaText,
-        jaChars: jaText.replace(/\s/g, '').length,
-        alignConf: aligned.alignConf,
-        words: aligned.words,
-      })
-      nextId += 1
-    }
+    orderedUnits.push(...segmentUnits)
+  }
+
+  const asrStream = buildAsrCharStream(segments)
+  const aligned = asrStream.length === 0
+    ? alignUnitsProportionalFallback(orderedUnits, segments, thresholds, glossaryTerms)
+    : alignUnitsGlobally(orderedUnits, asrStream, thresholds, glossaryTerms)
+
+  return buildJaBlocks(aligned)
+}
+
+/** アライン済みユニット列から JaBlock 配列を組み立てる（id採番・空テキストスキップ）。*/
+function buildJaBlocks(aligned: readonly AlignedUnit[]): JaBlock[] {
+  const blocks: JaBlock[] = []
+  let nextId = 1
+  for (const item of aligned) {
+    const jaText = normalizeSpaces(item.unit.jaText)
+    if (!jaText) continue
+    blocks.push({
+      id: nextId,
+      start: item.start,
+      end: item.end,
+      jaText,
+      jaChars: jaText.replace(/\s/g, '').length,
+      alignConf: item.alignConf,
+      words: item.words,
+      alignMatchRate: item.matchRate,
+    })
+    nextId += 1
   }
   return blocks
 }
@@ -469,4 +618,7 @@ export async function semanticSplitJa(
 export const __testing = {
   buildSemanticSplitPrompt,
   filterUnitsToBatch,
+  alignUnitsGlobally,
+  alignUnitsProportionalFallback,
+  buildJaBlocks,
 }
