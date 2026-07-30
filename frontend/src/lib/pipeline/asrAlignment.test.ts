@@ -347,6 +347,158 @@ describe('__testing.trimEnvelopeByScore', () => {
   })
 })
 
+describe('外れ値ガード（buildProvisionalSpans: 逆行除去・かたまり分割・包絡伸長）', () => {
+  it('1. キュー末尾の数文字が遠方の同じ文字列にマッチしても、包絡は主かたまりだけで決まり膨張しない', () => {
+    // 実データで観測された「55文字のうち53文字が正しく連続し、2文字だけが150秒以上
+    // 手前へ飛んでいた」ケースを模す。cue1文字(55文字)のうち先頭53文字はASR上の
+    // asrIndex 100-152 に正しく連続対応し、末尾2文字(cueCharIndex 53,54)だけが
+    // 遠方の asrIndex 10,11（同じ短いフレーズの別出現）に誤対応している。
+    const asr: AsrChar[] = Array.from({ length: 200 }, (_, i) => makeChar('x', i, i + 1))
+    const globalMatches = new Map<number, number>()
+    for (let k = 0; k < 53; k += 1) globalMatches.set(k, 100 + k)
+    globalMatches.set(53, 10)
+    globalMatches.set(54, 11)
+    const cueBounds = [{ start: 0, end: 55 }]
+
+    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    // 主かたまり(53文字, asrIndex100-152)だけが採用され、遠方の2文字は捨てられる。
+    expect(info.matchedChars).toBe(53)
+    expect(info.firstCharIndex).toBe(100)
+    // 末尾2文字は未対応文字として扱われ伸長対象になるが、遠方(10,11)へ引っ張られない。
+    expect(info.lastCharIndex).toBeGreaterThanOrEqual(152)
+    expect(info.lastCharIndex).toBeLessThan(160)
+    expect(info.startSec).toBeCloseTo(100, 5)
+    expect(info.endSec).toBeLessThan(160)
+  })
+
+  it('2a. 逆行するマッチが混じっても最長非減少部分列が正しく選ばれる（先頭が外れ値のケース）', () => {
+    // 貪欲法（直前より小さい値を捨てる）だと先頭の外れ値(asrIndex=500)のせいで
+    // 後続の正しい対応(10,11,12,13)を全部「直前より小さい」として捨ててしまう。
+    const pairs = [
+      { cueCharIndex: 0, asrIndex: 500 },
+      { cueCharIndex: 1, asrIndex: 10 },
+      { cueCharIndex: 2, asrIndex: 11 },
+      { cueCharIndex: 3, asrIndex: 12 },
+      { cueCharIndex: 4, asrIndex: 13 },
+    ]
+    const result = __testing.longestNonDecreasingSubsequence(pairs)
+    expect(result).toEqual(pairs.slice(1))
+  })
+
+  it('2b. 逆行するマッチが混じっても最長非減少部分列が正しく選ばれる（中間が外れ値のケース）', () => {
+    const pairs = [
+      { cueCharIndex: 0, asrIndex: 10 },
+      { cueCharIndex: 1, asrIndex: 11 },
+      { cueCharIndex: 2, asrIndex: 5 }, // 逆行する外れ値
+      { cueCharIndex: 3, asrIndex: 12 },
+      { cueCharIndex: 4, asrIndex: 13 },
+    ]
+    const result = __testing.longestNonDecreasingSubsequence(pairs)
+    expect(result).toEqual([pairs[0], pairs[1], pairs[3], pairs[4]])
+  })
+
+  it('3a. excessが閾値以下の飛び（キュー側も同じだけ進む長い書き換え）ではかたまりが分割されない', () => {
+    // 前半10文字が連続対応、そこから cueCharIndex・asrIndex ともに200進んで
+    // 後半10文字が連続対応する（LLMが長い区間を書き換えたケースを模す）。
+    // 生の飛び(201)は大きいが、キュー側も同じだけ進むため excess は 0 で閾値以下。
+    const first = Array.from({ length: 10 }, (_, i) => ({ cueCharIndex: i, asrIndex: i }))
+    const rewritten = Array.from({ length: 10 }, (_, i) => ({ cueCharIndex: 210 + i, asrIndex: 210 + i }))
+    const pairs = [...first, ...rewritten]
+
+    const cluster = __testing.selectLargestCluster(pairs)
+    expect(cluster).toEqual(pairs)
+  })
+
+  it('3b. excessが閾値を超える飛び（誤マッチ相当）ではかたまりが分割される', () => {
+    // outlierはcueCharIndexが1しか進まないのにasrIndexが200進む（excess=199 > 30）。
+    const first = Array.from({ length: 10 }, (_, i) => ({ cueCharIndex: i, asrIndex: i }))
+    const outlier = [{ cueCharIndex: 10, asrIndex: 209 }]
+    const rest = Array.from({ length: 10 }, (_, i) => ({ cueCharIndex: 11 + i, asrIndex: 210 + i }))
+    const pairs = [...first, ...outlier, ...rest]
+
+    const cluster = __testing.selectLargestCluster(pairs)
+    // first(10件)とouter+rest(11件)に分割され、大きい方(11件)が採用される。
+    expect(cluster.length).toBe(11)
+    expect(cluster[0]).toEqual(outlier[0])
+  })
+
+  it('4. 採用かたまりが小さすぎる場合、既存の35%閾値により interpolated 相当（needsInterpolation）に落ちる', () => {
+    // cue全体は20文字。かたまりA(5文字, asrIndex50-54)とかたまりB(5文字, asrIndex500-504)に
+    // 分裂しており、生の一致数は10文字あるが、採用される最大のかたまりは5文字のみ。
+    // 35%閾値(20*0.35=7文字)にもフロア(4文字)にも満たないため needsInterpolation になる。
+    const asr: AsrChar[] = Array.from({ length: 600 }, (_, i) => makeChar('x', i, i + 1))
+    const globalMatches = new Map<number, number>()
+    for (let k = 0; k < 5; k += 1) globalMatches.set(k, 50 + k)
+    for (let k = 0; k < 5; k += 1) globalMatches.set(10 + k, 500 + k)
+    const cueBounds = [{ start: 0, end: 20 }]
+
+    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    expect(info.matchedChars).toBe(5)
+    expect(info.needsInterpolation).toBe(true)
+  })
+
+  it('5. キュー先頭・末尾の未対応文字ぶん包絡が伸びる。ただし隣キューの採用範囲には食い込まない', () => {
+    // cue0(chars0-9)は末尾3文字(7,8,9)が、cue1(chars10-19)は先頭2文字(10,11)が未対応。
+    const asr: AsrChar[] = Array.from({ length: 200 }, (_, i) => makeChar('x', i, i + 1))
+    const globalMatches = new Map<number, number>()
+    for (let k = 0; k <= 6; k += 1) globalMatches.set(k, 100 + k) // cue0: chars0-6 -> asrIndex100-106
+    for (let k = 12; k <= 19; k += 1) globalMatches.set(k, 110 + (k - 12)) // cue1: chars12-19 -> asrIndex110-117
+    const cueBounds = [{ start: 0, end: 10 }, { start: 10, end: 20 }]
+
+    const [span0, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    // cue0の末尾は元の採用範囲(106)より伸びるが、cue1の元の採用範囲(110以降)には届かない。
+    expect(span0.lastCharIndex).toBeGreaterThan(106)
+    expect(span0.lastCharIndex).toBeLessThan(110)
+    // cue1の先頭は元の採用範囲(110)より前に伸びるが、cue0の元の採用範囲(〜106)より前には行かない。
+    expect(span1.firstCharIndex).toBeGreaterThan(106)
+    expect(span1.firstCharIndex).toBeLessThan(110)
+  })
+
+  it('5b. 前後のキューが補間対象（採用範囲を持たない）場合は隣接制約を課さずに伸ばす', () => {
+    // cue0のみ。前後にキューが無い（配列の端）ケースで、伸長が asr.length-1 / 0 に
+    // 正しくクランプされることを確認する。
+    const asr: AsrChar[] = Array.from({ length: 20 }, (_, i) => makeChar('x', i, i + 1))
+    const globalMatches = new Map<number, number>()
+    for (let k = 2; k <= 8; k += 1) globalMatches.set(k, 2 + (k - 2)) // chars2-8 -> asrIndex2-8
+    const cueBounds = [{ start: 0, end: 10 }]
+
+    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    // 先頭2文字(0,1)ぶん手前へ、末尾1文字(9)ぶん後ろへ伸びる。
+    expect(info.firstCharIndex).toBe(0)
+    expect(info.lastCharIndex).toBe(9)
+  })
+})
+
+describe('重なり解消の非対称化（enforceMonotonicSpans）', () => {
+  it('6a. 重なり時、前のキューは不変で後ろのキューの開始が前のendSecに揃えられる', () => {
+    const spans = [
+      { startSec: 10, endSec: 50 },
+      { startSec: 40, endSec: 60 }, // 前のキューと重なる(40 < 50)
+    ]
+    const result = __testing.enforceMonotonicSpans(spans)
+
+    expect(result[0]).toEqual({ startSec: 10, endSec: 50 })
+    expect(result[1]).toEqual({ startSec: 50, endSec: 60 })
+  })
+
+  it('6b. 後ろのキューのendSecが前のendSecより小さい場合、endSecも前のendSecまで拡張される（長さ0を防ぐ）', () => {
+    // enforceMonotonicSpans導入前の中点分割だと、前のキューのendSecまで巻き込んで
+    // 破壊し、finalizeSpanのMath.max(startSec,endSec)で長さ0のキューを生んでいた。
+    const spans = [
+      { startSec: 10, endSec: 50 },
+      { startSec: 20, endSec: 30 }, // 完全に前のキューに包含される異常な重なり
+    ]
+    const result = __testing.enforceMonotonicSpans(spans)
+
+    expect(result[0]).toEqual({ startSec: 10, endSec: 50 }) // 前のキューは長さ0にならない
+    expect(result[1]).toEqual({ startSec: 50, endSec: 50 })
+  })
+})
+
 describe('3. セグメント跨ぎの融合（本命・実データフィクスチャ）', () => {
   const segments = loadSeg6Seg7Fixture()
   const asr = buildAsrCharStream(segments)

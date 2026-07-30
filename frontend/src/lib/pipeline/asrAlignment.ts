@@ -76,6 +76,16 @@ const EXACT_MATCH_RATE_THRESHOLD = 0.8
 const MIN_MATCHED_CHARS_FLOOR = 4
 const MIN_MATCHED_CHARS_RATIO = 0.35
 
+// 隣接する対応ペア間の excess（ASR側の飛び − キュー側の飛び）がこの値を超えたら
+// 「誤マッチによる遠方への飛び」とみなしてかたまりを分割する。
+// 根拠（実データ6本・21,196件の隣接対応ペアの実測分布）:
+//   - 正当な飛び（LLM補正で対応が付かなかったASR文字数）は excess>0 が129件のみで、
+//     中央値2文字、90%が18文字以下。
+//   - 誤マッチ（短い共通片が遠方の同じ表現へ飛ぶ）による excess は最小でも49文字
+//     （実測 49/50/67/71/116/117/133/135/452/455/540）。
+//   - 両者の間（18〜49）の中間である30を閾値に採る。
+const EXCESS_SPLIT_THRESHOLD = 30
+
 interface ResolvedOptions {
   windowChars: number
   windowMarginChars: number
@@ -100,11 +110,24 @@ interface ProvisionalSpanInfo {
   /** マッチしたASR文字インデックスのスコアトリム後の範囲（閉区間）。マッチ無しは null。*/
   firstCharIndex: number | null
   lastCharIndex: number | null
+  /**
+   * 採用したかたまりの先頭ペアより前にある、キュー自身の未対応文字数。
+   * 包絡の開始をASR側でこの文字数ぶん手前へ伸ばす際に使う（extendEnvelopes参照）。
+   */
+  leadingUnmatched: number
+  /** 採用したかたまりの末尾ペアより後にある、キュー自身の未対応文字数。終了側の伸長に使う。 */
+  trailingUnmatched: number
 }
 
 interface TimedSpan {
   startSec: number
   endSec: number
+}
+
+/** キュー文字インデックス→ASR文字インデックスの1対応ペア。cueCharIndex は cueConcat 上の絶対位置。 */
+interface CharPair {
+  cueCharIndex: number
+  asrIndex: number
 }
 
 function round(value: number): number {
@@ -308,43 +331,169 @@ function trimEnvelopeByScore(asr: readonly AsrChar[], minA: number, maxA: number
   return [left, right]
 }
 
+function collectCharPairs(start: number, end: number, globalMatches: ReadonlyMap<number, number>): CharPair[] {
+  const pairs: CharPair[] = []
+  for (let j = start; j < end; j += 1) {
+    const a = globalMatches.get(j)
+    if (a !== undefined) pairs.push({ cueCharIndex: j, asrIndex: a })
+  }
+  return pairs
+}
+
+/**
+ * asrIndex が非減少になる最長部分列を選ぶ（最長非減少部分列, O(n^2) DP）。
+ *
+ * ペア数は1キューあたり数十件程度なので O(n^2) の素直なDPで十分（実測: ASRインデックスが
+ * 逆行する対応が21,196件中95件存在する＝物理的にあり得ない巻き戻り）。
+ * 「直前より小さい値を捨てる」貪欲法は禁止: 先頭ペア自体が外れ値だと、以降の正しい
+ * 対応をすべて「直前より小さい」として捨ててしまう。
+ */
+function longestNonDecreasingSubsequence(pairs: readonly CharPair[]): CharPair[] {
+  const n = pairs.length
+  if (n === 0) return []
+  const dpLength = new Array<number>(n).fill(1)
+  const prevIndex = new Array<number>(n).fill(-1)
+  for (let i = 1; i < n; i += 1) {
+    for (let j = 0; j < i; j += 1) {
+      if (pairs[j].asrIndex <= pairs[i].asrIndex && dpLength[j] + 1 > dpLength[i]) {
+        dpLength[i] = dpLength[j] + 1
+        prevIndex[i] = j
+      }
+    }
+  }
+  let bestEnd = 0
+  for (let i = 1; i < n; i += 1) {
+    if (dpLength[i] > dpLength[bestEnd]) bestEnd = i
+  }
+  const result: CharPair[] = []
+  let cursor = bestEnd
+  while (cursor !== -1) {
+    result.unshift(pairs[cursor])
+    cursor = prevIndex[cursor]
+  }
+  return result
+}
+
+/**
+ * 非減少列を隣接ペア間の excess（asrIndex差 − cueCharIndex差）で分割し、最大のかたまり
+ * （同数なら先に出現した方）を返す。excess は生の飛びではなく差分で判定する必要がある:
+ * LLMが長い区間を書き換えた場合、生の飛びは大きくてもキュー側も同じだけ進むため excess は
+ * 小さく保たれる。生の飛びで判定すると正当な書き換えを誤って分割してしまう。
+ */
+function selectLargestCluster(pairs: readonly CharPair[]): CharPair[] {
+  if (pairs.length === 0) return []
+  const clusters: CharPair[][] = [[pairs[0]]]
+  for (let i = 1; i < pairs.length; i += 1) {
+    const prev = pairs[i - 1]
+    const cur = pairs[i]
+    const excess = cur.asrIndex - prev.asrIndex - (cur.cueCharIndex - prev.cueCharIndex)
+    if (excess > EXCESS_SPLIT_THRESHOLD) {
+      clusters.push([cur])
+    } else {
+      clusters[clusters.length - 1].push(cur)
+    }
+  }
+  let best = clusters[0]
+  for (const cluster of clusters) {
+    if (cluster.length > best.length) best = cluster
+  }
+  return best
+}
+
+/**
+ * 1キュー分の対応ペアから、外れ値（逆行・遠方への誤マッチ）を除いた「採用かたまり」を
+ * 選び、その範囲だけで包絡（startSec/endSec/firstCharIndex/lastCharIndex）を作る。
+ * 隣キューへの伸長は行わない（extendEnvelopes で別途行う）。
+ */
+function buildRawProvisionalSpan(
+  asr: readonly AsrChar[],
+  start: number,
+  end: number,
+  globalMatches: ReadonlyMap<number, number>,
+): ProvisionalSpanInfo {
+  const totalChars = end - start
+  const rawPairs = collectCharPairs(start, end, globalMatches)
+  if (totalChars === 0 || rawPairs.length === 0) {
+    return {
+      startSec: null,
+      endSec: null,
+      matchedChars: rawPairs.length,
+      totalChars,
+      needsInterpolation: true,
+      firstCharIndex: null,
+      lastCharIndex: null,
+      leadingUnmatched: 0,
+      trailingUnmatched: 0,
+    }
+  }
+  const cluster = selectLargestCluster(longestNonDecreasingSubsequence(rawPairs))
+  const minA = cluster[0].asrIndex
+  const maxA = cluster[cluster.length - 1].asrIndex
+  const [leftIdx, rightIdx] = trimEnvelopeByScore(asr, minA, maxA)
+  const matchedChars = cluster.length
+  const needsInterpolation = matchedChars < Math.max(MIN_MATCHED_CHARS_FLOOR, totalChars * MIN_MATCHED_CHARS_RATIO)
+  return {
+    startSec: asr[leftIdx].start,
+    endSec: asr[rightIdx].end,
+    matchedChars,
+    totalChars,
+    needsInterpolation,
+    firstCharIndex: leftIdx,
+    lastCharIndex: rightIdx,
+    leadingUnmatched: cluster[0].cueCharIndex - start,
+    trailingUnmatched: end - 1 - cluster[cluster.length - 1].cueCharIndex,
+  }
+}
+
+/** 補間対象（採用範囲を持たない）キューの firstCharIndex/lastCharIndex は隣接キューの
+ * 伸長境界として信頼できないため、そのようなキューには null を返して制約なしを表す。 */
+function adoptedFirstCharIndex(info: ProvisionalSpanInfo | undefined): number | null {
+  if (!info || info.needsInterpolation || info.firstCharIndex === null) return null
+  return info.firstCharIndex
+}
+
+function adoptedLastCharIndex(info: ProvisionalSpanInfo | undefined): number | null {
+  if (!info || info.needsInterpolation || info.lastCharIndex === null) return null
+  return info.lastCharIndex
+}
+
+/**
+ * 採用したかたまりの先頭/末尾がキュー自身の先頭/末尾に届いていない場合、その未対応
+ * 文字数（leadingUnmatched/trailingUnmatched）ぶんだけ包絡をASR側で伸ばす。
+ * ただし隣キューの採用範囲には食い込ませない（隣が補間対象なら制約なし）。
+ * 伸長は常に「外側へ広げる」方向のみ（Math.min/maxで、採用済みの核を縮める側には動かさない）。
+ */
+function extendEnvelopes(provisional: readonly ProvisionalSpanInfo[], asr: readonly AsrChar[]): ProvisionalSpanInfo[] {
+  return provisional.map((info, index) => {
+    const firstCharIndex = info.firstCharIndex
+    const lastCharIndex = info.lastCharIndex
+    if (info.needsInterpolation || firstCharIndex === null || lastCharIndex === null) {
+      return info
+    }
+    const prevLast = adoptedLastCharIndex(provisional[index - 1])
+    const nextFirst = adoptedFirstCharIndex(provisional[index + 1])
+    const lowerBound = prevLast !== null ? prevLast + 1 : 0
+    const upperBound = nextFirst !== null ? nextFirst - 1 : asr.length - 1
+    const newLeftIdx = Math.min(firstCharIndex, Math.max(lowerBound, firstCharIndex - info.leadingUnmatched, 0))
+    const newRightIdx = Math.max(lastCharIndex, Math.min(upperBound, lastCharIndex + info.trailingUnmatched, asr.length - 1))
+    if (newLeftIdx === firstCharIndex && newRightIdx === lastCharIndex) return info
+    return {
+      ...info,
+      startSec: asr[newLeftIdx].start,
+      endSec: asr[newRightIdx].end,
+      firstCharIndex: newLeftIdx,
+      lastCharIndex: newRightIdx,
+    }
+  })
+}
+
 function buildProvisionalSpans(
   asr: readonly AsrChar[],
   cueBounds: readonly CueBound[],
   globalMatches: ReadonlyMap<number, number>,
 ): ProvisionalSpanInfo[] {
-  return cueBounds.map(({ start, end }) => {
-    const totalChars = end - start
-    const matchedIndices: number[] = []
-    for (let j = start; j < end; j += 1) {
-      const a = globalMatches.get(j)
-      if (a !== undefined) matchedIndices.push(a)
-    }
-    if (totalChars === 0 || matchedIndices.length === 0) {
-      return {
-        startSec: null,
-        endSec: null,
-        matchedChars: matchedIndices.length,
-        totalChars,
-        needsInterpolation: true,
-        firstCharIndex: null,
-        lastCharIndex: null,
-      }
-    }
-    const minA = Math.min(...matchedIndices)
-    const maxA = Math.max(...matchedIndices)
-    const [leftIdx, rightIdx] = trimEnvelopeByScore(asr, minA, maxA)
-    const needsInterpolation = matchedIndices.length < Math.max(MIN_MATCHED_CHARS_FLOOR, totalChars * MIN_MATCHED_CHARS_RATIO)
-    return {
-      startSec: asr[leftIdx].start,
-      endSec: asr[rightIdx].end,
-      matchedChars: matchedIndices.length,
-      totalChars,
-      needsInterpolation,
-      firstCharIndex: leftIdx,
-      lastCharIndex: rightIdx,
-    }
-  })
+  const raw = cueBounds.map(({ start, end }) => buildRawProvisionalSpan(asr, start, end, globalMatches))
+  return extendEnvelopes(raw, asr)
 }
 
 /**
@@ -397,15 +546,22 @@ function interpolateSpans(provisional: readonly ProvisionalSpanInfo[], asr: read
 
 /**
  * diffベースの大域アライメントは理論上キュー間の重なりを生まないはずだが、
- * 端点補正やフォールバックの組み合わせで万一発生した場合に中点で分割して解消する。
+ * 端点補正やフォールバックの組み合わせで万一発生した場合に解消する。
+ *
+ * 前のキューの endSec だけを動かさず、後ろのキューの startSec を前の endSec に
+ * 合わせて押し出す非対称な解消にする（前のキューは一切変更しない）。
+ * 前のキューの end はASR実測（またはスコアトリム込みの確定値）で信頼できる一方、
+ * 異常が起きているのは後ろのキューの start 側だからである。旧実装の中点分割は
+ * 「隣接キューのわずかなジッター」を想定した処理で、外れ値ガード導入前は数十秒規模の
+ * 重なりが生じ得たため、中点分割だと信頼できる前のキューの end まで巻き込んで破壊し、
+ * `finalizeSpan` の `Math.max(startSec, endSec)` で前のキューの長さを0にしてしまっていた。
  */
 function enforceMonotonicSpans(spans: readonly TimedSpan[]): TimedSpan[] {
   const result = spans.map(span => ({ ...span }))
   for (let i = 0; i < result.length - 1; i += 1) {
     if (result[i].endSec > result[i + 1].startSec) {
-      const mid = (result[i].endSec + result[i + 1].startSec) / 2
-      result[i] = { ...result[i], endSec: mid }
-      result[i + 1] = { ...result[i + 1], startSec: mid, endSec: Math.max(mid, result[i + 1].endSec) }
+      const prevEnd = result[i].endSec
+      result[i + 1] = { startSec: prevEnd, endSec: Math.max(prevEnd, result[i + 1].endSec) }
     }
   }
   return result
@@ -462,4 +618,8 @@ export const __testing = {
   normalizeTimingText,
   chunkCueGroups,
   trimEnvelopeByScore,
+  longestNonDecreasingSubsequence,
+  selectLargestCluster,
+  buildProvisionalSpans,
+  enforceMonotonicSpans,
 }
