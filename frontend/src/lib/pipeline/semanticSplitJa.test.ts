@@ -4,6 +4,7 @@ import { buildAsrCharStream } from './asrAlignment'
 import { DEFAULT_PIPELINE_THRESHOLDS, type PipelineThresholds } from './blockTypes'
 import type { CorrectedSegmentLite } from './correct'
 import type { TranscriptSegment } from './types'
+import { getDefaultAdminSettings } from '@/api/adminSettings'
 
 declare const require: (id: string) => { readFileSync: (p: string, e: string) => string }
 declare const process: { cwd: () => string }
@@ -346,5 +347,53 @@ describe('alignUnitsProportionalFallback: words を持たないセグメント�
     // duration=15.0, 5文字:10文字 → 境界は 10 + 15*(5/15) = 15.0
     expect(blocks[0].end).toBeCloseTo(15.0, 5)
     expect(blocks[1].start).toBeCloseTo(15.0, 5)
+  })
+})
+
+describe('resolveTranscriptScript: alignTokenMode による書きおこしトークン単位の決定', () => {
+  // 日本語相当（1文字トークン中心）の入力。alignTokenMode: 'auto' なら detectAsrScriptDetail が
+  // 'japanese' と判定するはずのデータで、'word' 設定が優先されることを確認する。
+  const japaneseLikeSegments: CorrectedSegmentLite[] = [
+    {
+      id: 1,
+      start: 0,
+      end: 5,
+      text: 'あいうえお',
+      correctedText: 'あいうえお',
+      correctionDistance: 0,
+      correctionFlagged: false,
+      words: Array.from('あいうえお', (char, i) => ({ word: char, start: i, end: i + 1 })),
+    },
+  ]
+
+  it("alignTokenMode: 'word' を指定すると、日本語相当の入力でも単語単位(latin)が使われる（設定上書きが効く）", () => {
+    const settings = { ...getDefaultAdminSettings(), alignTokenMode: 'word' as const }
+    const resolution = __testing.resolveTranscriptScript(settings, japaneseLikeSegments)
+    expect(resolution.script).toBe('latin')
+    expect(resolution.source).toBe('setting_word')
+  })
+
+  it("alignTokenMode: 'char' を指定すると常に japanese になる", () => {
+    const settings = { ...getDefaultAdminSettings(), alignTokenMode: 'char' as const }
+    const resolution = __testing.resolveTranscriptScript(settings, japaneseLikeSegments)
+    expect(resolution.script).toBe('japanese')
+    expect(resolution.source).toBe('setting_char')
+  })
+
+  it("alignTokenMode: 'auto'（既定）では、日本語相当の入力から自動判定で japanese になる", () => {
+    const settings = { ...getDefaultAdminSettings(), alignTokenMode: 'auto' as const }
+    const resolution = __testing.resolveTranscriptScript(settings, japaneseLikeSegments)
+    expect(resolution.script).toBe('japanese')
+    expect(resolution.source).toBe('auto_detected')
+  })
+
+  it('判定に使えるトークンが0件のときのみ languageProfileConfig にフォールバックする', () => {
+    const settings = { ...getDefaultAdminSettings(), alignTokenMode: 'auto' as const }
+    const noWordsSegments: CorrectedSegmentLite[] = [
+      { id: 1, start: 0, end: 5, text: 'あいうえお', correctedText: 'あいうえお', correctionDistance: 0, correctionFlagged: false },
+    ]
+    const resolution = __testing.resolveTranscriptScript(settings, noWordsSegments)
+    expect(resolution.source).toBe('fallback_profile')
+    expect(resolution.script).toBe('japanese')
   })
 })

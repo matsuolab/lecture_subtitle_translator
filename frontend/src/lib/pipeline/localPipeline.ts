@@ -213,11 +213,18 @@ export async function runLocalPostPipeline(
     traces.push({ nodeId, status, attempt: 1, durationMs, provider: 'local-ts', model: 'local', summary })
   }
 
-  const runNode = async <T>(nodeId: string, run: () => Promise<T> | T): Promise<T> => {
+  // summarize は任意。ノードの実行結果から「成功時のtrace summary」を取り出すための
+  // フック（例: semanticSplitJa のトークン単位判定結果を人が読める形でtraceへ残す。
+  // phase1.ts の RunNode 参照）。既存の呼び出し側の大半は summary 不要のため省略可能。
+  const runNode = async <T>(
+    nodeId: string,
+    run: () => Promise<T> | T,
+    summarize?: (result: T) => string | undefined,
+  ): Promise<T> => {
     const startedAt = Date.now()
     try {
       const result = await runNodeWithHeartbeat(nodeId, run, onStep)
-      record(nodeId, 'success', Date.now() - startedAt)
+      record(nodeId, 'success', Date.now() - startedAt, summarize?.(result))
       recordStageSnapshot(nodeId, result)
       return result
     } catch (error) {

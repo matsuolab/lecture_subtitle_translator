@@ -136,6 +136,25 @@ describe('transcribeLanguageCode normalization', () => {
   })
 })
 
+describe('alignTokenMode normalization', () => {
+  it('defaults to auto when unset', () => {
+    expect(getDefaultAdminSettings().alignTokenMode).toBe('auto')
+    expect(normalizeAdminSettings({}).alignTokenMode).toBe('auto')
+  })
+
+  it('keeps a valid value as-is', () => {
+    expect(normalizeAdminSettings({ alignTokenMode: 'char' }).alignTokenMode).toBe('char')
+    expect(normalizeAdminSettings({ alignTokenMode: 'word' }).alignTokenMode).toBe('word')
+    expect(normalizeAdminSettings({ alignTokenMode: 'auto' }).alignTokenMode).toBe('auto')
+  })
+
+  it('falls back to auto for an invalid value', () => {
+    expect(normalizeAdminSettings({ alignTokenMode: 'invalid' }).alignTokenMode).toBe('auto')
+    expect(normalizeAdminSettings({ alignTokenMode: 123 }).alignTokenMode).toBe('auto')
+    expect(normalizeAdminSettings({ alignTokenMode: null }).alignTokenMode).toBe('auto')
+  })
+})
+
 describe('llmRequestTimeoutSec normalization', () => {
   it('defaults to 600 seconds when unset', () => {
     expect(getDefaultAdminSettings().llmRequestTimeoutSec).toBe(600)

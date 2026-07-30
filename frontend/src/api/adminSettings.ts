@@ -1,4 +1,4 @@
-import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, AlignTokenMode, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider } from '@/types/adminSettings'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON } from '@/lib/pipeline/languageProfileConfig'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
 import {
@@ -17,6 +17,7 @@ const DEFAULT_LOCAL_TRANSCRIPT_API_BASE = 'http://127.0.0.1:8000'
 
 const DEFAULT_SERVICE_MODE: ServiceMode = 'legacy_pipeline'
 const DEFAULT_TRANSLATION_PROVIDER: TranslationProvider = 'openai'
+const DEFAULT_ALIGN_TOKEN_MODE: AlignTokenMode = 'auto'
 const SHARED_SETTINGS_VERSION = 1
 const SHARED_SETTINGS_EXCLUDED_FIELDS = [
   'serviceAuthToken',
@@ -103,6 +104,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     subtitleLanguageLabel: 'English',
     transcriptLanguageLabel: 'Japanese',
     languageProfileConfigJson: DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON,
+    alignTokenMode: DEFAULT_ALIGN_TOKEN_MODE,
     textNormalizationEnabled: true,
     textNormalizationRulesJson: DEFAULT_TEXT_NORMALIZATION_RULES_JSON,
     correctionAdditionalInstructions: DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,
@@ -198,6 +200,12 @@ function normalizeMaxEffort(value: unknown, fallback: 'low' | 'medium' | 'high')
   return fallback
 }
 
+// 'auto'/'char'/'word' の3値以外（旧バージョンからの読み込み・破損データ）は 'auto' へフォールバック。
+function normalizeAlignTokenMode(value: unknown): AlignTokenMode {
+  if (value === 'auto' || value === 'char' || value === 'word') return value
+  return DEFAULT_ALIGN_TOKEN_MODE
+}
+
 export function normalizeAdminSettings(value: unknown): AdminSettings {
   const raw = typeof value === 'object' && value !== null ? value as Partial<AdminSettings> & { pipelineApiUrl?: string } : {}
   const defaults = getDefaultAdminSettings()
@@ -274,6 +282,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     subtitleLanguageLabel: typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel ? raw.subtitleLanguageLabel : defaults.subtitleLanguageLabel,
     transcriptLanguageLabel: typeof raw.transcriptLanguageLabel === 'string' && raw.transcriptLanguageLabel ? raw.transcriptLanguageLabel : defaults.transcriptLanguageLabel,
     languageProfileConfigJson: typeof raw.languageProfileConfigJson === 'string' && raw.languageProfileConfigJson ? raw.languageProfileConfigJson : defaults.languageProfileConfigJson,
+    alignTokenMode: normalizeAlignTokenMode(raw.alignTokenMode),
     textNormalizationEnabled: typeof raw.textNormalizationEnabled === 'boolean' ? raw.textNormalizationEnabled : defaults.textNormalizationEnabled,
     textNormalizationRulesJson: typeof raw.textNormalizationRulesJson === 'string' ? raw.textNormalizationRulesJson : defaults.textNormalizationRulesJson,
     correctionAdditionalInstructions: typeof raw.correctionAdditionalInstructions === 'string' ? raw.correctionAdditionalInstructions : defaults.correctionAdditionalInstructions,

@@ -3,13 +3,15 @@ import type { JaBlock, PipelineThresholds } from './blockTypes'
 import type { TranscriptSegment } from './types'
 import type { CorrectedSegmentLite } from './correct'
 import { correctSegments } from './correct'
-import { semanticSplitJa } from './semanticSplitJa'
+import { semanticSplitJa, formatTranscriptScriptSummary, type SemanticSplitJaResult } from './semanticSplitJa'
 import { mergeShort } from './mergeShort'
 import { contextGroupCueBlocks, reindexContextGroups } from './contextGrouping'
 import { runCorrectionDebug, isCorrectionDebugEnabled } from './correctionDebug'
 import { buildPartialFailureWarning } from './partialFailureSummary'
 
-type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
+// summarize は任意。localPipeline.ts の runNode が「成功時のtrace summary」を
+// 結果から抽出するために使う（semanticSplitJa の判定結果を人が読める形で残すため）。
+type RunNode = <T>(nodeId: string, run: () => Promise<T> | T, summarize?: (result: T) => string | undefined) => Promise<T>
 
 // Phase2 と同じ形式の警告コールバック。Phase1 ノードからの検出失敗等を trace に残す。
 export type Phase1OnWarning = (nodeId: string, message: string) => void
@@ -52,9 +54,12 @@ export async function runPhase1(
   if (isCorrectionDebugEnabled(settings)) {
     await runNode('correctionDebug', () => runCorrectionDebug(corrected, settings))
   }
-  const split = await runNode('semanticSplitJa', () =>
-    semanticSplitJa(corrected, settings, thresholds, options.glossaryTerms ?? []),
+  const splitResult = await runNode(
+    'semanticSplitJa',
+    () => semanticSplitJa(corrected, settings, thresholds, options.glossaryTerms ?? []),
+    (result: SemanticSplitJaResult) => formatTranscriptScriptSummary(result.scriptResolution),
   )
+  const split = splitResult.blocks
   // Phase1: 「文脈上は一体で扱うべき cue」を context group としてタグ付けする。
   // 表示 cue はここでは結合しない。翻訳・後段修正に group 文脈を渡しつつ、
   // subtitle cue は duration / CPS / 行長制約に従って 1〜N cue として維持する。

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignCuesToAsr, buildAsrCharStream, __testing } from './asrAlignment'
+import { alignCuesToAsr, buildAsrCharStream, detectAsrScript, detectAsrScriptDetail, __testing } from './asrAlignment'
 import type { AsrChar } from './asrAlignment'
 import type { TranscriptSegment } from './types'
 
@@ -966,5 +966,58 @@ describe('窓幅の秒基準換算（DEFAULT_WINDOW_SEC / DEFAULT_WINDOW_MARGIN_
     const spans = alignCuesToAsr([target], asr, { windowChars: 50, windowMarginChars: 20 })
     expect(spans[0].startSec).toBeCloseTo(60, 5)
     expect(spans[0].endSec).toBeCloseTo(66, 5)
+  })
+})
+
+describe('detectAsrScriptDetail / detectAsrScript（WhisperX出力のトークン単位判定）', () => {
+  // 判定材料は生の word（buildAsrCharStream 通過前）。長さだけを制御したいので、
+  // 中身の文字種は判定に無関係（'x' を length 分繰り返すだけ）。
+  function makeTokensOfLengths(lengths: readonly number[]): TranscriptSegment[] {
+    const words = lengths.map((len, i) => ({ word: 'x'.repeat(len), start: i, end: i + 1 }))
+    return [{ id: 1, start: 0, end: lengths.length, text: words.map(w => w.word).join(' '), words }]
+  }
+
+  it('1文字トークン中心（実測: 日本語5本の平均1.0相当）の入力は japanese・平均長約1.0を返す', () => {
+    const segments = makeTokensOfLengths(Array.from({ length: 20 }, () => 1))
+    const detection = detectAsrScriptDetail(segments)
+    expect(detection.script).toBe('japanese')
+    expect(detection.meanTokenLength).toBeCloseTo(1.0, 5)
+    expect(detection.tokenCount).toBe(20)
+    expect(detectAsrScript(segments)).toBe('japanese')
+  })
+
+  it('複数文字トークン中心（実測: 英語1本の平均4.0相当）の入力は latin を返す', () => {
+    const segments = makeTokensOfLengths(Array.from({ length: 20 }, () => 4))
+    const detection = detectAsrScriptDetail(segments)
+    expect(detection.script).toBe('latin')
+    expect(detection.meanTokenLength).toBeCloseTo(4.0, 5)
+    expect(detectAsrScript(segments)).toBe('latin')
+  })
+
+  it('有効トークンが0件（words 欠損、または正規化後に空文字のみ）なら tokenCount===0 を返す', () => {
+    const noWords: TranscriptSegment[] = [{ id: 1, start: 0, end: 1, text: '' }]
+    expect(detectAsrScriptDetail(noWords).tokenCount).toBe(0)
+
+    // 句読点のみのトークンは normalizeTimingText で空文字になり、母数から除かれる。
+    const punctuationOnly: TranscriptSegment[] = [
+      { id: 1, start: 0, end: 1, text: '。、', words: [{ word: '。', start: 0, end: 0.5 }, { word: '、', start: 0.5, end: 1 }] },
+    ]
+    expect(detectAsrScriptDetail(punctuationOnly).tokenCount).toBe(0)
+  })
+
+  it('平均長がちょうど閾値1.2の場合は japanese（境界は文字単位側に倒す）', () => {
+    // 16トークン長1 + 4トークン長2 → 合計24 / 20トークン = 1.2 ちょうど
+    const segments = makeTokensOfLengths([...Array(16).fill(1), ...Array(4).fill(2)])
+    const detection = detectAsrScriptDetail(segments)
+    expect(detection.meanTokenLength).toBeCloseTo(1.2, 5)
+    expect(detection.script).toBe('japanese')
+  })
+
+  it('平均長が閾値1.2をわずかに超える場合は latin に切り替わる', () => {
+    // 15トークン長1 + 5トークン長2 → 合計25 / 20トークン = 1.25
+    const segments = makeTokensOfLengths([...Array(15).fill(1), ...Array(5).fill(2)])
+    const detection = detectAsrScriptDetail(segments)
+    expect(detection.meanTokenLength).toBeCloseTo(1.25, 5)
+    expect(detection.script).toBe('latin')
   })
 })

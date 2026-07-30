@@ -1224,6 +1224,22 @@ export function SettingsTab({
             placeholder="Japanese"
             onChange={(value) => onAdminSettingsChange({ transcriptLanguageLabel: value })}
           />
+          <SelectField
+            theme={theme}
+            label="書きおこしトークン単位"
+            value={adminSettings.alignTokenMode}
+            onChange={(value) => onAdminSettingsChange({ alignTokenMode: value })}
+            options={[
+              { value: 'auto', label: '自動判定（推奨）' },
+              { value: 'char', label: '文字単位（日本語・中国語）' },
+              { value: 'word', label: '単語単位（英語など）' },
+            ]}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            通常は自動判定のままで構いません。WhisperXの出力から判定します。
+            {/* 実行先（ローカル/AWS）に関係なく意味を持つ設定。書きおこしの単位はASR出力の
+                性質（words[] の平均トークン長）で決まり、接続先設定では左右されないため。 */}
+          </div>
           <details style={{
             border: `1px solid ${theme.panelBorder}`,
             borderRadius: 8,

@@ -13,7 +13,7 @@ import { loadLanguageProfileConfig, type LanguageProfileConfig, type LanguageScr
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta } from './llmCallWithMeta'
-import { alignCuesToAsr, buildAsrCharStream, type AlignedSpan, type AsrChar } from './asrAlignment'
+import { alignCuesToAsr, buildAsrCharStream, detectAsrScriptDetail, type AlignedSpan, type AsrChar } from './asrAlignment'
 
 const MAX_SEGMENTS_PER_REQUEST = 4
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 2
@@ -542,15 +542,87 @@ async function callSemanticSplitApi(
   }
 }
 
+/**
+ * 書きおこしのトークン単位（`transcriptScript`）を、どこから決めたかを含めて表す。
+ * `semanticSplitJa` の戻り値に含めて呼び出し側（localPipeline.ts）が診断summaryへ整形する。
+ */
+export interface TranscriptScriptResolution {
+  script: LanguageScript
+  source: 'setting_char' | 'setting_word' | 'auto_detected' | 'fallback_profile'
+  /** source==='auto_detected' のときのみ有効。詳細は asrAlignment.ts の AsrScriptDetection 参照。 */
+  meanTokenLength?: number
+  tokenCount?: number
+}
+
+export interface SemanticSplitJaResult {
+  blocks: JaBlock[]
+  scriptResolution: TranscriptScriptResolution
+}
+
+/**
+ * 書きおこし（元言語）の script を決める。優先順位:
+ *   1. settings.alignTokenMode === 'char' → 'japanese'（文字単位に固定）
+ *   2. settings.alignTokenMode === 'word' → 'latin'（単語単位に固定）
+ *   3. 'auto'（既定） → detectAsrScriptDetail の判定結果を使う
+ *   4. 判定に使えるトークンが0件（tokenCount===0）のときのみ、従来どおり
+ *      languageProfileConfig（ユーザーが自由入力する書きおこし言語ラベル由来）にフォールバック
+ *
+ * 3.のASR出力からの自動判定を既定にする理由: WhisperX自体が
+ * `LANGUAGES_WITHOUT_SPACES=["ja","zh"]` のときだけ1文字ずつ、それ以外は単語ごとに
+ * タイムスタンプを返す仕様のため、言語ラベル（ユーザーの自由入力）に頼るより
+ * 実際の出力構造を見た方が確実（設定の誤り・リモート実行での言語不明にも強い）。
+ */
+function resolveTranscriptScript(
+  settings: AdminSettings,
+  segments: readonly CorrectedSegmentLite[],
+): TranscriptScriptResolution {
+  if (settings.alignTokenMode === 'char') {
+    return { script: 'japanese', source: 'setting_char' }
+  }
+  if (settings.alignTokenMode === 'word') {
+    return { script: 'latin', source: 'setting_word' }
+  }
+  const detection = detectAsrScriptDetail(segments)
+  if (detection.tokenCount === 0) {
+    return { script: loadLanguageProfileConfig(settings).transcript.script, source: 'fallback_profile' }
+  }
+  return {
+    script: detection.script,
+    source: 'auto_detected',
+    meanTokenLength: detection.meanTokenLength,
+    tokenCount: detection.tokenCount,
+  }
+}
+
+/**
+ * `TranscriptScriptResolution` を localPipeline.ts のトレース summary 用に人が読める文字列へ整形する。
+ * 例: 'トークン単位=単語(自動判定, 平均長4.0, 13393トークン)' / 'トークン単位=文字(設定で固定)'
+ */
+export function formatTranscriptScriptSummary(resolution: TranscriptScriptResolution): string {
+  const unitLabel = resolution.script === 'latin' ? '単語' : '文字'
+  switch (resolution.source) {
+    case 'setting_char':
+    case 'setting_word':
+      return `トークン単位=${unitLabel}(設定で固定)`
+    case 'auto_detected':
+      return `トークン単位=${unitLabel}(自動判定, 平均長${resolution.meanTokenLength!.toFixed(1)}, ${resolution.tokenCount}トークン)`
+    case 'fallback_profile':
+      return `トークン単位=${unitLabel}(判定不能のため言語ラベル設定にフォールバック)`
+    default:
+      return `トークン単位=${unitLabel}`
+  }
+}
+
 export async function semanticSplitJa(
   segments: CorrectedSegmentLite[],
   settings: AdminSettings,
   thresholds: PipelineThresholds,
   glossaryTerms: string[] = [],
-): Promise<JaBlock[]> {
+): Promise<SemanticSplitJaResult> {
   // 書きおこし（元言語）の script。ラテン文字はWhisperXが単語単位でタイムスタンプを
   // 返すため、buildAsrCharStream/alignCuesToAsr の両方に伝える必要がある（asrAlignment.ts参照）。
-  const transcriptScript = loadLanguageProfileConfig(settings).transcript.script
+  const scriptResolution = resolveTranscriptScript(settings, segments)
+  const transcriptScript = scriptResolution.script
   const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
     ? LOCAL_MAX_SEGMENTS_PER_REQUEST
     : MAX_SEGMENTS_PER_REQUEST
@@ -600,7 +672,7 @@ export async function semanticSplitJa(
     ? alignUnitsProportionalFallback(orderedUnits, segments, thresholds, glossaryTerms)
     : alignUnitsGlobally(orderedUnits, asrStream, thresholds, glossaryTerms, transcriptScript)
 
-  return buildJaBlocks(aligned)
+  return { blocks: buildJaBlocks(aligned), scriptResolution }
 }
 
 /** アライン済みユニット列から JaBlock 配列を組み立てる（id採番・空テキストスキップ）。*/
@@ -631,4 +703,5 @@ export const __testing = {
   alignUnitsGlobally,
   alignUnitsProportionalFallback,
   buildJaBlocks,
+  resolveTranscriptScript,
 }

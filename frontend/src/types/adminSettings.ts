@@ -5,6 +5,7 @@ export type ServiceMode = 'managed_service' | 'legacy_pipeline'
 export type SemanticCheckMode = 'off' | 'log_only' | 'enforce'
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
 export type ApiCompatibilityProfilePresetId = 'auto' | 'openai' | 'lmstudio' | 'ollama' | 'gemini_openai_compatible' | 'user'
+export type AlignTokenMode = 'auto' | 'char' | 'word'
 export type { ModelProfilePresetId } from './modelProfile'
 
 export interface AdminSettings {
@@ -88,6 +89,11 @@ export interface AdminSettings {
   subtitleLanguageLabel: string
   transcriptLanguageLabel: string
   languageProfileConfigJson: string
+  // 書きおこしトークン単位。WhisperXは日本語/中国語のみ1文字ずつ、それ以外は単語ごとに
+  // タイムスタンプを返す（asrAlignment.ts の detectAsrScriptDetail 参照）。既定 'auto' は
+  // ASR出力（words[]）の平均トークン長から自動判定する。'char'/'word' は明示固定で、
+  // 誤判定時のユーザー救済や、判定材料（words[]）が乏しい入力向けの上書き手段。
+  alignTokenMode: AlignTokenMode
   textNormalizationEnabled: boolean
   textNormalizationRulesJson: string
 

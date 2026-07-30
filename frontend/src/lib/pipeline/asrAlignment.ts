@@ -117,6 +117,18 @@ const EXACT_MATCH_RATE_THRESHOLD = 0.8
 const MIN_MATCHED_CHARS_FLOOR = 4
 const MIN_MATCHED_CHARS_RATIO = 0.35
 
+// detectAsrScriptDetail が「文字単位（japanese）」と判定する平均トークン長の上限。
+// 根拠（実測6データセット）: 日本語5本の平均文字トークン長は1.0（例外なし）、英語1本は4.0。
+// WhisperXは LANGUAGES_WITHOUT_SPACES=["ja","zh"] のみ1文字ずつ、それ以外は空白区切りの
+// 単語ごとにタイムスタンプを返す仕様（alignment.py）のため、構造上「文字単位なら必ず約1.0、
+// 単語単位なら1.0を明確に超える」（平均1文字の単語しかない空白区切り言語は存在しない）。
+// 1.2 は実測1.0対4.0の間に位置する値で、あえて日本語(1.0)寄りに設定することで、
+// 万一の曖昧域は「今日まで動いている文字単位の挙動」に倒す安全側の閾値にしている。
+const SCRIPT_DETECTION_MEAN_LENGTH_THRESHOLD = 1.2
+// 有効トークンが0件（判定不能）のときに detectAsrScriptDetail が返す既定値。
+// 従来の既定（resolveAsrCharStreamOptions の script 既定）と揃え、判定不能時の挙動を変えない。
+const DEFAULT_DETECTED_SCRIPT: LanguageScript = 'japanese'
+
 // 隣接する対応ペア間の excess（ASR側の飛び − キュー側の飛び）がこの値を超えたら
 // 「誤マッチによる遠方への飛び」とみなしてかたまりを分割する。
 // 根拠（実データ6本・21,196件の隣接対応ペアの実測分布）:
@@ -318,6 +330,54 @@ export function buildAsrCharStream(
       .sort((a, b) => a.start - b.start || a.end - b.end)
     return words.flatMap(word => (isLatin ? wordToAsrToken(word, maxWordDurationSec) : wordToChars(word, maxWordDurationSec)))
   })
+}
+
+/** `detectAsrScriptDetail` の判定結果。 */
+export interface AsrScriptDetection {
+  /** 判定されたトークン単位。`'japanese'`（文字単位）または `'latin'`（単語単位）のみを返す。 */
+  script: LanguageScript
+  /** 有効トークン（正規化後に空文字にならなかったトークン）の平均文字長。tokenCount===0 のときは 0。 */
+  meanTokenLength: number
+  /** 判定に使った有効トークン数。0 なら判定不能（呼び出し側は既定へフォールバックすること）。 */
+  tokenCount: number
+}
+
+/**
+ * WhisperXの生セグメント（`buildAsrCharStream` に渡す前の `segments[].words[]`）から、
+ * WhisperXが実際にどちらのトークン単位（1文字ずつ／単語ごと）でタイムスタンプを返したかを判定する。
+ *
+ * 言語や文字種を推定するのではなく、WhisperX本体の仕様
+ * （`alignment.py`: `LANGUAGES_WITHOUT_SPACES = ["ja", "zh"]` のときのみ1文字ずつ、
+ * それ以外は空白区切りの単語ごとにタイムスタンプを返す）に基づき、出力トークンの
+ * 平均文字長から逆算する。日本語/中国語なら1トークン=1文字なので平均長は必ず約1.0、
+ * それ以外の言語では単語単位のため1.0を明確に超える（平均1文字の単語しかない
+ * 空白区切り言語は存在しない）。閾値の根拠は `SCRIPT_DETECTION_MEAN_LENGTH_THRESHOLD` 参照。
+ *
+ * 判定材料は生の word（`buildAsrCharStream` 通過後のASR文字ストリームではない）。
+ * ストリーム構築自体が判定結果に依存するため、判定は必ず生データに対して行う。
+ */
+export function detectAsrScriptDetail(segments: readonly TranscriptSegment[]): AsrScriptDetection {
+  let totalLength = 0
+  let tokenCount = 0
+  for (const segment of segments) {
+    for (const word of segment.words ?? []) {
+      const normalized = normalizeTimingText(String(word.word ?? ''))
+      if (normalized.length === 0) continue
+      totalLength += normalized.length
+      tokenCount += 1
+    }
+  }
+  if (tokenCount === 0) {
+    return { script: DEFAULT_DETECTED_SCRIPT, meanTokenLength: 0, tokenCount: 0 }
+  }
+  const meanTokenLength = totalLength / tokenCount
+  const script: LanguageScript = meanTokenLength <= SCRIPT_DETECTION_MEAN_LENGTH_THRESHOLD ? 'japanese' : 'latin'
+  return { script, meanTokenLength, tokenCount }
+}
+
+/** `detectAsrScriptDetail` の `script` だけを返す薄いラッパー。詳細（平均長・トークン数）が不要な呼び出し向け。 */
+export function detectAsrScript(segments: readonly TranscriptSegment[]): LanguageScript {
+  return detectAsrScriptDetail(segments).script
 }
 
 function computeAsrDensityPerSec(asr: readonly AsrChar[]): number {
