@@ -119,6 +119,23 @@ describe('admin settings model profile migration', () => {
   })
 })
 
+describe('transcribeLanguageCode normalization', () => {
+  it('defaults to ja when unset', () => {
+    expect(getDefaultAdminSettings().transcribeLanguageCode).toBe('ja')
+    expect(normalizeAdminSettings({}).transcribeLanguageCode).toBe('ja')
+  })
+
+  it('keeps a supported language code as-is', () => {
+    expect(normalizeAdminSettings({ transcribeLanguageCode: 'en' }).transcribeLanguageCode).toBe('en')
+  })
+
+  it('falls back to ja for an unsupported or malformed code', () => {
+    expect(normalizeAdminSettings({ transcribeLanguageCode: 'xx' }).transcribeLanguageCode).toBe('ja')
+    expect(normalizeAdminSettings({ transcribeLanguageCode: '' }).transcribeLanguageCode).toBe('ja')
+    expect(normalizeAdminSettings({ transcribeLanguageCode: 123 }).transcribeLanguageCode).toBe('ja')
+  })
+})
+
 describe('llmRequestTimeoutSec normalization', () => {
   it('defaults to 600 seconds when unset', () => {
     expect(getDefaultAdminSettings().llmRequestTimeoutSec).toBe(600)

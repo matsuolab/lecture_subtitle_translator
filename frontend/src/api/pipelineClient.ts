@@ -533,7 +533,7 @@ async function runLocalTranscriptPipeline(
   const t0 = Date.now()
   const whisperxPayload = await invoke<LocalWhisperxTranscriptResponse>('transcribe_local', {
     audioPath,
-    language: 'ja',
+    language: settings.transcribeLanguageCode,
   }).catch((e: unknown) => { throw new Error(`転写失敗: ${String(e)}`) })
   const result = normalizeLocalTranscriptResult(whisperxPayload)
   const managedTraces = toManagedMetadataTraces(result).map((trace) =>
@@ -912,7 +912,7 @@ export async function testServiceConnection(settings: AdminSettings, signal?: Ab
     if (!isTauri()) {
       throw new Error('ローカルWhisperX転写はTauriデスクトップアプリでのみ利用可能です')
     }
-    const message = await invoke<string>('check_local_whisperx')
+    const message = await invoke<string>('check_local_whisperx', { language: settings.transcribeLanguageCode })
     return { ok: true, message }
   } catch (error) {
     return {

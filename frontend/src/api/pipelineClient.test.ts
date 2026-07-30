@@ -1,14 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
+import { invoke } from '@tauri-apps/api/core'
 import { getDefaultAdminSettings } from '@/api/adminSettings'
-import { buildLocalPipelineProgress, runPipelineViaApi } from './pipelineClient'
+import { buildLocalPipelineProgress, runPipelineViaApi, testServiceConnection } from './pipelineClient'
 
 // isTauri()===true にすることで runLocalTranscriptPipeline（ローカルWhisperX経路）を通す。
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => true,
-  invoke: vi.fn(async (cmd: string) => {
+  invoke: vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'extract_audio') return '/tmp/fake-audio.wav'
     if (cmd === 'transcribe_local') {
       return { segments: [{ start: 0, end: 1, text: 'hello', words: [] }] }
+    }
+    if (cmd === 'check_local_whisperx') {
+      return `OK: language=${String(args?.language)}`
     }
     throw new Error(`unexpected invoke: ${cmd}`)
   }),
@@ -56,6 +60,39 @@ describe('runPipelineViaApi llmUsage sink wiring (regression: PipelineRunDebug.l
     ])
     // llmErrorLog も同じ debug オブジェクトに載る（今回は失敗が無いので空配列）。
     expect(result.debug?.llmErrors).toEqual([])
+  })
+})
+
+describe('local WhisperX language selection', () => {
+  it('passes settings.transcribeLanguageCode to the transcribe_local invoke call', async () => {
+    const mockedInvoke = vi.mocked(invoke)
+    mockedInvoke.mockClear()
+
+    const settings = {
+      ...getDefaultAdminSettings(),
+      serviceMode: 'legacy_pipeline' as const,
+      translationProvider: 'openai' as const,
+      openaiApiKey: 'sk-test',
+      transcribeLanguageCode: 'en',
+    }
+
+    await runPipelineViaApi('source.mp4', settings, { path: '/tmp/source.mp4' })
+
+    const transcribeCall = mockedInvoke.mock.calls.find(([cmd]) => cmd === 'transcribe_local')
+    expect(transcribeCall?.[1]).toEqual(expect.objectContaining({ language: 'en' }))
+  })
+
+  it('passes settings.transcribeLanguageCode to the check_local_whisperx invoke call', async () => {
+    const settings = {
+      ...getDefaultAdminSettings(),
+      serviceMode: 'legacy_pipeline' as const,
+      transcribeLanguageCode: 'fr',
+    }
+
+    const result = await testServiceConnection(settings)
+
+    expect(result.ok).toBe(true)
+    expect(result.message).toBe('OK: language=fr')
   })
 })
 

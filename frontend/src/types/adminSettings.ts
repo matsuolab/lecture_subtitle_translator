@@ -81,6 +81,10 @@ export interface AdminSettings {
   expandModel: string
   contextMergeModel: string
   splitJaModel: string
+  // WhisperX の書きおこし言語コード（例 'ja'）。言語ラベル（subtitleLanguageLabel /
+  // transcriptLanguageLabel）はAIプロンプト用の表示名で別物。対応言語は
+  // frontend/src/lib/pipeline/whisperxLanguages.ts の WHISPERX_LANGUAGES を参照。
+  transcribeLanguageCode: string
   subtitleLanguageLabel: string
   transcriptLanguageLabel: string
   languageProfileConfigJson: string

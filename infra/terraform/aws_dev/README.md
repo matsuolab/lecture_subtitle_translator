@@ -65,6 +65,26 @@ Reference docs:
 - https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
 - https://docs.aws.amazon.com/batch/latest/userguide/launch-templates.html
 
+## Transcription language (`whisperx_language`)
+
+`whisperx_language` (default `"ja"`) is passed to the Batch job definition as the `WHISPERX_LANGUAGE`
+environment variable (see `main.tf`), which the worker's embedded WhisperX backend reads to pick the
+transcription language. It is a deployment-wide setting, not a per-job one: every job submitted through
+this Batch job definition transcribes with the same language until the Terraform stack is re-applied
+with a different value.
+
+The worker image (`infra/docker/aws_batch_worker/Dockerfile`) is built from
+`ghcr.io/jim60105/whisperx:large-v3-ja`, so only the Japanese alignment model is baked into the image.
+Whisper itself (`large-v3`) is multilingual, so only the alignment model needs to match the language —
+setting `whisperx_language` to anything other than `ja` makes the worker download that language's
+alignment model at runtime, which requires outbound network access (HuggingFace / torchaudio) from the
+Batch subnet. If the subnet has no outbound path, transcription in a non-`ja` language will fail.
+
+For a permanent switch to another language, rebuild the worker image from the matching base tag (for
+example `ghcr.io/jim60105/whisperx:large-v3-en`), push it, and set `whisperx_language` to match — see
+[Local WhisperX Setup](../../../docs/wiki/Local-WhisperX-Setup.md) for background on the WhisperX
+language/alignment-model relationship.
+
 ## Pull debug with SSM
 
 The next pull test should use Session Manager so the Batch EC2 instance can be inspected while the ECS task is still `PENDING`.

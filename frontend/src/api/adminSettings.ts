@@ -8,6 +8,7 @@ import {
   DEFAULT_TRANSLATION_FEW_SHOT_JSON,
 } from '@/lib/pipeline/prompts'
 import { normalizeConcurrency } from '@/lib/concurrency'
+import { DEFAULT_WHISPERX_LANGUAGE, isSupportedWhisperxLanguage } from '@/lib/pipeline/whisperxLanguages'
 
 const STORAGE_KEY = 'subtitle-editor.admin-settings.v4'
 const ENV_SERVICE_URL = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -98,6 +99,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     expandModel: 'gpt-5.4-mini',
     contextMergeModel: 'gpt-5.4-mini',
     splitJaModel: 'gpt-5.4-nano',
+    transcribeLanguageCode: DEFAULT_WHISPERX_LANGUAGE,
     subtitleLanguageLabel: 'English',
     transcriptLanguageLabel: 'Japanese',
     languageProfileConfigJson: DEFAULT_LANGUAGE_PROFILE_CONFIG_JSON,
@@ -266,6 +268,9 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     expandModel: typeof raw.expandModel === 'string' && raw.expandModel ? raw.expandModel : defaults.expandModel,
     contextMergeModel: typeof raw.contextMergeModel === 'string' && raw.contextMergeModel ? raw.contextMergeModel : defaults.contextMergeModel,
     splitJaModel: typeof raw.splitJaModel === 'string' && raw.splitJaModel ? raw.splitJaModel : defaults.splitJaModel,
+    transcribeLanguageCode: typeof raw.transcribeLanguageCode === 'string' && isSupportedWhisperxLanguage(raw.transcribeLanguageCode)
+      ? raw.transcribeLanguageCode
+      : defaults.transcribeLanguageCode,
     subtitleLanguageLabel: typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel ? raw.subtitleLanguageLabel : defaults.subtitleLanguageLabel,
     transcriptLanguageLabel: typeof raw.transcriptLanguageLabel === 'string' && raw.transcriptLanguageLabel ? raw.transcriptLanguageLabel : defaults.transcriptLanguageLabel,
     languageProfileConfigJson: typeof raw.languageProfileConfigJson === 'string' && raw.languageProfileConfigJson ? raw.languageProfileConfigJson : defaults.languageProfileConfigJson,
