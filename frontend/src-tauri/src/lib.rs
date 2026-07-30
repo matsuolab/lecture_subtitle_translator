@@ -73,7 +73,25 @@ fn configure_webview2_user_data_dir() {
     env::set_var("WEBVIEW2_USER_DATA_FOLDER", user_data_dir);
 }
 
-const GHCR_WHISPERX_IMAGE: &str = "ghcr.io/jim60105/whisperx:large-v3-ja";
+// WhisperX が対応する41言語（アライメントモデル辞書に由来）のホワイトリスト。
+// frontend/src/lib/pipeline/whisperxLanguages.ts の WHISPERX_LANGUAGES と同期させること。
+// 任意文字列をそのまま docker run の引数（イメージタグ）に渡すと注入の余地が生まれるため、
+// ここで検証してから format! する。
+const WHISPERX_LANGUAGES: [&str; 41] = [
+    "ja", "en", "fr", "de", "es", "it", "zh", "nl", "uk", "pt", "ar", "cs", "ru", "pl", "hu", "fi",
+    "fa", "el", "tr", "da", "he", "vi", "ko", "ur", "te", "hi", "ca", "ml", "no", "nn", "sk", "sl",
+    "hr", "ro", "eu", "gl", "ka", "lv", "tl", "sv", "id",
+];
+
+/// WhisperX の言語別 Docker イメージタグ（`ghcr.io/jim60105/whisperx:large-v3-{language}`）を
+/// 組み立てる。モデルサイズは large-v3 に固定（今回のスコープでは言語のみ可変）。
+/// ホワイトリスト外のコードは Err を返す（未知コードがそのまま docker 引数に流れるのを防ぐため）。
+fn whisperx_image(language: &str) -> Result<String, String> {
+    if !WHISPERX_LANGUAGES.contains(&language) {
+        return Err(format!("unsupported WhisperX language code: {language}"));
+    }
+    Ok(format!("ghcr.io/jim60105/whisperx:large-v3-{language}"))
+}
 
 #[derive(Default)]
 struct LocalBackendState {
@@ -358,7 +376,9 @@ async fn http_request(options: HttpRequestOptions) -> Result<HttpResponsePayload
 }
 
 #[tauri::command]
-fn check_local_whisperx() -> Result<String, String> {
+fn check_local_whisperx(language: String) -> Result<String, String> {
+    let image = whisperx_image(&language)?;
+
     let mut docker_info = Command::new("docker");
     docker_info.args(["info", "--format", "{{.ServerVersion}}"]);
     docker_info.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -377,7 +397,7 @@ fn check_local_whisperx() -> Result<String, String> {
     let docker_version = String::from_utf8_lossy(&info_output.stdout).trim().to_string();
 
     let mut inspect = Command::new("docker");
-    inspect.args(["image", "inspect", "--format", "{{.Id}}", GHCR_WHISPERX_IMAGE]);
+    inspect.args(["image", "inspect", "--format", "{{.Id}}", &image]);
     inspect.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     {
@@ -387,11 +407,11 @@ fn check_local_whisperx() -> Result<String, String> {
     let inspect_output = run_command_output(&mut inspect, "docker image inspect")?;
     if inspect_output.status.success() {
         Ok(format!(
-            "OK: Docker {docker_version} / イメージ {GHCR_WHISPERX_IMAGE} はローカルに存在します"
+            "OK: Docker {docker_version} / イメージ {image} はローカルに存在します"
         ))
     } else {
         Ok(format!(
-            "OK: Docker {docker_version} / イメージ未取得。初回転写時に自動で pull されます（約10GB）: {GHCR_WHISPERX_IMAGE}"
+            "OK: Docker {docker_version} / イメージ未取得。初回の書きおこし時に自動で pull されます（約10GB）: {image}"
         ))
     }
 }
@@ -405,7 +425,8 @@ async fn transcribe_local(audio_path: String, language: String) -> Result<serde_
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-fn run_whisperx_cli(audio_path: &str, _language: &str) -> Result<serde_json::Value, String> {
+fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Value, String> {
+    let image = whisperx_image(language)?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -427,7 +448,7 @@ fn run_whisperx_cli(audio_path: &str, _language: &str) -> Result<serde_json::Val
         "--gpus", "all",
         "-v", &audio_mount,
         "-v", &output_mount,
-        GHCR_WHISPERX_IMAGE,
+        &image,
         "--",              // /bin/sh -c "whisperx $@" の $0 に食われるダミー
         "/audio/input.wav",
         "--output_format", "json",
@@ -454,7 +475,7 @@ fn run_whisperx_cli(audio_path: &str, _language: &str) -> Result<serde_json::Val
                 .collect::<Vec<_>>()
                 .join("\n");
             return Err(format!(
-                "whisperx transcription failed\naudio_mount: {audio_mount}\noutput_mount: {output_mount}\n{details}"
+                "whisperx transcription failed\nimage: {image}\naudio_mount: {audio_mount}\noutput_mount: {output_mount}\n{details}"
             ));
         }
         let result_path = output_dir.join("input.json");
@@ -831,5 +852,41 @@ fn resolve_repo_root() -> Result<PathBuf, String> {
         Err(String::from(
             "packaged local legacy backend is not bundled yet; use managed service or run the backend manually",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::whisperx_image;
+
+    #[test]
+    fn whisperx_image_returns_expected_tag_for_ja() {
+        assert_eq!(
+            whisperx_image("ja").unwrap(),
+            "ghcr.io/jim60105/whisperx:large-v3-ja"
+        );
+    }
+
+    #[test]
+    fn whisperx_image_returns_expected_tag_for_en() {
+        assert_eq!(
+            whisperx_image("en").unwrap(),
+            "ghcr.io/jim60105/whisperx:large-v3-en"
+        );
+    }
+
+    #[test]
+    fn whisperx_image_rejects_unknown_code() {
+        assert!(whisperx_image("xx").is_err());
+    }
+
+    #[test]
+    fn whisperx_image_rejects_empty_string() {
+        assert!(whisperx_image("").is_err());
+    }
+
+    #[test]
+    fn whisperx_image_rejects_injection_like_value() {
+        assert!(whisperx_image("; rm -rf").is_err());
     }
 }

@@ -29,6 +29,7 @@ import {
 } from '@/lib/pipeline/textNormalization'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { getWorkLogDir, isWorkLogPersistent, openWorkLogDir } from '@/lib/worklog/repository'
+import { isSupportedWhisperxLanguage, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -1178,6 +1179,37 @@ export function SettingsTab({
             title="言語ラベル"
             hint="AIへのプロンプトで使う、書き起こし（翻訳元）と字幕（翻訳先）の言語名です。どの言語からどの言語へ変換するかをモデルに伝えます。"
           />
+          {adminSettings.serviceMode === 'legacy_pipeline' ? (
+            <>
+              <SelectField
+                theme={theme}
+                label="書きおこし音声の言語（WhisperX）"
+                value={adminSettings.transcribeLanguageCode}
+                onChange={(value) => onAdminSettingsChange({ transcribeLanguageCode: value })}
+                options={WHISPERX_LANGUAGES.map((lang) => ({ value: lang.code, label: `${lang.labelJa} (${lang.code})` }))}
+              />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                この設定は実行先が「このPCで実行」のときだけ有効です。
+                WhisperXが対応する41言語（アライメントモデルがある言語）のみ選べます。
+                言語を変えると初回に言語別Dockerイメージ（約10GB）のダウンロードが発生します。
+                併せて下の「書き起こし言語ラベル」もAIプロンプト用の表示名として同じ言語に変更してください（ラベルは別設定です）。
+                {/* 実際に docker run されるタグは Rust 側（lib.rs の whisperx_image）が組み立てる。
+                    ここは「どのイメージが落ちてくるか」を利用者に見せるための表示専用。 */}
+                <div style={{ marginTop: 4, fontFamily: 'monospace' }}>
+                  使用イメージ: {isSupportedWhisperxLanguage(adminSettings.transcribeLanguageCode)
+                    ? resolveWhisperxImage(adminSettings.transcribeLanguageCode)
+                    : '—'}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+              実行先が「AWS / リモート実行」の場合、書きおこしの言語はアプリからは変更できません。
+              接続先サーバー側の設定（AWS Batch ジョブ定義の環境変数 <code>WHISPERX_LANGUAGE</code>）で決まります。
+              変更したい場合は管理者向けドキュメント（ローカルWhisperXセットアップ／設定リファレンス）を参照してください。
+              下の「書き起こし言語ラベル」はAIプロンプト用の表示名なので、サーバー側の書きおこし言語に合わせて設定してください。
+            </div>
+          )}
           <Field
             theme={theme}
             label="字幕言語ラベル"
@@ -2095,7 +2127,7 @@ function NumberField({
   )
 }
 
-function SelectField({
+function SelectField<T extends string>({
   theme,
   label,
   value,
@@ -2104,16 +2136,16 @@ function SelectField({
 }: {
   theme: Theme
   label: string
-  value: TranslationProvider
-  onChange: (value: TranslationProvider) => void
-  options: Array<{ value: TranslationProvider; label: string }>
+  value: T
+  onChange: (value: T) => void
+  options: Array<{ value: T; label: string }>
 }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>{label}</span>
       <select
         value={value}
-        onChange={(e) => onChange(e.target.value as TranslationProvider)}
+        onChange={(e) => onChange(e.target.value as T)}
         style={{
           width: '100%',
           padding: '10px 12px',
