@@ -345,6 +345,22 @@ describe('__testing.trimEnvelopeByScore', () => {
     const asr: AsrChar[] = [makeChar('A', 0, 1, 0.1), makeChar('B', 1, 2, 0.1)]
     expect(__testing.trimEnvelopeByScore(asr, 0, 1)).toEqual([0, 1])
   })
+
+  it('修正1: 低スコアが大半を占めていても、削れる量は上限（左右合計50%）で止まり包絡が潰れない', () => {
+    // 実測(Inside Anthropicのキュー id=350, 10文字)を模す: 一致範囲10文字のうち9文字が
+    // LOW_SCORE_THRESHOLD(0.2)未満で、上限が無い実装だと単一の高スコア文字(index8)にまで
+    // 潰れてしまう（旧実装では0.04秒相当まで潰れ、12.21秒あった包絡を失っていた）。
+    const scores = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.9, 0.1]
+    const asr: AsrChar[] = scores.map((score, i) => makeChar('x', i, i + 1, score))
+
+    const [left, right] = __testing.trimEnvelopeByScore(asr, 0, 9)
+
+    // 上限（片側 floor(10*0.25)=2文字）で止まるため、range長10のうち左2・右1文字しか
+    // 削れず、7文字（70%）残る。上限が無ければ [8,8] （10%）まで潰れていた。
+    expect(left).toBe(2)
+    expect(right).toBe(8)
+    expect(right - left + 1).toBeGreaterThanOrEqual(5) // 50%以上残ること
+  })
 })
 
 describe('外れ値ガード（buildProvisionalSpans: 逆行除去・かたまり分割・包絡伸長）', () => {
@@ -473,6 +489,100 @@ describe('外れ値ガード（buildProvisionalSpans: 逆行除去・かたま�
   })
 })
 
+describe('修正3: 包絡伸長のギャップ吸収（extendEnvelopes / MAX_GAP_ABSORB_SEC）', () => {
+  it('1. 未対応文字がある側で、2.0秒以内の空き領域が丸ごと取り込まれる', () => {
+    // cue0(chars0-4)は5文字すべて一致(asrIndex0-4、各1秒)。cue1(chars5-9)は先頭1文字
+    // (cueCharIndex5)だけ未対応で、残り4文字(6-9)がasrIndex11-14に一致する。
+    // asrIndex5-10の6文字は誰にも対応しない「空き領域」で、合計1.5秒（各0.25秒）しかない。
+    // 文字数ベースの伸長(未対応1文字ぶん)だけでは空き領域の一部しか埋まらないため、
+    // 2.0秒以内の空き領域は丸ごと取り込む。
+    const asr: AsrChar[] = [
+      makeChar('a', 0, 1),
+      makeChar('b', 1, 2),
+      makeChar('c', 2, 3),
+      makeChar('d', 3, 4),
+      makeChar('e', 4, 5), // cue0 matched (asrIndex0-4)
+      makeChar('f', 5, 5.25),
+      makeChar('g', 5.25, 5.5),
+      makeChar('h', 5.5, 5.75),
+      makeChar('i', 5.75, 6.0),
+      makeChar('j', 6.0, 6.25),
+      makeChar('k', 6.25, 6.5), // asrIndex5-10: 空き領域(1.5秒)
+      makeChar('l', 6.5, 7.5),
+      makeChar('m', 7.5, 8.5),
+      makeChar('n', 8.5, 9.5),
+      makeChar('o', 9.5, 10.5), // cue1 matched (asrIndex11-14)
+    ]
+    const globalMatches = new Map<number, number>()
+    for (let k = 0; k <= 4; k += 1) globalMatches.set(k, k) // cue0: chars0-4 -> asrIndex0-4
+    for (let k = 6; k <= 9; k += 1) globalMatches.set(k, 11 + (k - 6)) // cue1: chars6-9 -> asrIndex11-14
+    const cueBounds = [{ start: 0, end: 5 }, { start: 5, end: 10 }]
+
+    const [span0, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    expect(span0.lastCharIndex).toBe(4) // cue0は完全一致(trailingUnmatched=0)なので伸びない
+    // cue1の先頭は空き領域(asrIndex5)まで丸ごと伸びる（1.5秒 <= MAX_GAP_ABSORB_SEC）。
+    expect(span1.firstCharIndex).toBe(5)
+    expect(span1.startSec).toBeCloseTo(5.0, 5)
+  })
+
+  it('2. 空き領域が2.0秒を超える場合は、従来どおり未対応文字数ぶんの伸長にとどまる', () => {
+    // 1と同じ構造だが、空き領域(asrIndex5-10)を各1秒・合計6秒にして2.0秒を超えさせる。
+    const asr: AsrChar[] = [
+      makeChar('a', 0, 1),
+      makeChar('b', 1, 2),
+      makeChar('c', 2, 3),
+      makeChar('d', 3, 4),
+      makeChar('e', 4, 5), // cue0 matched (asrIndex0-4)
+      makeChar('f', 5, 6),
+      makeChar('g', 6, 7),
+      makeChar('h', 7, 8),
+      makeChar('i', 8, 9),
+      makeChar('j', 9, 10),
+      makeChar('k', 10, 11), // asrIndex5-10: 空き領域(6秒 > 2.0秒)
+      makeChar('l', 11, 12),
+      makeChar('m', 12, 13),
+      makeChar('n', 13, 14),
+      makeChar('o', 14, 15), // cue1 matched (asrIndex11-14)
+    ]
+    const globalMatches = new Map<number, number>()
+    for (let k = 0; k <= 4; k += 1) globalMatches.set(k, k)
+    for (let k = 6; k <= 9; k += 1) globalMatches.set(k, 11 + (k - 6))
+    const cueBounds = [{ start: 0, end: 5 }, { start: 5, end: 10 }]
+
+    const [, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    // 未対応文字数(1文字)ぶんだけ伸びる: asrIndex11 -> 10（空き領域の全体(5)までは届かない）。
+    expect(span1.firstCharIndex).toBe(10)
+    expect(span1.startSec).toBeCloseTo(10, 5)
+  })
+
+  it('3. 未対応文字が0の側は、隣接に空き領域があっても絶対に伸びない', () => {
+    // cue0は完全一致（trailingUnmatched=0）。直後に1.5秒の空き領域があっても、
+    // 未対応文字を持たない側を伸ばすと二重表示や無音表示になるため伸びてはいけない。
+    const asr: AsrChar[] = [
+      makeChar('a', 0, 1),
+      makeChar('b', 1, 2),
+      makeChar('c', 2, 3),
+      makeChar('d', 3, 4),
+      makeChar('e', 4, 5), // cue0 matched (asrIndex0-4), 完全一致
+      makeChar('f', 5, 5.5),
+      makeChar('g', 5.5, 6.0),
+      makeChar('h', 6.0, 6.5), // asrIndex5-7: 空き領域(1.5秒)
+      makeChar('i', 6.5, 7.5),
+      makeChar('j', 7.5, 8.5),
+    ]
+    const globalMatches = new Map<number, number>()
+    for (let k = 0; k <= 4; k += 1) globalMatches.set(k, k) // cue0: chars0-4 -> asrIndex0-4（完全一致）
+    const cueBounds = [{ start: 0, end: 5 }]
+
+    const [span0] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    expect(span0.lastCharIndex).toBe(4)
+    expect(span0.endSec).toBeCloseTo(5, 5)
+  })
+})
+
 describe('重なり解消の非対称化（enforceMonotonicSpans）', () => {
   it('6a. 重なり時、前のキューは不変で後ろのキューの開始が前のendSecに揃えられる', () => {
     const spans = [
@@ -496,6 +606,82 @@ describe('重なり解消の非対称化（enforceMonotonicSpans）', () => {
 
     expect(result[0]).toEqual({ startSec: 10, endSec: 50 }) // 前のキューは長さ0にならない
     expect(result[1]).toEqual({ startSec: 50, endSec: 50 })
+  })
+})
+
+interface ProvisionalOverrides {
+  startSec?: number | null
+  endSec?: number | null
+  matchedChars?: number
+  totalChars?: number
+  needsInterpolation?: boolean
+  firstCharIndex?: number | null
+  lastCharIndex?: number | null
+  leadingUnmatched?: number
+  trailingUnmatched?: number
+}
+
+function makeProvisional(overrides: ProvisionalOverrides = {}) {
+  return {
+    startSec: null,
+    endSec: null,
+    matchedChars: 0,
+    totalChars: 1,
+    needsInterpolation: true,
+    firstCharIndex: null,
+    lastCharIndex: null,
+    leadingUnmatched: 0,
+    trailingUnmatched: 0,
+    ...overrides,
+  }
+}
+
+describe('修正2: 補間スロットの退化ガード（distributeRun / interpolateSpans）', () => {
+  it('1. 補間先レンジが反転していても、対象キューが有効な包絡を持っていればそちらが採用される', () => {
+    // 実測(PhyAI05のキュー id=274)を模す: 包絡[2026.584, 2028.645]（2.06秒）を正常に得て
+    // いたが、一致率(32%)が閾値(35%)を割ったため補間対象になった。補間先の区間は
+    // 「前キューの終了2025.344」〜「次キューの開始2024.324」で反転しており、
+    // 何もしなければ幅0のスロットに配置されてしまう。
+    const provisional = [
+      makeProvisional({ needsInterpolation: false, startSec: 2020, endSec: 2025.344 }),
+      makeProvisional({
+        needsInterpolation: true,
+        matchedChars: 10,
+        totalChars: 31,
+        startSec: 2026.584,
+        endSec: 2028.645,
+      }),
+      makeProvisional({ needsInterpolation: false, startSec: 2024.324, endSec: 2030 }),
+    ]
+    const asr: AsrChar[] = [makeChar('x', 2020, 2030)]
+
+    const results = __testing.interpolateSpans(provisional, asr)
+
+    // 反転区間に押し込められた幅0のスロットではなく、provisionalの有効な包絡が採用される。
+    expect(results[1]).toEqual({ startSec: 2026.584, endSec: 2028.645 })
+  })
+
+  it('2. 補間対象キューが有効な包絡を持たない場合は、従来どおり区間内に比例配分される（非退行）', () => {
+    const provisional = [
+      makeProvisional({ needsInterpolation: false, startSec: 0, endSec: 10 }),
+      makeProvisional({ needsInterpolation: true, matchedChars: 0, totalChars: 5, startSec: null, endSec: null }),
+      makeProvisional({ needsInterpolation: false, startSec: 20, endSec: 30 }),
+    ]
+    const asr: AsrChar[] = [makeChar('x', 0, 30)]
+
+    const results = __testing.interpolateSpans(provisional, asr)
+
+    expect(results[1].startSec).toBeCloseTo(10, 5)
+    expect(results[1].endSec).toBeCloseTo(20, 5)
+  })
+
+  it('3. distributeRun: rangeEnd < rangeStart（反転）でも例外にならず、rangeStart基準の0幅に正規化される', () => {
+    const provisional = [makeProvisional({ needsInterpolation: true, totalChars: 5, startSec: null, endSec: null })]
+    const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 0 }]
+
+    __testing.distributeRun(provisional, results, 0, 1, 100, 90)
+
+    expect(results[0]).toEqual({ startSec: 100, endSec: 100 })
   })
 })
 

@@ -86,6 +86,29 @@ const MIN_MATCHED_CHARS_RATIO = 0.35
 //   - 両者の間（18〜49）の中間である30を閾値に採る。
 const EXCESS_SPLIT_THRESHOLD = 30
 
+// trimEnvelopeByScore が左右それぞれから内側へ寄せてよい文字数の上限（範囲長に対する比率）。
+// 根拠: Inside Anthropicのキュー(id=350, 10文字)で、一致範囲10文字のうち大半が
+// LOW_SCORE_THRESHOLD未満だったため、上限が無い実装だと包絡がfirstCharIndex=lastCharIndex
+// （ASR1文字ぶん=0.04秒）まで潰れた（旧実装では12.21秒）。低スコア端点のトリム自体は
+// 有用だが、一致している文字を丸ごと切り捨てて0秒キューを作るのは字幕として明確な
+// 不具合のため、左右合わせて元の範囲長の50%（片側25%）までしか削らないよう制限する。
+const TRIM_MAX_RATIO_PER_SIDE = 0.25
+
+// MIN_SPAN_SEC: 補間で配分されたスロットの幅がこの値未満なら「退化」とみなす閾値。
+// semanticSplitJa.ts の toAlignedUnit / distributeAssignedRun が
+// `Math.max(span.startSec + 0.05, span.endSec)` で使っている下限(0.05秒)と揃えている
+// （最終的に表示される字幕の最小幅としてすでに合意されている値のため）。
+const MIN_SPAN_SEC = 0.05
+
+// extendEnvelopes が「未対応文字を持つ側」に限り、隣接キューの採用範囲との間に空いている
+// ASR領域を丸ごと取り込んでよい上限（秒）。
+// 根拠: Inside Anthropicで4件・DL講義day4で4件、「字幕テキストが持つ文字なのに包絡が
+// 届かず発話中に字幕が出ない」区間が残っていた。現在の伸長は未対応キュー文字数ぶんだけ
+// ASR側を伸ばすため、言い換えやASR側のフィラー混入でASR側の未カバー領域の方が長い場合に
+// 届かない。2.0秒以内なら「同じ発話が続いている隙間」とみなして丸ごと取り込み、それを
+// 超える場合は無関係な発話区間まで飲み込むリスクがあるため従来どおり文字数ぶんに留める。
+const MAX_GAP_ABSORB_SEC = 2.0
+
 interface ResolvedOptions {
   windowChars: number
   windowMarginChars: number
@@ -320,14 +343,22 @@ function buildGlobalMatches(
  * 先に「範囲内が全部低スコアか」を独立判定してから左右を寄せる。そうしないと、
  * 左スキャンが `left < maxA` の境界で止まった位置（=右端そのもの）がたまたま
  * 低スコアのままでも「寄せ終わった」と誤認してしまう（境界のオフバイワン）。
+ *
+ * 削れる量には上限を設ける（TRIM_MAX_RATIO_PER_SIDE参照）。一致範囲の大半が低スコアな
+ * だけで、実際には一致している文字を丸ごと切り捨てて0秒キューを作ってしまうことがある
+ * （実測: Inside Anthropicのid=350）ため、左右合わせて元の範囲長の50%までしか削らない。
  */
 function trimEnvelopeByScore(asr: readonly AsrChar[], minA: number, maxA: number): [number, number] {
   const allLow = asr.slice(minA, maxA + 1).every(c => c.score < LOW_SCORE_THRESHOLD)
   if (allLow) return [minA, maxA]
+  const len = maxA - minA + 1
+  const maxTrimPerSide = Math.floor(len * TRIM_MAX_RATIO_PER_SIDE)
+  const leftLimit = minA + maxTrimPerSide
+  const rightLimit = maxA - maxTrimPerSide
   let left = minA
-  while (left < maxA && asr[left].score < LOW_SCORE_THRESHOLD) left += 1
+  while (left < maxA && left < leftLimit && asr[left].score < LOW_SCORE_THRESHOLD) left += 1
   let right = maxA
-  while (right > left && asr[right].score < LOW_SCORE_THRESHOLD) right -= 1
+  while (right > left && right > rightLimit && asr[right].score < LOW_SCORE_THRESHOLD) right -= 1
   return [left, right]
 }
 
@@ -458,8 +489,52 @@ function adoptedLastCharIndex(info: ProvisionalSpanInfo | undefined): number | n
 }
 
 /**
+ * 開始側の伸長先インデックスを決める。
+ *
+ * 未対応文字が無い側（leadingUnmatched === 0）は絶対に伸ばさない。そこはLLMが削除した
+ * 内容や無音であり、伸ばすと二重表示や無音表示になる（実測で「触ってはいけない欠落」
+ * 51件・「伸ばすべきもの」11件と切り分け済み）。
+ *
+ * 未対応文字がある場合、隣（lowerBound）との間に空いているASR領域が MAX_GAP_ABSORB_SEC
+ * 以内なら丸ごと取り込む（言い換えやフィラー混入でASR側の未カバー領域がキュー側の
+ * 未対応文字数より長いケースの救済）。それを超える場合は従来どおり未対応文字数ぶんの
+ * 伸長にとどめる。
+ */
+function resolveExtendedLeftIdx(
+  info: ProvisionalSpanInfo,
+  asr: readonly AsrChar[],
+  firstCharIndex: number,
+  lowerBound: number,
+): number {
+  if (info.leadingUnmatched <= 0) return firstCharIndex
+  const gapStartIdx = Math.max(lowerBound, 0)
+  if (gapStartIdx < firstCharIndex) {
+    const gapSec = asr[firstCharIndex].start - asr[gapStartIdx].start
+    if (gapSec > 0 && gapSec <= MAX_GAP_ABSORB_SEC) return gapStartIdx
+  }
+  return Math.min(firstCharIndex, Math.max(lowerBound, firstCharIndex - info.leadingUnmatched, 0))
+}
+
+/** 終了側の伸長先インデックスを決める。resolveExtendedLeftIdx の対称版。 */
+function resolveExtendedRightIdx(
+  info: ProvisionalSpanInfo,
+  asr: readonly AsrChar[],
+  lastCharIndex: number,
+  upperBound: number,
+): number {
+  if (info.trailingUnmatched <= 0) return lastCharIndex
+  const gapEndIdx = Math.min(upperBound, asr.length - 1)
+  if (gapEndIdx > lastCharIndex) {
+    const gapSec = asr[gapEndIdx].end - asr[lastCharIndex].end
+    if (gapSec > 0 && gapSec <= MAX_GAP_ABSORB_SEC) return gapEndIdx
+  }
+  return Math.max(lastCharIndex, Math.min(upperBound, lastCharIndex + info.trailingUnmatched, asr.length - 1))
+}
+
+/**
  * 採用したかたまりの先頭/末尾がキュー自身の先頭/末尾に届いていない場合、その未対応
- * 文字数（leadingUnmatched/trailingUnmatched）ぶんだけ包絡をASR側で伸ばす。
+ * 文字数（leadingUnmatched/trailingUnmatched）ぶん、または隣接ASR領域が2.0秒以内の
+ * 空きなら丸ごと、包絡をASR側で伸ばす（resolveExtendedLeftIdx/resolveExtendedRightIdx参照）。
  * ただし隣キューの採用範囲には食い込ませない（隣が補間対象なら制約なし）。
  * 伸長は常に「外側へ広げる」方向のみ（Math.min/maxで、採用済みの核を縮める側には動かさない）。
  */
@@ -474,8 +549,8 @@ function extendEnvelopes(provisional: readonly ProvisionalSpanInfo[], asr: reado
     const nextFirst = adoptedFirstCharIndex(provisional[index + 1])
     const lowerBound = prevLast !== null ? prevLast + 1 : 0
     const upperBound = nextFirst !== null ? nextFirst - 1 : asr.length - 1
-    const newLeftIdx = Math.min(firstCharIndex, Math.max(lowerBound, firstCharIndex - info.leadingUnmatched, 0))
-    const newRightIdx = Math.max(lastCharIndex, Math.min(upperBound, lastCharIndex + info.trailingUnmatched, asr.length - 1))
+    const newLeftIdx = resolveExtendedLeftIdx(info, asr, firstCharIndex, lowerBound)
+    const newRightIdx = resolveExtendedRightIdx(info, asr, lastCharIndex, upperBound)
     if (newLeftIdx === firstCharIndex && newRightIdx === lastCharIndex) return info
     return {
       ...info,
@@ -500,6 +575,17 @@ function buildProvisionalSpans(
  * [from, to) の区間（すべて interpolation 対象）を、正規化後の文字数比で
  * [rangeStart, rangeEnd] の間に線形配分する。27秒窓の比例配分とは異なり、
  * 直前・直後の「確定済みキュー」の実時刻を境界にする。
+ *
+ * rangeEnd が rangeStart を下回る（反転している）ことがある。実測（PhyAI05 id=274）:
+ * 補間先が「前キューの終了」〜「次キューの開始」だったが、次キューの包絡が前キューと
+ * 重なっていたため区間が反転し、幅0の退化スロットが生まれた。rangeStart 自体は
+ * 常に信頼できる値（直前の確定キューのendSecまたはフォールバック）なので、それを
+ * 基準に0幅として正規化する。
+ *
+ * 配分されたスロットが退化（幅 < MIN_SPAN_SEC）していても、対象キューが provisional に
+ * 有効な包絡（startSec/endSec が非null）を持っていれば、退化スロットの代わりにそちらを
+ * 採用する。一致率不足で補間対象に落ちただけで、実際にはASR上で妥当な包絡が求まっている
+ * キューを、たまたま配置された反転区間で0秒キューにしてしまわないためのガード。
  */
 function distributeRun(
   provisional: readonly ProvisionalSpanInfo[],
@@ -507,17 +593,25 @@ function distributeRun(
   from: number,
   to: number,
   rangeStart: number,
-  rangeEnd: number,
+  rawRangeEnd: number,
 ): void {
+  const rangeEnd = Math.max(rangeStart, rawRangeEnd)
   const chunk = provisional.slice(from, to)
   const totalChunkChars = chunk.reduce((sum, item) => sum + Math.max(1, item.totalChars), 0)
   const span = Math.max(0, rangeEnd - rangeStart)
   let cursor = rangeStart
   for (let k = from; k < to; k += 1) {
-    const share = Math.max(1, provisional[k].totalChars) / Math.max(1, totalChunkChars)
+    const info = provisional[k]
+    const share = Math.max(1, info.totalChars) / Math.max(1, totalChunkChars)
     const isLast = k === to - 1
     const end = isLast ? rangeEnd : cursor + span * share
-    results[k] = { startSec: cursor, endSec: Math.max(cursor, end) }
+    const slotStart = cursor
+    const slotEnd = Math.max(cursor, end)
+    const isDegenerate = slotEnd - slotStart < MIN_SPAN_SEC
+    results[k] =
+      isDegenerate && info.startSec !== null && info.endSec !== null
+        ? { startSec: info.startSec, endSec: info.endSec }
+        : { startSec: slotStart, endSec: slotEnd }
     cursor = end
   }
 }
@@ -621,5 +715,8 @@ export const __testing = {
   longestNonDecreasingSubsequence,
   selectLargestCluster,
   buildProvisionalSpans,
+  extendEnvelopes,
+  distributeRun,
+  interpolateSpans,
   enforceMonotonicSpans,
 }
