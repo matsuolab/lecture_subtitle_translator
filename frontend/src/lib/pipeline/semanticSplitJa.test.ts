@@ -239,6 +239,12 @@ describe('semanticSplitJa 統合: 親スパンが interpolated（firstCharIndex 
   const anchorAfterText = 'い'.repeat(10)
   // ASRに存在しない40文字のテキスト（'あ'/'い' と一切重ならない漢字の繰り返し）。
   const unrelatedOverlongText = '無関係'.repeat(10)
+  // アンカー間を埋める「発話はあるがキューのテキストと一致しない」ASR（LLMが大きく書き換えた区間の再現）。
+  // ここにトークンを置かないと 5〜21秒が完全な無音になり、補間はその区間を配分対象にしない
+  // （実データで304秒の休憩区間にキューが配置された不具合の修正による正しい挙動）。
+  // このテストが検証したいのは「発話がある区間で対応が付かなかったキュー」の分割挙動なので、
+  // 無音ではなく未一致の発話としてフィクスチャを組む。
+  const unmatchedSpeechText = 'ゑ'.repeat(100)
 
   const segments: TranscriptSegment[] = [
     {
@@ -250,6 +256,20 @@ describe('semanticSplitJa 統合: 親スパンが interpolated（firstCharIndex 
     },
     {
       id: 2,
+      start: 5,
+      end: 15,
+      text: unmatchedSpeechText,
+      // 1単語にまとめると duration が 0.6秒でCAPされ（wordToChars 参照）100文字が
+      // 5.0〜5.6秒に圧縮されてしまうため、0.1秒刻みの個別トークンとして与える。
+      words: Array.from({ length: unmatchedSpeechText.length }, (_, i) => ({
+        word: 'ゑ',
+        start: 5 + i * 0.1,
+        end: 5 + i * 0.1 + 0.08,
+        score: 1,
+      })),
+    },
+    {
+      id: 3,
       start: 21,
       end: 22,
       text: anchorAfterText,
@@ -260,7 +280,7 @@ describe('semanticSplitJa 統合: 親スパンが interpolated（firstCharIndex 
   const units = [
     makeRawUnit(1, anchorBeforeText, 'anchorBefore'),
     makeRawUnit(1, unrelatedOverlongText, 'mid'),
-    makeRawUnit(2, anchorAfterText, 'anchorAfter'),
+    makeRawUnit(3, anchorAfterText, 'anchorAfter'),
   ]
 
   it('前提: mid ユニットは interpolated（ASR実測にアンカーできない）で、閾値超過になる', () => {
