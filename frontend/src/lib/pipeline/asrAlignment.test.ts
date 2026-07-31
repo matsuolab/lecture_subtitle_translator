@@ -21,6 +21,10 @@ function makeChar(char: string, start: number, end: number, score = 1): AsrChar 
   return { char, start, end, score }
 }
 
+// asrAlignment.ts の MIN_SPAN_SEC（非公開定数）と同じ値。借用後に直前/直後キューへ
+// 最低限残るべき幅を検証するテストで使う（値そのものはモジュール側の定義が正）。
+const MIN_SPAN_SEC_FOR_TEST = 0.05
+
 interface FixtureWord {
   word: string
   start: number
@@ -636,14 +640,22 @@ function makeProvisional(overrides: ProvisionalOverrides = {}) {
   }
 }
 
-describe('修正2: 補間スロットの退化ガード（distributeRun / interpolateSpans）', () => {
-  it('1. 補間先レンジが反転していても、対象キューが有効な包絡を持っていればそちらが採用される', () => {
-    // 実測(PhyAI05のキュー id=274)を模す: 包絡[2026.584, 2028.645]（2.06秒）を正常に得て
-    // いたが、一致率(32%)が閾値(35%)を割ったため補間対象になった。補間先の区間は
-    // 「前キューの終了2025.344」〜「次キューの開始2024.324」で反転しており、
-    // 何もしなければ幅0のスロットに配置されてしまう。
+describe('修正2: 補間スロットの退化ガード（distributeRun / interpolateSpans、索引空間版）', () => {
+  it('1. 索引の余地はあるが極小スロットに配分される場合、対象キューが有効な包絡を持っていればそちらが採用される', () => {
+    // 索引空間で按分した結果、極小スロット（幅 < MIN_SPAN_SEC）になっても、対象キューが
+    // provisionalに有効な包絡を持っていれば（一致率不足で補間対象に落ちただけの場合）、
+    // そちらを優先する（resolveSlotのガード）。asr[0..2]の3トークン(2020-2020.03、幅0.03秒)
+    // が索引の余地で、asr[3](2030-2035)が直後キューの採用トークン。
+    const asr: AsrChar[] = [
+      makeChar('a', 2020, 2020.01),
+      makeChar('b', 2020.01, 2020.02),
+      makeChar('c', 2020.02, 2020.03),
+      makeChar('d', 2030, 2035),
+    ]
+    // 直前キューはlastCharIndexを持たない（rangeStartIdx=0）。直後キューはfirstCharIndex=3
+    // を持つ（rangeEndIdx=2）ため、索引の余地(0-2の3トークン)自体はある。
     const provisional = [
-      makeProvisional({ needsInterpolation: false, startSec: 2020, endSec: 2025.344 }),
+      makeProvisional({ needsInterpolation: false, startSec: 2019, endSec: 2020, firstCharIndex: null, lastCharIndex: null }),
       makeProvisional({
         needsInterpolation: true,
         matchedChars: 10,
@@ -651,37 +663,229 @@ describe('修正2: 補間スロットの退化ガード（distributeRun / interp
         startSec: 2026.584,
         endSec: 2028.645,
       }),
-      makeProvisional({ needsInterpolation: false, startSec: 2024.324, endSec: 2030 }),
+      makeProvisional({ needsInterpolation: false, startSec: 2030, endSec: 2035, firstCharIndex: 3, lastCharIndex: null }),
     ]
-    const asr: AsrChar[] = [makeChar('x', 2020, 2030)]
 
     const results = __testing.interpolateSpans(provisional, asr)
 
-    // 反転区間に押し込められた幅0のスロットではなく、provisionalの有効な包絡が採用される。
+    // rangeStartIdx=0, rangeEndIdx=2（firstCharIndex(3)-1）で索引の余地はあるが、
+    // 3トークン(2020-2020.03)の幅は0.03秒しかなくMIN_SPAN_SEC(0.05)未満の極小スロットに
+    // なる。provisionalの有効な包絡[2026.584, 2028.645]が代わりに採用される。
     expect(results[1]).toEqual({ startSec: 2026.584, endSec: 2028.645 })
   })
 
-  it('2. 補間対象キューが有効な包絡を持たない場合は、従来どおり区間内に比例配分される（非退行）', () => {
-    const provisional = [
-      makeProvisional({ needsInterpolation: false, startSec: 0, endSec: 10 }),
-      makeProvisional({ needsInterpolation: true, matchedChars: 0, totalChars: 5, startSec: null, endSec: null }),
-      makeProvisional({ needsInterpolation: false, startSec: 20, endSec: 30 }),
+  it('2. 補間対象キューが有効な包絡を持たない場合は、索引空間で区間内に比例配分される（非退行）', () => {
+    const asr: AsrChar[] = [
+      makeChar('a', 0, 5),
+      makeChar('b', 5, 10),
+      makeChar('c', 10, 15),
+      makeChar('d', 15, 20),
+      makeChar('e', 20, 25),
+      makeChar('f', 25, 30),
     ]
-    const asr: AsrChar[] = [makeChar('x', 0, 30)]
+    const provisional = [
+      makeProvisional({ needsInterpolation: false, startSec: 0, endSec: 10, firstCharIndex: 0, lastCharIndex: 1 }),
+      makeProvisional({ needsInterpolation: true, matchedChars: 0, totalChars: 5, startSec: null, endSec: null }),
+      makeProvisional({ needsInterpolation: false, startSec: 20, endSec: 30, firstCharIndex: 4, lastCharIndex: 5 }),
+    ]
 
     const results = __testing.interpolateSpans(provisional, asr)
 
+    // rangeStartIdx=2(lastCharIndex1+1), rangeEndIdx=3(firstCharIndex4-1) の2トークン
+    // (asrIndex2,3 = 10-20秒)がまるごとこの1キューに配分される。
     expect(results[1].startSec).toBeCloseTo(10, 5)
     expect(results[1].endSec).toBeCloseTo(20, 5)
   })
 
-  it('3. distributeRun: rangeEnd < rangeStart（反転）でも例外にならず、rangeStart基準の0幅に正規化される', () => {
-    const provisional = [makeProvisional({ needsInterpolation: true, totalChars: 5, startSec: null, endSec: null })]
-    const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 0 }]
+  it('3. distributeRun: 索引の余地がゼロのときは秒による按分へフォールバックせず、直前キューから借用する', () => {
+    // rangeStartIdx(prevのlastCharIndex+1=1) > rangeEndIdx(nextのfirstCharIndex-1=0)
+    // となり索引の余地が無いケース。直前キュー(results[0])から借用することを確認する。
+    const provisional = [
+      makeProvisional({ needsInterpolation: false, startSec: 0, endSec: 10, firstCharIndex: 0, lastCharIndex: 0 }),
+      makeProvisional({ needsInterpolation: true, totalChars: 5, startSec: null, endSec: null }),
+      makeProvisional({ needsInterpolation: false, startSec: 100, endSec: 110, firstCharIndex: 1, lastCharIndex: 1 }),
+    ]
+    const results: { startSec: number; endSec: number }[] = [
+      { startSec: 0, endSec: 10 },
+      { startSec: 0, endSec: 0 },
+      { startSec: 100, endSec: 110 },
+    ]
+    const asr: AsrChar[] = [makeChar('x', 0, 10), makeChar('y', 100, 110)]
 
-    __testing.distributeRun(provisional, results, 0, 1, 100, 90)
+    const didBorrow = __testing.distributeRun(provisional, results, 1, 2, asr)
 
-    expect(results[0]).toEqual({ startSec: 100, endSec: 100 })
+    expect(didBorrow).toBe(true)
+    // 直前キュー(results[0])の末尾から借用するため、[1]は直前キューのendSec(10)を
+    // 上限に配置され、直前キュー自身はMIN_SPAN_SEC以上を残して縮む。
+    expect(results[1].endSec).toBeCloseTo(10, 5)
+    expect(results[1].startSec).toBeLessThan(10)
+    expect(results[0].endSec).toBeLessThanOrEqual(10)
+    expect(results[0].endSec - results[0].startSec).toBeGreaterThanOrEqual(0.05 - 1e-9)
+    // 直後キュー(results[2])は一切変更されない（借用元は直前のみ）。
+    expect(results[2]).toEqual({ startSec: 100, endSec: 110 })
+  })
+})
+
+describe('修正: 按分の座標系を索引空間へ（無音区間を跨がない）', () => {
+  it('1. 最重要: トークン索引上は連番だが実時間には巨大な無音（実測304秒相当）があるケースで、補間対象キューが無音区間の中に配置されない', () => {
+    // 実データ(117分講義)で観測された構造をそのまま再現する:
+    // 「あいうえ」(0-5秒、4文字) と「かきくけ」(305-310秒、4文字) の間に300秒の無音がある。
+    // 索引上は連番(3,4)なので、旧実装（秒で按分）だと補間対象キューの時刻が
+    // (5,305)の無音区間の中に置かれてしまっていた。新実装は索引空間で按分するため、
+    // 索引の余地(rangeEndIdx<rangeStartIdx)が無く、直前キュー('あいうえ')から借用する。
+    // （cueは4文字以上でないとMIN_MATCHED_CHARS_FLOORにより常にinterpolated判定される
+    // ため、あえて4文字の単語を使っている。）
+    const prevText = 'あいうえ'
+    const nextText = 'かきくけ'
+    const asr: AsrChar[] = [
+      ...Array.from(prevText).map((char, i) => makeChar(char, i * 1.25, (i + 1) * 1.25)),
+      ...Array.from(nextText).map((char, i) => makeChar(char, 305 + i * 1.25, 305 + (i + 1) * 1.25)),
+    ]
+    const spans = alignCuesToAsr([prevText, '全然違う内容のテキストです', nextText], asr)
+
+    expect(spans).toHaveLength(3)
+    expect(spans[0].confidence).toBe('exact')
+    expect(spans[2].confidence).toBe('exact')
+    expect(spans[1].confidence).toBe('interpolated')
+    // 無音区間(5, 305)の中に配置されていないこと（＝直前キューの範囲内・直後キューの
+    // 開始より前に収まっていること）。
+    expect(spans[1].startSec).toBeLessThanOrEqual(5)
+    expect(spans[1].endSec).toBeLessThanOrEqual(5)
+    expect(spans[1].startSec).toBeGreaterThanOrEqual(0)
+    // 単調性も保たれる。
+    expect(spans[0].endSec).toBeLessThanOrEqual(spans[1].startSec)
+    expect(spans[1].endSec).toBeLessThanOrEqual(spans[2].startSec)
+  })
+
+  it('2. 索引空間の按分が正規化後の文字数比に従う', () => {
+    // rangeStartIdx=0, rangeEndIdx=9（10トークン, 各1秒=合計10秒）を、
+    // totalChars 2:8 の比で2キューに配分する。
+    const asr: AsrChar[] = Array.from({ length: 10 }, (_, i) => makeChar('x', i, i + 1))
+    const provisional = [
+      makeProvisional({ needsInterpolation: true, totalChars: 2, startSec: null, endSec: null }),
+      makeProvisional({ needsInterpolation: true, totalChars: 8, startSec: null, endSec: null }),
+    ]
+    const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 0 }, { startSec: 0, endSec: 0 }]
+
+    const didBorrow = __testing.distributeRun(provisional, results, 0, 2, asr)
+
+    expect(didBorrow).toBe(false)
+    expect(results[0]).toEqual({ startSec: 0, endSec: 2 })
+    expect(results[1]).toEqual({ startSec: 2, endSec: 10 })
+  })
+
+  it('3. 小数索引の時刻換算はトークン内に収まり、トークン間（無音になり得る領域）を跨がない', () => {
+    // asr[0]は0-1秒、asr[1]は100-101秒（間に99秒の無音）。
+    const asr: AsrChar[] = [makeChar('a', 0, 1), makeChar('b', 100, 101)]
+
+    // pos=0.5はトークン0の内側(0-1秒)の中間。
+    expect(__testing.indexPosToSec(asr, 0.5)).toBeCloseTo(0.5, 5)
+    // pos=1（整数境界）はトークン1の先頭(100)を指す。トークン0のend(1)と
+    // トークン1のstart(100)の間（無音区間）を跨いだ補間にはならない。
+    expect(__testing.indexPosToSec(asr, 1)).toBeCloseTo(100, 5)
+    // pos=1.5はトークン1の内側(100-101秒)の中間で、無音区間には入らない。
+    expect(__testing.indexPosToSec(asr, 1.5)).toBeCloseTo(100.5, 5)
+  })
+
+  it('4. 索引の余地がゼロのとき、直前キューから借用し、直前キューがMIN_SPAN_SEC未満にならない', () => {
+    const provisional = [
+      makeProvisional({ needsInterpolation: false, startSec: 0, endSec: 1, firstCharIndex: 0, lastCharIndex: 0 }),
+      makeProvisional({ needsInterpolation: true, totalChars: 3, startSec: null, endSec: null }),
+      makeProvisional({ needsInterpolation: false, startSec: 300, endSec: 301, firstCharIndex: 1, lastCharIndex: 1 }),
+    ]
+    const results: { startSec: number; endSec: number }[] = [
+      { startSec: 0, endSec: 1 },
+      { startSec: 0, endSec: 0 },
+      { startSec: 300, endSec: 301 },
+    ]
+    const asr: AsrChar[] = [makeChar('x', 0, 1), makeChar('y', 300, 301)]
+
+    __testing.distributeRun(provisional, results, 1, 2, asr)
+
+    expect(results[0].endSec - results[0].startSec).toBeGreaterThanOrEqual(MIN_SPAN_SEC_FOR_TEST - 1e-9)
+    expect(results[1].endSec).toBeLessThanOrEqual(1)
+    expect(results[1].startSec).toBeGreaterThanOrEqual(0)
+  })
+
+  it('5. 借用できない場合（直前キューがすでにMIN_SPAN_SEC相当しか無い）、長さ0で並びクラッシュしない', () => {
+    const provisional = [
+      makeProvisional({ needsInterpolation: false, startSec: 0, endSec: 0.05, firstCharIndex: 0, lastCharIndex: 0 }),
+      makeProvisional({ needsInterpolation: true, totalChars: 3, startSec: null, endSec: null }),
+      makeProvisional({ needsInterpolation: false, startSec: 300, endSec: 301, firstCharIndex: 1, lastCharIndex: 1 }),
+    ]
+    const results: { startSec: number; endSec: number }[] = [
+      { startSec: 0, endSec: 0.05 },
+      { startSec: 0, endSec: 0 },
+      { startSec: 300, endSec: 301 },
+    ]
+    const asr: AsrChar[] = [makeChar('x', 0, 0.05), makeChar('y', 300, 301)]
+
+    expect(() => __testing.distributeRun(provisional, results, 1, 2, asr)).not.toThrow()
+
+    // 直前キューはこれ以上削れない（すでにMIN_SPAN_SEC相当）ため、借用できず
+    // 直前キューの終了時刻に長さ0で並ぶ。
+    expect(results[1]).toEqual({ startSec: 0.05, endSec: 0.05 })
+    expect(results[0]).toEqual({ startSec: 0, endSec: 0.05 })
+  })
+
+  it('6a. run が先頭（直前キューが存在しない）場合、直後キューから借用する', () => {
+    const provisional = [
+      makeProvisional({ needsInterpolation: true, totalChars: 3, startSec: null, endSec: null }),
+      makeProvisional({ needsInterpolation: false, startSec: 300, endSec: 310, firstCharIndex: 0, lastCharIndex: 0 }),
+    ]
+    const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 0 }, { startSec: 300, endSec: 310 }]
+    const asr: AsrChar[] = [makeChar('x', 300, 310)]
+
+    const didBorrow = __testing.distributeRun(provisional, results, 0, 1, asr)
+
+    expect(didBorrow).toBe(true)
+    // 直後キュー(results[1])の先頭から借用するため、[0]は直後キューのstartSec(300)を
+    // 下限に配置され、直後キュー自身はMIN_SPAN_SEC以上を残して縮む。
+    expect(results[0].startSec).toBeCloseTo(300, 5)
+    expect(results[1].startSec).toBeGreaterThan(300)
+    expect(results[1].endSec - results[1].startSec).toBeGreaterThanOrEqual(MIN_SPAN_SEC_FOR_TEST - 1e-9)
+  })
+
+  it('6b. run が末尾（直後キューが存在しない）場合、直前キューの索引を上限に索引空間で配分される（借用は起きない）', () => {
+    const asr: AsrChar[] = Array.from({ length: 5 }, (_, i) => makeChar('x', i, i + 1))
+    const provisional = [
+      makeProvisional({ needsInterpolation: false, startSec: 0, endSec: 2, firstCharIndex: 0, lastCharIndex: 1 }),
+      makeProvisional({ needsInterpolation: true, totalChars: 3, startSec: null, endSec: null }),
+    ]
+    const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 2 }, { startSec: 0, endSec: 0 }]
+
+    const didBorrow = __testing.distributeRun(provisional, results, 1, 2, asr)
+
+    // rangeStartIdx=2, rangeEndIdx=asr.length-1=4 と索引の余地があるため、通常の
+    // 索引按分になり借用は起きない。
+    expect(didBorrow).toBe(false)
+    expect(results[1]).toEqual({ startSec: 2, endSec: 5 })
+  })
+
+  it('7. 診断: interpolateSpansWithDiagnostics が借用したrun数を数えられる', () => {
+    const prevText = 'あいうえ'
+    const nextText = 'かきくけ'
+    const asr: AsrChar[] = [
+      ...Array.from(prevText).map((char, i) => makeChar(char, i * 1.25, (i + 1) * 1.25)),
+      ...Array.from(nextText).map((char, i) => makeChar(char, 305 + i * 1.25, 305 + (i + 1) * 1.25)),
+    ]
+    const cueTexts = [prevText, '全然違う内容のテキストです', nextText]
+    const resolved = __testing.resolveOptions(undefined, asr)
+    const cueTokenLists = cueTexts.map(text => __testing.tokenizeCueText(text, resolved.script))
+    let cursor = 0
+    const cueBounds = cueTokenLists.map(tokens => {
+      const bound = { start: cursor, end: cursor + tokens.length }
+      cursor += tokens.length
+      return bound
+    })
+    const globalMatches = new Map<number, number>()
+    for (let k = 0; k < 4; k += 1) globalMatches.set(cueBounds[0].start + k, k) // cue0 -> asrIndex0-3
+    for (let k = 0; k < 4; k += 1) globalMatches.set(cueBounds[2].start + k, 4 + k) // cue2 -> asrIndex4-7
+    const provisional = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+
+    const { borrowedRunCount } = __testing.interpolateSpansWithDiagnostics(provisional, asr)
+
+    expect(borrowedRunCount).toBe(1)
   })
 })
 

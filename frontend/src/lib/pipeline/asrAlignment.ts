@@ -768,70 +768,260 @@ function buildProvisionalSpans(
 }
 
 /**
- * [from, to) の区間（すべて interpolation 対象）を、正規化後の文字数比で
- * [rangeStart, rangeEnd] の間に線形配分する。27秒窓の比例配分とは異なり、
- * 直前・直後の「確定済みキュー」の実時刻を境界にする。
+ * 索引位置（実数）をASR文字ストリーム上の時刻（秒）へ変換する。
  *
- * rangeEnd が rangeStart を下回る（反転している）ことがある。実測（PhyAI05 id=274）:
- * 補間先が「前キューの終了」〜「次キューの開始」だったが、次キューの包絡が前キューと
- * 重なっていたため区間が反転し、幅0の退化スロットが生まれた。rangeStart 自体は
- * 常に信頼できる値（直前の確定キューのendSecまたはフォールバック）なので、それを
- * 基準に0幅として正規化する。
+ * 整数部をトークンindex、小数部をそのトークン内の按分比率として扱う。すなわち
+ * pos=i+frac（0<=frac<1）は「トークンiの中をfracだけ進んだ時刻」を表す。
+ * pos が (maxIdx)+1 以上のときは maxIdx トークンの end にクランプする。
  *
+ * `maxIdx`（既定 `asr.length-1`）は呼び出し側が明示的に絞り込める。これが必要な理由:
+ * distributeRunByIndex は [rangeStartIdx, rangeEndIdx] という「室」の中だけで按分したい。
+ * pos の上限（rangeEndIdx+1）をデフォルトの asr.length-1 で解決すると、
+ * rangeEndIdx+1 番目のトークン（＝隣の確定キューが採用した、無音を挟んで遠く離れた
+ * トークン）の start を読んでしまい、室の外（無音区間の向こう側）まで時刻が飛んでしまう。
+ * rangeEndIdx を maxIdx として渡すことで、上限ちょうどの位置は必ず asr[rangeEndIdx].end
+ * （室の中の最後のトークンの終端）にクランプされ、室の外を絶対に参照しない。
+ *
+ * 重要（境界条件）: 小数部の時刻換算は必ず「そのトークン自身の[start, end]の内側」で
+ * 行い、トークンiのendとトークンi+1のstartの間（無音区間になり得る領域）を補間しない。
+ * pos がどんな実数でも、この関数は常にどちらか一方のトークンの内側だけを指す
+ * （floor(pos) で選んだ単一トークンの範囲でしか frac を使わない）ため、トークン間に
+ * 実測304秒のような大きな無音があっても、その中に時刻を作ることは構造的に無い。
+ */
+function indexPosToSec(asr: readonly AsrChar[], pos: number, maxIdx: number = asr.length - 1): number {
+  if (asr.length === 0) return 0
+  const clampedMaxIdx = Math.min(Math.max(maxIdx, 0), asr.length - 1)
+  const clamped = Math.max(0, Math.min(pos, clampedMaxIdx + 1))
+  const i = Math.min(Math.floor(clamped), clampedMaxIdx)
+  const frac = clamped - i
+  return asr[i].start + frac * (asr[i].end - asr[i].start)
+}
+
+/**
  * 配分されたスロットが退化（幅 < MIN_SPAN_SEC）していても、対象キューが provisional に
  * 有効な包絡（startSec/endSec が非null）を持っていれば、退化スロットの代わりにそちらを
  * 採用する。一致率不足で補間対象に落ちただけで、実際にはASR上で妥当な包絡が求まっている
- * キューを、たまたま配置された反転区間で0秒キューにしてしまわないためのガード。
+ * キューを、たまたま配置された極小スロットで0秒キューにしてしまわないためのガード。
+ */
+function resolveSlot(info: ProvisionalSpanInfo, slotStart: number, slotEnd: number): TimedSpan {
+  const isDegenerate = slotEnd - slotStart < MIN_SPAN_SEC
+  return isDegenerate && info.startSec !== null && info.endSec !== null
+    ? { startSec: info.startSec, endSec: info.endSec }
+    : { startSec: slotStart, endSec: slotEnd }
+}
+
+/**
+ * [from, to) を、ASR「索引」空間で正規化後の文字数比に線形配分する（rangeStartIdx/
+ * rangeEndIdx は閉区間）。索引空間には定義上ギャップが無い（無音区間にはトークンが
+ * 存在しないため索引は常に連続）ため、壁時計の秒で按分していた旧実装と異なり、
+ * 無音区間そのものが按分対象になることは構造的に無い。
+ *
+ * カーソルは [rangeStartIdx, rangeEndIdx+1) の連続量として進め、各キューの境界位置を
+ * indexPosToSec で時刻へ変換する。小数位置は必ず単一トークンの内側に収まる
+ * （indexPosToSec 参照）ため、トークンを跨いだ補間は起こらない。
+ */
+function distributeRunByIndex(
+  provisional: readonly ProvisionalSpanInfo[],
+  results: TimedSpan[],
+  from: number,
+  to: number,
+  rangeStartIdx: number,
+  rangeEndIdx: number,
+  asr: readonly AsrChar[],
+): void {
+  const chunk = provisional.slice(from, to)
+  const totalChunkChars = chunk.reduce((sum, item) => sum + Math.max(1, item.totalChars), 0)
+  const idxSpan = Math.max(0, rangeEndIdx + 1 - rangeStartIdx)
+  let cursor = rangeStartIdx
+  for (let k = from; k < to; k += 1) {
+    const info = provisional[k]
+    const share = Math.max(1, info.totalChars) / Math.max(1, totalChunkChars)
+    const isLast = k === to - 1
+    const endPos = isLast ? rangeStartIdx + idxSpan : cursor + idxSpan * share
+    const slotStart = indexPosToSec(asr, cursor, rangeEndIdx)
+    const slotEnd = indexPosToSec(asr, Math.max(cursor, endPos), rangeEndIdx)
+    results[k] = resolveSlot(info, slotStart, slotEnd)
+    cursor = endPos
+  }
+}
+
+/**
+ * 索引の余地がゼロ（無音区間の前後トークンが索引上は隣接）のとき、直前の確定キュー
+ * (`results[prevIndex]`) の末尾側から時間を借りて [from, to) のキューへ文字数比で
+ * 分け与える。直前キューには最低でも MIN_SPAN_SEC を残す（残せなければ全く借りず、
+ * [from, to) は直前キューの終了時刻に長さ0で並べる）。
+ *
+ * なぜ直前から借りるのか: 対応が付かなかったキューのテキストは、実データでは直前の
+ * 発話区間の言い換え・要約であることが多く（実測: 該当区間はASR側とキュー側の共通
+ * 6-gramがASR側の14.8%しかなく、LLMが大きく書き換えている）、最も確からしい配置先が
+ * 直前の発話区間であるため。無音区間（秒による按分だとそこに置かれてしまっていた）に
+ * 置くよりも実態に近い。
+ */
+function borrowFromPrev(
+  provisional: readonly ProvisionalSpanInfo[],
+  results: TimedSpan[],
+  from: number,
+  to: number,
+  prevIndex: number,
+): void {
+  const prevResult = results[prevIndex]
+  const lendable = Math.max(0, prevResult.endSec - prevResult.startSec - MIN_SPAN_SEC)
+  const chunk = provisional.slice(from, to)
+  const totalChunkChars = chunk.reduce((sum, item) => sum + Math.max(1, item.totalChars), 0)
+
+  if (lendable <= 0) {
+    for (let k = from; k < to; k += 1) {
+      results[k] = resolveSlot(provisional[k], prevResult.endSec, prevResult.endSec)
+    }
+    return
+  }
+
+  const donorStart = prevResult.endSec - lendable
+  let cursor = donorStart
+  for (let k = from; k < to; k += 1) {
+    const info = provisional[k]
+    const share = Math.max(1, info.totalChars) / Math.max(1, totalChunkChars)
+    const isLast = k === to - 1
+    const end = isLast ? prevResult.endSec : cursor + lendable * share
+    results[k] = resolveSlot(info, cursor, Math.max(cursor, end))
+    cursor = end
+  }
+  results[prevIndex] = { startSec: prevResult.startSec, endSec: donorStart }
+}
+
+/**
+ * borrowFromPrev の対称版。run が先頭で直前キューが存在しない場合、直後の確定キュー
+ * (`results[nextIndex]`) の先頭側から借りる。
+ */
+function borrowFromNext(
+  provisional: readonly ProvisionalSpanInfo[],
+  results: TimedSpan[],
+  from: number,
+  to: number,
+  nextIndex: number,
+): void {
+  const nextResult = results[nextIndex]
+  const lendable = Math.max(0, nextResult.endSec - nextResult.startSec - MIN_SPAN_SEC)
+  const chunk = provisional.slice(from, to)
+  const totalChunkChars = chunk.reduce((sum, item) => sum + Math.max(1, item.totalChars), 0)
+
+  if (lendable <= 0) {
+    for (let k = from; k < to; k += 1) {
+      results[k] = resolveSlot(provisional[k], nextResult.startSec, nextResult.startSec)
+    }
+    return
+  }
+
+  const donorEnd = nextResult.startSec + lendable
+  let cursor = nextResult.startSec
+  for (let k = from; k < to; k += 1) {
+    const info = provisional[k]
+    const share = Math.max(1, info.totalChars) / Math.max(1, totalChunkChars)
+    const isLast = k === to - 1
+    const end = isLast ? donorEnd : cursor + lendable * share
+    results[k] = resolveSlot(info, cursor, Math.max(cursor, end))
+    cursor = end
+  }
+  results[nextIndex] = { startSec: donorEnd, endSec: nextResult.endSec }
+}
+
+/**
+ * [from, to) の区間（すべて補間対象）を配置する。
+ *
+ * 配分に使う範囲はASR「索引」で決める（壁時計の秒ではない）:
+ *   - rangeStartIdx = 直前のキューが採用範囲を持つなら lastCharIndex+1、無ければ0
+ *   - rangeEndIdx   = 直後のキューが採用範囲を持つなら firstCharIndex-1、無ければasr.length-1
+ * 索引空間には無音によるギャップが存在しない（無音区間にはトークンが無いため索引は
+ * 常に連続）ため、これで無音区間が按分対象になることを構造的に防ぐ（旧実装は壁時計の
+ * 秒で按分しており、これが実測304秒の無音区間に字幕が置かれる不具合の直接原因だった）。
+ *
+ * rangeEndIdx < rangeStartIdx（索引の余地がゼロ）になることがある。実測: WhisperX出力に
+ * 304秒の無音区間があり、その直前・直後のトークンが索引上は連番だった
+ * （lastCharIndex=X, firstCharIndex=X+1）ケース。このとき秒による按分へは絶対に
+ * フォールバックしない（それこそが無音区間に字幕を置いてしまう不具合そのものになる
+ * ため）。代わりに直前（run が先頭で直前が無ければ直後）の確定キューから時間を借りる
+ * （borrowFromPrev/borrowFromNext 参照）。
+ *
+ * 戻り値は「索引の余地がゼロで借用パスに入ったか」を表す（診断用。
+ * `interpolateSpansWithDiagnostics` 参照）。
  */
 function distributeRun(
   provisional: readonly ProvisionalSpanInfo[],
   results: TimedSpan[],
   from: number,
   to: number,
-  rangeStart: number,
-  rawRangeEnd: number,
-): void {
-  const rangeEnd = Math.max(rangeStart, rawRangeEnd)
-  const chunk = provisional.slice(from, to)
-  const totalChunkChars = chunk.reduce((sum, item) => sum + Math.max(1, item.totalChars), 0)
-  const span = Math.max(0, rangeEnd - rangeStart)
-  let cursor = rangeStart
-  for (let k = from; k < to; k += 1) {
-    const info = provisional[k]
-    const share = Math.max(1, info.totalChars) / Math.max(1, totalChunkChars)
-    const isLast = k === to - 1
-    const end = isLast ? rangeEnd : cursor + span * share
-    const slotStart = cursor
-    const slotEnd = Math.max(cursor, end)
-    const isDegenerate = slotEnd - slotStart < MIN_SPAN_SEC
-    results[k] =
-      isDegenerate && info.startSec !== null && info.endSec !== null
-        ? { startSec: info.startSec, endSec: info.endSec }
-        : { startSec: slotStart, endSec: slotEnd }
-    cursor = end
+  asr: readonly AsrChar[],
+): boolean {
+  const prevLastCharIndex = from > 0 ? provisional[from - 1].lastCharIndex : null
+  const nextFirstCharIndex = to < provisional.length ? provisional[to].firstCharIndex : null
+  const rangeStartIdx = prevLastCharIndex !== null ? prevLastCharIndex + 1 : 0
+  const rangeEndIdx = nextFirstCharIndex !== null ? nextFirstCharIndex - 1 : asr.length - 1
+
+  if (rangeEndIdx >= rangeStartIdx) {
+    distributeRunByIndex(provisional, results, from, to, rangeStartIdx, rangeEndIdx, asr)
+    return false
   }
+
+  if (from > 0) {
+    borrowFromPrev(provisional, results, from, to, from - 1)
+  } else if (to < provisional.length) {
+    borrowFromNext(provisional, results, from, to, to)
+  } else {
+    // 前後どちらの確定キューも無い（run が全キューを覆う。実質 asr が空のときのみ発生）。
+    // 借用元が無いため、時刻0に長さ0で並べる安全なフォールバック。
+    for (let k = from; k < to; k += 1) {
+      results[k] = resolveSlot(provisional[k], 0, 0)
+    }
+  }
+  return true
 }
 
-function interpolateSpans(provisional: readonly ProvisionalSpanInfo[], asr: readonly AsrChar[]): TimedSpan[] {
+interface InterpolationDiagnostics {
+  spans: TimedSpan[]
+  /** 索引の余地がゼロだったため borrowFromPrev/borrowFromNext で借用した run の数。 */
+  borrowedRunCount: number
+}
+
+/**
+ * 確定済み（非補間）キューの結果を先に全件確定させてから、補間対象の連続区間(run)ごとに
+ * distributeRun を適用する。
+ *
+ * 「先に確定枠を全部埋めてから run を埋める」2段構成にしているのは、借用
+ * （borrowFromPrev/borrowFromNext）が直前直後の確定済み結果を書き換える必要があるため。
+ * 旧実装のように1周の逐次処理で確定枠を書きながら run を埋めると、直後の確定キューを
+ * 借用で書き換えても、ループが後でそのインデックスに到達した時に確定値で上書きしてしまい
+ * 借用結果が消えてしまう。
+ */
+function interpolateSpansWithDiagnostics(
+  provisional: readonly ProvisionalSpanInfo[],
+  asr: readonly AsrChar[],
+): InterpolationDiagnostics {
   const results: TimedSpan[] = new Array(provisional.length)
-  const fallbackStart = asr.length > 0 ? asr[0].start : 0
-  const fallbackEnd = asr.length > 0 ? asr[asr.length - 1].end : 0
+  provisional.forEach((info, i) => {
+    if (!info.needsInterpolation && info.startSec !== null && info.endSec !== null) {
+      results[i] = { startSec: info.startSec, endSec: info.endSec }
+    }
+  })
+
+  let borrowedRunCount = 0
   let index = 0
   while (index < provisional.length) {
-    const info = provisional[index]
-    if (!info.needsInterpolation && info.startSec !== null && info.endSec !== null) {
-      results[index] = { startSec: info.startSec, endSec: info.endSec }
+    if (results[index] !== undefined) {
       index += 1
       continue
     }
     let runEnd = index
-    while (runEnd < provisional.length && provisional[runEnd].needsInterpolation) runEnd += 1
-    const rangeStart = index > 0 ? results[index - 1].endSec : fallbackStart
-    const rangeEnd = runEnd < provisional.length ? (provisional[runEnd].startSec ?? fallbackEnd) : fallbackEnd
-    distributeRun(provisional, results, index, runEnd, rangeStart, rangeEnd)
+    while (runEnd < provisional.length && results[runEnd] === undefined) runEnd += 1
+    const didBorrow = distributeRun(provisional, results, index, runEnd, asr)
+    if (didBorrow) borrowedRunCount += 1
     index = runEnd
   }
-  return results
+
+  return { spans: results, borrowedRunCount }
+}
+
+function interpolateSpans(provisional: readonly ProvisionalSpanInfo[], asr: readonly AsrChar[]): TimedSpan[] {
+  return interpolateSpansWithDiagnostics(provisional, asr).spans
 }
 
 /**
@@ -914,8 +1104,10 @@ export const __testing = {
   selectLargestCluster,
   buildProvisionalSpans,
   extendEnvelopes,
+  indexPosToSec,
   distributeRun,
   interpolateSpans,
+  interpolateSpansWithDiagnostics,
   enforceMonotonicSpans,
   computeAsrDensityPerSec,
   resolveOptions,
