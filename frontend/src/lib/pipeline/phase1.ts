@@ -3,7 +3,7 @@ import type { JaBlock, PipelineThresholds } from './blockTypes'
 import type { TranscriptSegment } from './types'
 import type { CorrectedSegmentLite } from './correct'
 import { correctSegments } from './correct'
-import { semanticSplitJa, formatTranscriptScriptSummary, type SemanticSplitJaResult } from './semanticSplitJa'
+import { semanticSplitJa, formatTranscriptScriptSummary, formatCollapsedMergedSummary, type SemanticSplitJaResult } from './semanticSplitJa'
 import { mergeShort } from './mergeShort'
 import { contextGroupCueBlocks, reindexContextGroups } from './contextGrouping'
 import { runCorrectionDebug, isCorrectionDebugEnabled } from './correctionDebug'
@@ -57,7 +57,8 @@ export async function runPhase1(
   const splitResult = await runNode(
     'semanticSplitJa',
     () => semanticSplitJa(corrected, settings, thresholds, options.glossaryTerms ?? []),
-    (result: SemanticSplitJaResult) => formatTranscriptScriptSummary(result.scriptResolution),
+    (result: SemanticSplitJaResult) =>
+      `${formatTranscriptScriptSummary(result.scriptResolution)} / ${formatCollapsedMergedSummary(result.collapsedMerged)}`,
   )
   const split = splitResult.blocks
   // Phase1: 「文脈上は一体で扱うべき cue」を context group としてタグ付けする。

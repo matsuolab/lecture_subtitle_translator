@@ -20,6 +20,15 @@ const LOCAL_MAX_SEGMENTS_PER_REQUEST = 2
 // オーバーロング分割の再アライン回数上限。旧実装(alignUnits)のループ回数を踏襲。
 const MAX_OVERLONG_SPLIT_LOOPS = 8
 
+/**
+ * 「物理的にあり得ないキュー」判定のしきい値（文字/秒）。
+ * 実測: 日本語ASRの1文字あたり duration の中央値は0.120秒＝毎秒約8.3文字。
+ * 毎秒50文字はその6倍以上で、人間の発話としてあり得ない。実データ（117分の講義）で
+ * 隣のキューに範囲を取られて潰れていた3件（duration 0.06秒/0.04秒/0.05秒、本文
+ * 15〜73文字）は、いずれも毎秒300〜1,800文字相当だった。
+ */
+const MAX_PLAUSIBLE_CHARS_PER_SEC = 50
+
 interface RawSemanticUnit {
   unitId: string
   sourceSegmentId: number
@@ -335,6 +344,130 @@ function alignUnitsGlobally(
 }
 
 /**
+ * `AlignedUnit` が「物理的にあり得ない（＝潰れた）」キューかどうかを判定する。
+ * `end - start <= 0` は文字数によらず常に潰れているとみなす。それ以外は
+ * `MAX_PLAUSIBLE_CHARS_PER_SEC` に基づく話速判定（正規化文字数 / 話速上限を
+ * duration が下回れば潰れている）。本文が空のユニットは `buildJaBlocks` が
+ * 最初からスキップして字幕として現れないため対象外（false を返す）。
+ */
+function isCollapsedUnit(entry: AlignedUnit): boolean {
+  const duration = entry.end - entry.start
+  if (duration <= 0) return true
+  const charCount = normalizeTimingText(entry.unit.jaText).length
+  if (charCount === 0) return false
+  return duration < charCount / MAX_PLAUSIBLE_CHARS_PER_SEC
+}
+
+/** `AlignedUnit.alignConf` の信頼度順位。数値が大きいほど信頼できる（exact > no_words）。*/
+function alignConfRank(alignConf: AlignedUnit['alignConf']): number {
+  return alignConf === 'exact' ? 1 : 0
+}
+
+export interface CollapsedResolution {
+  units: AlignedUnit[]
+  /** 隣へ統合された潰れたキューの件数。診断用。*/
+  collapsedMerged: number
+}
+
+/**
+ * 潰れたキュー（`isCollapsedUnit`）を隣のキューへ統合する。
+ *
+ * 潰れたキューは時刻が信頼できない（duration が話速的にあり得ない＝隣に範囲を
+ * 取られている）ため、削除してその本文を隣へ引き継ぐ。時刻は統合先のものを
+ * そのまま使う。統合先は前後のうち `alignConf` の信頼度が高い方を選び、同順位
+ * なら前を選ぶ（読み順を保つため）。隣が片方しか無ければその隣へ、隣が1つも
+ * 無ければ統合せずそのまま残す（本文を失わないことを最優先する）。
+ *
+ * 判定は元の（統合前の）配列に対して1回だけ行う。統合は時刻を変えないため
+ * （統合先の時刻をそのまま使うため）、統合の結果さらに潰れたキューが生まれる
+ * ことは無く、1パスで完結する。
+ */
+function resolveCollapsedUnits(entries: readonly AlignedUnit[]): CollapsedResolution {
+  const collapsed = entries.map(isCollapsedUnit)
+
+  // 各インデックスについて、直前/直後にある「潰れていない」エントリのインデックスを求める。
+  const prevAnchor: Array<number | null> = []
+  let lastAnchor: number | null = null
+  for (let i = 0; i < entries.length; i += 1) {
+    prevAnchor.push(lastAnchor)
+    if (!collapsed[i]) lastAnchor = i
+  }
+  const nextAnchor: Array<number | null> = new Array(entries.length).fill(null)
+  let upcomingAnchor: number | null = null
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    nextAnchor[i] = upcomingAnchor
+    if (!collapsed[i]) upcomingAnchor = i
+  }
+
+  // 統合先インデックスごとに、末尾へ追加する断片（前へ統合）／先頭へ追加する断片
+  // （後ろへ統合）を読み順で集計する。
+  type Piece = { jaText: string; words: WordTimestamp[] }
+  const suffixByTarget = new Map<number, Piece[]>()
+  const prefixByTarget = new Map<number, Piece[]>()
+  const survivedWithoutMerge = new Set<number>()
+  let collapsedMerged = 0
+
+  for (let i = 0; i < entries.length; i += 1) {
+    if (!collapsed[i]) continue
+    const prevIdx = prevAnchor[i]
+    const nextIdx = nextAnchor[i]
+    let target: number | null = null
+    if (prevIdx !== null && nextIdx !== null) {
+      target = alignConfRank(entries[prevIdx].alignConf) >= alignConfRank(entries[nextIdx].alignConf) ? prevIdx : nextIdx
+    } else if (prevIdx !== null) {
+      target = prevIdx
+    } else if (nextIdx !== null) {
+      target = nextIdx
+    }
+
+    if (target === null) {
+      // 隣が1つも無い（例: ユニットが1件しかない）。統合せずそのまま残す。
+      survivedWithoutMerge.add(i)
+      continue
+    }
+
+    collapsedMerged += 1
+    const piece: Piece = { jaText: entries[i].unit.jaText, words: entries[i].words }
+    if (target === prevIdx) {
+      suffixByTarget.set(target, [...(suffixByTarget.get(target) ?? []), piece])
+    } else {
+      prefixByTarget.set(target, [...(prefixByTarget.get(target) ?? []), piece])
+    }
+  }
+
+  const units: AlignedUnit[] = []
+  for (let i = 0; i < entries.length; i += 1) {
+    if (collapsed[i]) {
+      if (survivedWithoutMerge.has(i)) units.push(entries[i])
+      continue
+    }
+    const prefixPieces = prefixByTarget.get(i) ?? []
+    const suffixPieces = suffixByTarget.get(i) ?? []
+    if (prefixPieces.length === 0 && suffixPieces.length === 0) {
+      units.push(entries[i])
+      continue
+    }
+    const jaText = [
+      ...prefixPieces.map(piece => piece.jaText),
+      entries[i].unit.jaText,
+      ...suffixPieces.map(piece => piece.jaText),
+    ].join('')
+    const words = [
+      ...prefixPieces.flatMap(piece => piece.words),
+      ...entries[i].words,
+      ...suffixPieces.flatMap(piece => piece.words),
+    ].sort((a, b) => a.start - b.start)
+    units.push({
+      ...entries[i],
+      unit: { ...entries[i].unit, jaText },
+      words,
+    })
+  }
+
+  return { units, collapsedMerged }
+}
+
+/**
  * ASR文字ストリームが完全に空（`words` が全セグメントで欠損。WhisperXアライメント総崩れ
  * or 非WhisperX入力）の場合の最小限フォールバック。セグメントごとに文字数比例配分し、
  * 全ユニットを正直に `alignConf: 'no_words'` とする（旧 `alignUnitsOnce` の
@@ -557,6 +690,8 @@ export interface TranscriptScriptResolution {
 export interface SemanticSplitJaResult {
   blocks: JaBlock[]
   scriptResolution: TranscriptScriptResolution
+  /** `resolveCollapsedUnits` が隣へ統合した「潰れたキュー」の件数。診断用（0件でも意味を持つ）。*/
+  collapsedMerged: number
 }
 
 /**
@@ -611,6 +746,15 @@ export function formatTranscriptScriptSummary(resolution: TranscriptScriptResolu
     default:
       return `トークン単位=${unitLabel}`
   }
+}
+
+/**
+ * `SemanticSplitJaResult.collapsedMerged`（`resolveCollapsedUnits` が隣へ統合した
+ * 「潰れたキュー」の件数）を localPipeline.ts のトレース summary 用に整形する。
+ * 0件のときも表示する（上流の異常を検知する指標になるため）。
+ */
+export function formatCollapsedMergedSummary(collapsedMerged: number): string {
+  return `潰れキュー統合=${collapsedMerged}件`
 }
 
 export async function semanticSplitJa(
@@ -668,11 +812,18 @@ export async function semanticSplitJa(
   }
 
   const asrStream = buildAsrCharStream(segments, { script: transcriptScript })
-  const aligned = asrStream.length === 0
-    ? alignUnitsProportionalFallback(orderedUnits, segments, thresholds, glossaryTerms)
-    : alignUnitsGlobally(orderedUnits, asrStream, thresholds, glossaryTerms, transcriptScript)
+  let aligned: AlignedUnit[]
+  let collapsedMerged = 0
+  if (asrStream.length === 0) {
+    aligned = alignUnitsProportionalFallback(orderedUnits, segments, thresholds, glossaryTerms)
+  } else {
+    const globallyAligned = alignUnitsGlobally(orderedUnits, asrStream, thresholds, glossaryTerms, transcriptScript)
+    const resolved = resolveCollapsedUnits(globallyAligned)
+    aligned = resolved.units
+    collapsedMerged = resolved.collapsedMerged
+  }
 
-  return { blocks: buildJaBlocks(aligned), scriptResolution }
+  return { blocks: buildJaBlocks(aligned), scriptResolution, collapsedMerged }
 }
 
 /** アライン済みユニット列から JaBlock 配列を組み立てる（id採番・空テキストスキップ）。*/
@@ -704,4 +855,6 @@ export const __testing = {
   alignUnitsProportionalFallback,
   buildJaBlocks,
   resolveTranscriptScript,
+  isCollapsedUnit,
+  resolveCollapsedUnits,
 }

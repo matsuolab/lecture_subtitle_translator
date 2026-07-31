@@ -417,3 +417,153 @@ describe('resolveTranscriptScript: alignTokenMode による書きおこしトー
     expect(resolution.script).toBe('japanese')
   })
 })
+
+interface TestAlignedUnitInput {
+  unitId?: string
+  jaText: string
+  start: number
+  end: number
+  alignConf?: 'exact' | 'no_words'
+  words?: FixtureWord[]
+  matchRate?: number
+}
+
+/**
+ * `AlignedUnit`（semanticSplitJa.ts 内部型）と構造的に一致するテスト用フィクスチャ。
+ * `AlignedUnit` は非公開型のため import せず、`__testing.resolveCollapsedUnits` の
+ * パラメータ型との構造的互換性のみに依拠する。
+ */
+function makeAlignedUnit(input: TestAlignedUnitInput) {
+  return {
+    unit: {
+      unitId: input.unitId ?? `u_${input.start}`,
+      sourceSegmentId: 1,
+      jaText: input.jaText,
+      canMergeWithNext: false,
+    },
+    start: input.start,
+    end: input.end,
+    alignConf: input.alignConf ?? 'exact',
+    words: input.words ?? [],
+    matchRate: input.matchRate ?? 1,
+  }
+}
+
+describe('isCollapsedUnit: 「物理的にあり得ないキュー」の判定（毎秒50文字を超える話速）', () => {
+  it('正当な短いキュー（2文字, 0.3秒＝毎秒約6.7文字）は潰れていると判定されない（誤検知しない）', () => {
+    const unit = makeAlignedUnit({ jaText: 'はい', start: 10, end: 10.3 })
+    expect(__testing.isCollapsedUnit(unit)).toBe(false)
+  })
+
+  it('潰れたキュー（40文字, 0.06秒＝毎秒約667文字）は潰れていると判定される', () => {
+    const unit = makeAlignedUnit({ jaText: 'あ'.repeat(40), start: 10, end: 10.06 })
+    expect(__testing.isCollapsedUnit(unit)).toBe(true)
+  })
+
+  it('end <= start（duration<=0）は文字数によらず常に潰れていると判定される', () => {
+    const unit = makeAlignedUnit({ jaText: 'あ', start: 10, end: 10 })
+    expect(__testing.isCollapsedUnit(unit)).toBe(true)
+  })
+})
+
+describe('resolveCollapsedUnits: 潰れたキューを隣へ統合する', () => {
+  it('潰れたキューは結果から消え、その本文が隣（信頼度の高い側）のキューに統合される', () => {
+    const prev = makeAlignedUnit({
+      unitId: 'prev',
+      jaText: '前の文です。',
+      start: 0,
+      end: 1,
+      alignConf: 'exact',
+      words: [{ word: '前の文です。', start: 0, end: 1, score: 1 }],
+    })
+    const collapsed = makeAlignedUnit({
+      unitId: 'collapsed',
+      jaText: '潰れて範囲を失った本文'.repeat(4), // 44文字
+      start: 1,
+      end: 1.06,
+      alignConf: 'exact',
+      words: [{ word: '潰れ', start: 1, end: 1.06, score: 1 }],
+    })
+    const next = makeAlignedUnit({ unitId: 'next', jaText: '後の文です。', start: 1.06, end: 2, alignConf: 'no_words' })
+
+    const { units, collapsedMerged } = __testing.resolveCollapsedUnits([prev, collapsed, next])
+
+    expect(units.map(u => u.unit.unitId)).toEqual(['prev', 'next'])
+    expect(collapsedMerged).toBe(1)
+    const mergedPrev = units.find(u => u.unit.unitId === 'prev')!
+    // 前へ統合する場合は本文の末尾に追加する。
+    expect(mergedPrev.unit.jaText).toBe(prev.unit.jaText + collapsed.unit.jaText)
+    // 時刻は統合先（prev）のものをそのまま使う。
+    expect(mergedPrev.start).toBe(prev.start)
+    expect(mergedPrev.end).toBe(prev.end)
+    // words も統合元の words を引き継ぐ。
+    expect(mergedPrev.words.length).toBe(prev.words.length + collapsed.words.length)
+  })
+
+  it('統合の前後で全キューの本文を連結した文字列が一致する（本文が失われないことの担保。連続する潰れたキューも含む）', () => {
+    const a = makeAlignedUnit({ unitId: 'a', jaText: 'あああ', start: 0, end: 1, alignConf: 'exact' })
+    // 連続する2件の潰れたキュー（どちらも前後アンカーが exact でタイ → 前(a)へ統合される）。
+    const b = makeAlignedUnit({ unitId: 'b', jaText: '潰れ本文いち'.repeat(4), start: 1, end: 1.05, alignConf: 'no_words' })
+    const c = makeAlignedUnit({ unitId: 'c', jaText: '潰れ本文にい'.repeat(4), start: 1.05, end: 1.09, alignConf: 'no_words' })
+    const d = makeAlignedUnit({ unitId: 'd', jaText: 'いいい', start: 1.09, end: 2, alignConf: 'exact' })
+    const original = [a, b, c, d]
+
+    // 前提: b, c は実際に潰れている。
+    expect(__testing.isCollapsedUnit(b)).toBe(true)
+    expect(__testing.isCollapsedUnit(c)).toBe(true)
+
+    const originalConcat = original.map(u => u.unit.jaText).join('')
+    const { units, collapsedMerged } = __testing.resolveCollapsedUnits(original)
+    const resultConcat = units.map(u => u.unit.jaText).join('')
+
+    expect(collapsedMerged).toBe(2)
+    expect(resultConcat).toBe(originalConcat)
+  })
+
+  it('前後の alignConf 信頼度に応じて統合先が選ばれる（exact を優先し、後ろへ統合する場合は本文の先頭に追加する）', () => {
+    const prevNoWords = makeAlignedUnit({ unitId: 'prev', jaText: '前', start: 0, end: 1, alignConf: 'no_words' })
+    const collapsed = makeAlignedUnit({ unitId: 'mid', jaText: '潰れ本文'.repeat(10), start: 1, end: 1.05, alignConf: 'no_words' })
+    const nextExact = makeAlignedUnit({ unitId: 'next', jaText: '後', start: 1.05, end: 2, alignConf: 'exact' })
+
+    const { units } = __testing.resolveCollapsedUnits([prevNoWords, collapsed, nextExact])
+
+    expect(units.map(u => u.unit.unitId)).toEqual(['prev', 'next'])
+    const mergedNext = units.find(u => u.unit.unitId === 'next')!
+    expect(mergedNext.unit.jaText).toBe(collapsed.unit.jaText + nextExact.unit.jaText)
+    expect(mergedNext.start).toBe(nextExact.start)
+    expect(mergedNext.end).toBe(nextExact.end)
+  })
+
+  it('前後の alignConf が同順位（同じ exact）なら前を選ぶ（読み順を保つ）', () => {
+    const prevExact = makeAlignedUnit({ unitId: 'prev', jaText: '前', start: 0, end: 1, alignConf: 'exact' })
+    const collapsed = makeAlignedUnit({ unitId: 'mid', jaText: '潰れ本文'.repeat(10), start: 1, end: 1.05, alignConf: 'no_words' })
+    const nextExact = makeAlignedUnit({ unitId: 'next', jaText: '後', start: 1.05, end: 2, alignConf: 'exact' })
+
+    const { units } = __testing.resolveCollapsedUnits([prevExact, collapsed, nextExact])
+
+    expect(units.map(u => u.unit.unitId)).toEqual(['prev', 'next'])
+    const mergedPrev = units.find(u => u.unit.unitId === 'prev')!
+    expect(mergedPrev.unit.jaText).toBe(prevExact.unit.jaText + collapsed.unit.jaText)
+  })
+
+  it('隣が1つも無い場合（ユニットが1件のみ等）は統合されずそのまま残る（本文を失わないことを最優先する）', () => {
+    const onlyUnit = makeAlignedUnit({ unitId: 'solo', jaText: '潰れ本文'.repeat(10), start: 0, end: 0.05, alignConf: 'no_words' })
+    expect(__testing.isCollapsedUnit(onlyUnit)).toBe(true)
+
+    const { units, collapsedMerged } = __testing.resolveCollapsedUnits([onlyUnit])
+
+    expect(units).toHaveLength(1)
+    expect(units[0].unit.jaText).toBe(onlyUnit.unit.jaText)
+    expect(collapsedMerged).toBe(0)
+  })
+
+  it('潰れたキューが1件も無ければ何も変わらず、統合件数は0件になる', () => {
+    const a = makeAlignedUnit({ unitId: 'a', jaText: 'あああ', start: 0, end: 1 })
+    const b = makeAlignedUnit({ unitId: 'b', jaText: 'いいい', start: 1, end: 2 })
+
+    const { units, collapsedMerged } = __testing.resolveCollapsedUnits([a, b])
+
+    expect(units.map(u => u.unit.unitId)).toEqual(['a', 'b'])
+    expect(collapsedMerged).toBe(0)
+  })
+})
