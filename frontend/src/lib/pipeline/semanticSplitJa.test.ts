@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { __testing } from './semanticSplitJa'
-import { buildAsrCharStream } from './asrAlignment'
+import { buildAsrCharStream, buildAsrCharStreamWithRanges } from './asrAlignment'
 import { DEFAULT_PIPELINE_THRESHOLDS, type PipelineThresholds } from './blockTypes'
 import type { CorrectedSegmentLite } from './correct'
 import type { TranscriptSegment } from './types'
@@ -91,7 +91,7 @@ function makeRawUnit(sourceSegmentId: number, jaText: string, unitId: string) {
 
 describe('semanticSplitJa 統合: セグメント跨ぎのアライメント（実データフィクスチャ）', () => {
   const segments = loadSeg6Seg7Fixture()
-  const asrStream = buildAsrCharStream(segments)
+  const { stream: asrStream, ranges: segmentRanges } = buildAsrCharStreamWithRanges(segments)
   const units = [
     makeRawUnit(6, '講座の受講料は無料です。', 'u1'),
     makeRawUnit(6, '講座終了後もさらなる学びやさ', 'u2'),
@@ -108,7 +108,7 @@ describe('semanticSplitJa 統合: セグメント跨ぎのアライメント（�
   // 分割込みの end-to-end 挙動は下の別 describe で確認する。
   const noSplitThresholds: PipelineThresholds = { ...DEFAULT_PIPELINE_THRESHOLDS, mergedLongDurationSec: 300 }
 
-  const aligned = __testing.alignUnitsGlobally(units, asrStream, noSplitThresholds, [])
+  const aligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, noSplitThresholds, []).units
   const blocks = __testing.buildJaBlocks(aligned)
 
   it('6ユニット分のブロックが1:1で返る', () => {
@@ -149,7 +149,7 @@ describe('semanticSplitJa 統合: セグメント跨ぎのアライメント（�
 
 describe('semanticSplitJa 統合: オーバーロングユニットの分割が実閾値でも end-to-end で動く', () => {
   const segments = loadSeg6Seg7Fixture()
-  const asrStream = buildAsrCharStream(segments)
+  const { stream: asrStream, ranges: segmentRanges } = buildAsrCharStreamWithRanges(segments)
   const overlongText = '松尾県独自のコミュニティへの参加機会として、継続的な講座の受講や実践経験を積む企業との共同研究プロジェクト、インターンシップなどが用意されています。'
   const units = [
     makeRawUnit(6, '講座の受講料は無料です。', 'u1'),
@@ -159,7 +159,7 @@ describe('semanticSplitJa 統合: オーバーロングユニットの分割が�
   ]
 
   it('mergedLongDurationSec を超えるユニットは分割され、分割後も重なりなく元テキストを保持する', () => {
-    const aligned = __testing.alignUnitsGlobally(units, asrStream, DEFAULT_PIPELINE_THRESHOLDS, [])
+    const aligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, DEFAULT_PIPELINE_THRESHOLDS, []).units
     const blocks = __testing.buildJaBlocks(aligned)
 
     // 4ユニットのうち1つ（overlongText, 約14.6秒）が分割されるため、ブロック数は4より増える。
@@ -188,11 +188,11 @@ describe('semanticSplitJa 統合: オーバーロングユニットの分割が�
     // 分割を発生させない極端に大きい閾値で、overlongText 単体（u3）の分割前の
     // 親スパンを求める（実測: [163.688, 178.392]、約14.704秒）。
     const noSplitThresholds: PipelineThresholds = { ...DEFAULT_PIPELINE_THRESHOLDS, mergedLongDurationSec: 300 }
-    const unsplitAligned = __testing.alignUnitsGlobally(units, asrStream, noSplitThresholds, [])
+    const unsplitAligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, noSplitThresholds, []).units
     const parent = unsplitAligned.find(item => item.unit.unitId === 'u3')
     expect(parent).toBeDefined()
 
-    const splitAligned = __testing.alignUnitsGlobally(units, asrStream, DEFAULT_PIPELINE_THRESHOLDS, [])
+    const splitAligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, DEFAULT_PIPELINE_THRESHOLDS, []).units
     const fragments = splitAligned.filter(item => item.unit.unitId.startsWith('u3_'))
     // overlongText は分割されるはず（4断片、実測）。
     expect(fragments.length).toBeGreaterThan(1)
@@ -204,7 +204,7 @@ describe('semanticSplitJa 統合: オーバーロングユニットの分割が�
   })
 
   it('断片同士は重ならず、元の順序を保つ（単調性）', () => {
-    const splitAligned = __testing.alignUnitsGlobally(units, asrStream, DEFAULT_PIPELINE_THRESHOLDS, [])
+    const splitAligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, DEFAULT_PIPELINE_THRESHOLDS, []).units
     const fragments = splitAligned.filter(item => item.unit.unitId.startsWith('u3_'))
     expect(fragments.length).toBeGreaterThan(1)
     for (let i = 0; i < fragments.length - 1; i += 1) {
@@ -217,7 +217,7 @@ describe('semanticSplitJa 統合: オーバーロングユニットの分割が�
     // firstCharIndex/lastCharIndex にスライス開始位置のオフセットを加算し忘れると、
     // asrStream 上の全く別の位置（典型的には序盤）を指してしまい、words の
     // start/end がその断片自身の時刻範囲から大きく外れる。
-    const splitAligned = __testing.alignUnitsGlobally(units, asrStream, DEFAULT_PIPELINE_THRESHOLDS, [])
+    const splitAligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, DEFAULT_PIPELINE_THRESHOLDS, []).units
     const fragments = splitAligned.filter(item => item.unit.unitId.startsWith('u3_'))
     const exactFragmentsWithWords = fragments.filter(f => f.alignConf === 'exact' && f.words.length > 0)
     expect(exactFragmentsWithWords.length).toBeGreaterThan(0)
@@ -276,7 +276,7 @@ describe('semanticSplitJa 統合: 親スパンが interpolated（firstCharIndex 
       words: [{ word: anchorAfterText, start: 21, end: 22, score: 1 }],
     },
   ]
-  const asrStream = buildAsrCharStream(segments)
+  const { stream: asrStream, ranges: segmentRanges } = buildAsrCharStreamWithRanges(segments)
   const units = [
     makeRawUnit(1, anchorBeforeText, 'anchorBefore'),
     makeRawUnit(1, unrelatedOverlongText, 'mid'),
@@ -285,7 +285,7 @@ describe('semanticSplitJa 統合: 親スパンが interpolated（firstCharIndex 
 
   it('前提: mid ユニットは interpolated（ASR実測にアンカーできない）で、閾値超過になる', () => {
     const noSplitThresholds: PipelineThresholds = { ...DEFAULT_PIPELINE_THRESHOLDS, mergedLongDurationSec: 300 }
-    const aligned = __testing.alignUnitsGlobally(units, asrStream, noSplitThresholds, [])
+    const aligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, noSplitThresholds, []).units
     const mid = aligned.find(item => item.unit.unitId === 'mid')
     expect(mid).toBeDefined()
     expect(mid!.alignConf).toBe('no_words')
@@ -293,7 +293,7 @@ describe('semanticSplitJa 統合: 親スパンが interpolated（firstCharIndex 
   })
 
   it('分割後、断片は文字数比で按分され、親スパン内（アンカー間）に収まる', () => {
-    const aligned = __testing.alignUnitsGlobally(units, asrStream, DEFAULT_PIPELINE_THRESHOLDS, [])
+    const aligned = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, DEFAULT_PIPELINE_THRESHOLDS, []).units
     const anchorBefore = aligned.find(item => item.unit.unitId === 'anchorBefore')
     const anchorAfter = aligned.find(item => item.unit.unitId === 'anchorAfter')
     const fragments = aligned.filter(item => item.unit.unitId.startsWith('mid_'))
@@ -565,5 +565,94 @@ describe('resolveCollapsedUnits: 潰れたキューを隣へ統合する', () =>
 
     expect(units.map(u => u.unit.unitId)).toEqual(['a', 'b'])
     expect(collapsedMerged).toBe(0)
+  })
+})
+
+describe('semanticSplitJa: 探索範囲を由来セグメント±1に限定する', () => {
+  // 実測（117分・788ユニット）で 99.7% が由来セグメント1つに収まり、跨ぐのは隣接2つまで
+  // （3セグメント以上に跨る例はゼロ）。したがって探索範囲を由来セグメント±1に限定できる。
+  // 全体探索では「同じ言い回しが講義中に何度も出る」ことで遠方へ誤マッチしていた。
+  const repeated = 'こちらをご覧ください'
+
+  /** 1文字0.1秒のトークン列を持つセグメントを作る（0.6秒CAPを避けるため個別トークンにする）。 */
+  function makeWordSegment(id: number, text: string, startSec: number): TranscriptSegment {
+    return {
+      id,
+      start: startSec,
+      end: startSec + text.length * 0.1,
+      text,
+      words: Array.from({ length: text.length }, (_, i) => ({
+        word: text[i],
+        start: startSec + i * 0.1,
+        end: startSec + i * 0.1 + 0.08,
+        score: 1,
+      })),
+    }
+  }
+
+  it('同じ文字列が遠方の別セグメントにもある場合でも、由来セグメント側に対応付けられる', () => {
+    // セグメント1（0秒付近）とセグメント9（3000秒付近）に全く同じ文字列を置く。
+    const segments = [
+      makeWordSegment(1, repeated, 0),
+      makeWordSegment(2, 'つぎのはなしにうつります', 30),
+      makeWordSegment(9, repeated, 3000),
+    ]
+    const { stream, ranges } = buildAsrCharStreamWithRanges(segments)
+    const units = [makeRawUnit(9, repeated, 'far')]
+
+    const aligned = __testing.alignUnitsGlobally(units, stream, ranges, DEFAULT_PIPELINE_THRESHOLDS, []).units
+
+    // 由来セグメント9（3000秒付近）に対応付けられ、冒頭（0秒付近）へは飛ばない。
+    expect(aligned[0].start).toBeGreaterThanOrEqual(2999)
+    expect(aligned[0].start).toBeLessThan(3002)
+  })
+
+  it('セグメント間に長い無音があっても、その無音を跨いで配置されない', () => {
+    // セグメント1（0〜1秒）とセグメント2（300秒〜）の間に約299秒の無音がある。
+    const segments = [
+      makeWordSegment(1, 'ぜんはんのはなし', 0),
+      makeWordSegment(2, 'こうはんのはなし', 300),
+    ]
+    const { stream, ranges } = buildAsrCharStreamWithRanges(segments)
+    // ASRに一致しない本文（対応が付かず補間になる）を、セグメント1のユニットとして与える。
+    const units = [
+      makeRawUnit(1, 'ぜんはんのはなし', 'u1'),
+      makeRawUnit(1, '無関係無関係無関係', 'u2'),
+    ]
+
+    const aligned = __testing.alignUnitsGlobally(units, stream, ranges, DEFAULT_PIPELINE_THRESHOLDS, []).units
+
+    // 無音（約1〜300秒）に引き伸ばされていないこと。
+    for (const item of aligned) {
+      expect(item.end - item.start).toBeLessThan(30)
+    }
+  })
+
+  it('sourceSegmentId が存在しない値でも、最も近いセグメントへ丸められて処理が続く', () => {
+    const segments = [makeWordSegment(10, 'じっさいのほんぶん', 0)]
+    const { stream, ranges } = buildAsrCharStreamWithRanges(segments)
+    const units = [makeRawUnit(999, 'じっさいのほんぶん', 'unknown')]
+
+    const result = __testing.alignUnitsGlobally(units, stream, ranges, DEFAULT_PIPELINE_THRESHOLDS, [])
+
+    expect(result.units).toHaveLength(1)
+    expect(result.clampedSegmentIds).toBeGreaterThan(0)
+    expect(result.units[0].start).toBeLessThan(2)
+  })
+
+  it('グループ境界で重なった場合、後ろのユニットが押し出され前は動かない', () => {
+    const segments = [
+      makeWordSegment(1, 'まえのせぐめんと', 0),
+      makeWordSegment(2, 'あとのせぐめんと', 1),
+    ]
+    const { stream, ranges } = buildAsrCharStreamWithRanges(segments)
+    const units = [
+      makeRawUnit(1, 'まえのせぐめんと', 'a'),
+      makeRawUnit(2, 'あとのせぐめんと', 'b'),
+    ]
+
+    const aligned = __testing.alignUnitsGlobally(units, stream, ranges, DEFAULT_PIPELINE_THRESHOLDS, []).units
+
+    expect(aligned[0].end).toBeLessThanOrEqual(aligned[1].start)
   })
 })

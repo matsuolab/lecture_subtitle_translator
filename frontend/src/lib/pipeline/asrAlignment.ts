@@ -314,22 +314,64 @@ function resolveAsrCharStreamOptions(options?: AsrCharStreamOptions): ResolvedAs
 }
 
 /**
+ * `buildAsrCharStreamWithRanges` が返す、1セグメントが `AsrChar[]` ストリーム上で
+ * 占めるトークン範囲（閉区間、両端含む）。
+ *
+ * トークンを1つも生成しなかったセグメント（`words` が空、または全単語が
+ * `maxWordDurationSec` 等のフィルタで捨てられた場合）は `ranges` に含めない
+ * （`startIdx > endIdx` という表現ではなく、そもそも要素を作らない方針。
+ * 呼び出し側 `semanticSplitJa.ts` が「由来セグメントが range に存在しない」ケースを
+ * 一種類の分岐（クランプ処理）だけで扱えるようにするため）。
+ */
+export interface AsrSegmentRange {
+  segmentId: number
+  startIdx: number
+  endIdx: number
+}
+
+/**
  * WhisperXのセグメント列から、ASR文字ストリーム（時刻つきトークン列）を構築する。
  * セグメント跨ぎの補正結果を大域アライメントで扱えるよう、講義全体を1本の列とみなす。
  * `script`（既定 `japanese`）によって粒度が変わる。詳細は `AsrCharStreamOptions.script` 参照。
+ *
+ * `ranges` は各セグメントが `stream` 上で占めるトークン範囲。実測（117分・788ユニット・
+ * 293セグメント）で、字幕ユニットの99.7%が由来セグメント1つの中に完全に収まり、
+ * 3セグメント以上に跨る例はゼロだったため、`semanticSplitJa.ts` はこれを使って
+ * アライメントの探索範囲を「由来セグメント±1」に限定する（詳細は同ファイル参照）。
+ */
+export function buildAsrCharStreamWithRanges(
+  segments: readonly TranscriptSegment[],
+  options?: AsrCharStreamOptions,
+): { stream: AsrChar[]; ranges: AsrSegmentRange[] } {
+  const { maxWordDurationSec, script } = resolveAsrCharStreamOptions(options)
+  const isLatin = script === 'latin'
+  const stream: AsrChar[] = []
+  const ranges: AsrSegmentRange[] = []
+  for (const segment of segments) {
+    const words = [...(segment.words ?? [])]
+      .filter(word => Number.isFinite(word.start) && Number.isFinite(word.end))
+      .sort((a, b) => a.start - b.start || a.end - b.end)
+    const startIdx = stream.length
+    for (const word of words) {
+      const chars = isLatin ? wordToAsrToken(word, maxWordDurationSec) : wordToChars(word, maxWordDurationSec)
+      stream.push(...chars)
+    }
+    if (stream.length > startIdx) {
+      ranges.push({ segmentId: segment.id, startIdx, endIdx: stream.length - 1 })
+    }
+  }
+  return { stream, ranges }
+}
+
+/**
+ * `buildAsrCharStreamWithRanges` の薄いラッパー。`ranges` が不要な既存呼び出し元
+ * （`retimeWithAligner.ts` 等）のシグネチャ・挙動を変えないために残している。
  */
 export function buildAsrCharStream(
   segments: readonly TranscriptSegment[],
   options?: AsrCharStreamOptions,
 ): AsrChar[] {
-  const { maxWordDurationSec, script } = resolveAsrCharStreamOptions(options)
-  const isLatin = script === 'latin'
-  return segments.flatMap(segment => {
-    const words = [...(segment.words ?? [])]
-      .filter(word => Number.isFinite(word.start) && Number.isFinite(word.end))
-      .sort((a, b) => a.start - b.start || a.end - b.end)
-    return words.flatMap(word => (isLatin ? wordToAsrToken(word, maxWordDurationSec) : wordToChars(word, maxWordDurationSec)))
-  })
+  return buildAsrCharStreamWithRanges(segments, options).stream
 }
 
 /** `detectAsrScriptDetail` の判定結果。 */
@@ -1035,13 +1077,19 @@ function interpolateSpans(provisional: readonly ProvisionalSpanInfo[], asr: read
  * 「隣接キューのわずかなジッター」を想定した処理で、外れ値ガード導入前は数十秒規模の
  * 重なりが生じ得たため、中点分割だと信頼できる前のキューの end まで巻き込んで破壊し、
  * `finalizeSpan` の `Math.max(startSec, endSec)` で前のキューの長さを0にしてしまっていた。
+ *
+ * ジェネリックにして `startSec`/`endSec` 以外のフィールド（`AlignedSpan` の
+ * `firstCharIndex` 等）を保持したまま解消できるようにしている。`semanticSplitJa.ts` が
+ * セグメント単位アライン（由来セグメント±1に探索範囲を限定する処理）で、グループ境界を
+ * またいだ重なり解消にこのロジックをそのまま再利用するため公開する
+ * （探索範囲が±1セグメント分重なるため、グループ間の境界で重なりが起こり得る）。
  */
-function enforceMonotonicSpans(spans: readonly TimedSpan[]): TimedSpan[] {
+export function enforceMonotonicSpans<T extends TimedSpan>(spans: readonly T[]): T[] {
   const result = spans.map(span => ({ ...span }))
   for (let i = 0; i < result.length - 1; i += 1) {
     if (result[i].endSec > result[i + 1].startSec) {
       const prevEnd = result[i].endSec
-      result[i + 1] = { startSec: prevEnd, endSec: Math.max(prevEnd, result[i + 1].endSec) }
+      result[i + 1] = { ...result[i + 1], startSec: prevEnd, endSec: Math.max(prevEnd, result[i + 1].endSec) }
     }
   }
   return result

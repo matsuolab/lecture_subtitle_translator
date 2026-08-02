@@ -13,7 +13,15 @@ import { loadLanguageProfileConfig, type LanguageProfileConfig, type LanguageScr
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta } from './llmCallWithMeta'
-import { alignCuesToAsr, buildAsrCharStream, detectAsrScriptDetail, type AlignedSpan, type AsrChar } from './asrAlignment'
+import {
+  alignCuesToAsr,
+  buildAsrCharStreamWithRanges,
+  detectAsrScriptDetail,
+  enforceMonotonicSpans,
+  type AlignedSpan,
+  type AsrChar,
+  type AsrSegmentRange,
+} from './asrAlignment'
 
 const MAX_SEGMENTS_PER_REQUEST = 4
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 2
@@ -286,10 +294,186 @@ interface OverlongScanEntry {
   accepted: boolean
 }
 
+interface SegmentGroup {
+  segmentId: number
+  /** units 内での元の位置。グループ化してもこの配列で元の順序に戻せる。*/
+  indices: number[]
+  units: RawSemanticUnit[]
+}
+
 /**
- * 全ユニットのテキストを ASR 文字ストリーム全体に一括で大域アライメントする。
- * セグメント境界に縛られないため、補正LLMがセグメントを跨いで文を再構成しても
- * 各ユニットの時刻を正しく求められる（詳細は asrAlignment.ts 参照）。
+ * ユニットを `sourceSegmentId` ごとにグループ化する。元の順序は各グループの
+ * `indices`（units 内での絶対位置）で保持し、呼び出し側が結果を元の順序へ
+ * 書き戻せるようにする（グループ自体の出現順は最初に現れた位置の順）。
+ */
+function groupUnitsBySegment(units: readonly RawSemanticUnit[]): SegmentGroup[] {
+  const groups = new Map<number, SegmentGroup>()
+  const order: number[] = []
+  units.forEach((unit, index) => {
+    let group = groups.get(unit.sourceSegmentId)
+    if (!group) {
+      group = { segmentId: unit.sourceSegmentId, indices: [], units: [] }
+      groups.set(unit.sourceSegmentId, group)
+      order.push(unit.sourceSegmentId)
+    }
+    group.indices.push(index)
+    group.units.push(unit)
+  })
+  return order.map(id => groups.get(id) as SegmentGroup)
+}
+
+interface SegmentWindow {
+  startIdx: number
+  endIdx: number
+  /** segmentId が ranges に存在せず、最も近い既知のセグメントへ丸めたか。*/
+  clamped: boolean
+}
+
+/**
+ * `segmentId` に一致する `AsrSegmentRange` の `ranges` 内インデックスを探す。
+ * 完全一致が無い場合は、`segmentId`（数値）が最も近い range へ丸める
+ * （全体探索へのフォールバックは行わない。それが今回排除したい経路のため）。
+ */
+function findNearestRangeIndex(
+  ranges: readonly AsrSegmentRange[],
+  segmentId: number,
+): { index: number; clamped: boolean } | null {
+  if (ranges.length === 0) return null
+  const exactIndex = ranges.findIndex(range => range.segmentId === segmentId)
+  if (exactIndex >= 0) return { index: exactIndex, clamped: false }
+  let bestIndex = 0
+  let bestDistance = Math.abs(ranges[0].segmentId - segmentId)
+  for (let i = 1; i < ranges.length; i += 1) {
+    const distance = Math.abs(ranges[i].segmentId - segmentId)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestIndex = i
+    }
+  }
+  return { index: bestIndex, clamped: true }
+}
+
+/**
+ * 由来セグメントの探索範囲（ASR文字ストリーム上の索引、閉区間）を「由来セグメント±1」で
+ * 決める。実測（117分・788ユニット・293セグメント）で、字幕ユニットの99.7%が由来
+ * セグメント1つの中に完全に収まり、2セグメントに跨るのはわずか0.3%、3セグメント以上に
+ * 跨る例はゼロだった。そのため探索範囲を「1つ前のセグメントの開始」〜「1つ後の
+ * セグメントの終了」に限定すれば、補正LLMがセグメント境界を跨いで文を再構成する
+ * ケース（隣接1つ分の跨ぎ）は吸収しつつ、講義全体（最大300倍以上）を探索する
+ * 必要が無くなり、遠方の頻出語への誤マッチが構造的に発生しなくなる。
+ *
+ * 開始 = 1つ前のセグメントの startIdx（無ければ自身の startIdx）
+ * 終了 = 1つ後のセグメントの endIdx（無ければ自身の endIdx）
+ */
+function resolveSegmentWindow(ranges: readonly AsrSegmentRange[], segmentId: number): SegmentWindow | null {
+  const found = findNearestRangeIndex(ranges, segmentId)
+  if (!found) return null
+  const { index, clamped } = found
+  const own = ranges[index]
+  const prev = index > 0 ? ranges[index - 1] : null
+  const next = index < ranges.length - 1 ? ranges[index + 1] : null
+  return {
+    startIdx: prev ? prev.startIdx : own.startIdx,
+    endIdx: next ? next.endIdx : own.endIdx,
+    clamped,
+  }
+}
+
+/** ranges が空（asrStream 自体が空）のときのみ使う縮退フォールバック。通常到達しない
+ * （呼び出し元の semanticSplitJa は asrStream.length===0 を別経路で処理するため）が、
+ * `alignUnitsGlobally` を直接叩くテスト等でのクラッシュを避けるための安全側の値。*/
+function degenerateSpan(jaText: string): AlignedSpan {
+  return {
+    startSec: 0,
+    endSec: 0,
+    matchedChars: 0,
+    totalChars: Math.max(1, normalizeTimingText(jaText).length),
+    matchRate: 0,
+    confidence: 'interpolated',
+    firstCharIndex: null,
+    lastCharIndex: null,
+  }
+}
+
+/**
+ * 1グループ（同じ由来セグメントのユニット群）を、そのセグメント±1の窓（`window`）に
+ * 限定してアラインする。`alignFragmentsWithinParentSlice` と同じ「スライスして
+ * アラインし、オフセットを戻す」パターン: `alignCuesToAsr` が返す `firstCharIndex`/
+ * `lastCharIndex` はスライス相対の索引なので、`window.startIdx` を加算して
+ * `asrStream` 全体の索引に戻す（`startSec`/`endSec` は絶対時刻のためオフセット不要）。
+ */
+function alignGroupWithinWindow(
+  groupUnits: readonly RawSemanticUnit[],
+  window: SegmentWindow,
+  asrStream: readonly AsrChar[],
+  script: LanguageScript,
+): AlignedSpan[] {
+  const slice = asrStream.slice(window.startIdx, window.endIdx + 1)
+  const spans = alignCuesToAsr(groupUnits.map(unit => unit.jaText), slice, { script })
+  return spans.map(span => ({
+    ...span,
+    firstCharIndex: span.firstCharIndex === null ? null : span.firstCharIndex + window.startIdx,
+    lastCharIndex: span.lastCharIndex === null ? null : span.lastCharIndex + window.startIdx,
+  }))
+}
+
+interface InitialSpansResult {
+  /** units と同じ並び順（元の順序）の初期スパン。*/
+  spans: AlignedSpan[]
+  /** sourceSegmentId が ranges に存在せず、最も近いセグメントへ丸めたグループの件数。*/
+  clampedSegmentIds: number
+}
+
+/**
+ * 全ユニットを `sourceSegmentId` ごとにグループ化し、グループごとに「由来セグメント
+ * ±1」の窓へ限定してアラインする（`resolveSegmentWindow`/`alignGroupWithinWindow`
+ * 参照）。結果は units と同じ順序（元の順序）で返す。
+ *
+ * グループの探索範囲どうしは隣接セグメント分だけ重なり得る（±1窓のため）ため、
+ * ここで返す時点ではグループ境界で startSec/endSec の重なりが残っている場合がある。
+ * 重なり解消は呼び出し元（`alignUnitsGlobally`）が全体で1回、`enforceMonotonicSpans`
+ * を適用して行う。
+ */
+function computeInitialSpansBySegment(
+  units: readonly RawSemanticUnit[],
+  asrStream: readonly AsrChar[],
+  segmentRanges: readonly AsrSegmentRange[],
+  script: LanguageScript,
+): InitialSpansResult {
+  const spans: AlignedSpan[] = new Array(units.length)
+  const groups = groupUnitsBySegment(units)
+  let clampedSegmentIds = 0
+
+  for (const group of groups) {
+    const window = resolveSegmentWindow(segmentRanges, group.segmentId)
+    if (!window) {
+      group.indices.forEach((originalIndex, i) => {
+        spans[originalIndex] = degenerateSpan(group.units[i].jaText)
+      })
+      continue
+    }
+    if (window.clamped) clampedSegmentIds += 1
+    const groupSpans = alignGroupWithinWindow(group.units, window, asrStream, script)
+    group.indices.forEach((originalIndex, i) => {
+      spans[originalIndex] = groupSpans[i]
+    })
+  }
+
+  return { spans, clampedSegmentIds }
+}
+
+export interface AlignUnitsGloballyResult {
+  units: AlignedUnit[]
+  /** `computeInitialSpansBySegment` が最も近いセグメントへ丸めた（sourceSegmentId が
+   * ranges に存在しなかった）グループの件数。診断用。*/
+  clampedSegmentIds: number
+}
+
+/**
+ * 全ユニットのテキストを、由来セグメント（`sourceSegmentId`）±1の範囲に限定して
+ * アラインする（詳細・実測根拠は `resolveSegmentWindow` 参照）。
+ * 講義全体を1本のASR文字ストリームとして扱う点（`asrStream`）は変わらないが、
+ * 各ユニットが実際に探索されるのはそのうちの由来セグメント付近だけになる。
  *
  * アライン結果が `mergedLongDurationSec` を超えるユニットは `splitOverlongUnit` で
  * 安全な位置から分割する。分割は「長すぎるキューを短くする」ための処理であり、
@@ -302,15 +486,23 @@ interface OverlongScanEntry {
  * 閉じ込め、確定済みの断片スパンは以降のループで上書きしない
  * （`OverlongScanEntry.accepted` で管理し、残りの超過ユニットのみ走査を続ける）。
  * 最大8回のループで打ち切る（旧実装 `alignUnits` のループ回数を踏襲）。
+ * この分割ループ自体は「由来セグメント±1」限定の対象外（従来どおり asrStream 全体を
+ * 参照できる `alignFragmentsWithinParent` を使う。挙動は変更していない）。
  */
 function alignUnitsGlobally(
   units: RawSemanticUnit[],
   asrStream: readonly AsrChar[],
+  segmentRanges: readonly AsrSegmentRange[],
   thresholds: PipelineThresholds,
   glossaryTerms: string[],
   script: LanguageScript = 'japanese',
-): AlignedUnit[] {
-  const initialSpans = alignCuesToAsr(units.map(unit => unit.jaText), asrStream, { script })
+): AlignUnitsGloballyResult {
+  const { spans: spansBySegment, clampedSegmentIds } = computeInitialSpansBySegment(units, asrStream, segmentRanges, script)
+  // グループ（由来セグメント±1の窓）どうしは隣接1セグメント分重なり得るため、
+  // 組み立て後に全体で1回、既存と同じ非対称の規則（後ろを押し出す・前は不変）で
+  // 重なりを解消する（enforceMonotonicSpans は asrAlignment.ts の alignCuesToAsr 内部でも
+  // 使っているのと同じロジック。firstCharIndex/lastCharIndex は変更しない）。
+  const initialSpans = enforceMonotonicSpans(spansBySegment)
   let entries: OverlongScanEntry[] = units.map((unit, index) => ({
     unit,
     span: initialSpans[index],
@@ -340,7 +532,10 @@ function alignUnitsGlobally(
     entries = [...entries.slice(0, overlongIndex), ...fragmentEntries, ...entries.slice(overlongIndex + 1)]
   }
 
-  return entries.map(entry => toAlignedUnit(entry.unit, entry.span, asrStream))
+  return {
+    units: entries.map(entry => toAlignedUnit(entry.unit, entry.span, asrStream)),
+    clampedSegmentIds,
+  }
 }
 
 /**
@@ -692,6 +887,10 @@ export interface SemanticSplitJaResult {
   scriptResolution: TranscriptScriptResolution
   /** `resolveCollapsedUnits` が隣へ統合した「潰れたキュー」の件数。診断用（0件でも意味を持つ）。*/
   collapsedMerged: number
+  /** `sourceSegmentId` が ASR セグメント範囲に存在せず、最も近いセグメントへ丸めた件数。
+   * 診断用（0件でも意味を持つ。通常はLLMが返す source_segment_id が実在のセグメントIDと
+   * ずれていないことを示す）。*/
+  clampedSegmentIds: number
 }
 
 /**
@@ -757,6 +956,16 @@ export function formatCollapsedMergedSummary(collapsedMerged: number): string {
   return `潰れキュー統合=${collapsedMerged}件`
 }
 
+/**
+ * `SemanticSplitJaResult.clampedSegmentIds`（`sourceSegmentId` が ASR セグメント範囲に
+ * 存在せず、最も近いセグメントへ丸めたグループの件数）を localPipeline.ts の
+ * トレース summary 用に整形する。0件のときも表示する（LLMが返す source_segment_id が
+ * 実在のセグメントIDとずれていないことを示す指標になるため）。
+ */
+export function formatClampedSegmentIdsSummary(clampedSegmentIds: number): string {
+  return `セグメントID丸め=${clampedSegmentIds}件`
+}
+
 export async function semanticSplitJa(
   segments: CorrectedSegmentLite[],
   settings: AdminSettings,
@@ -764,7 +973,8 @@ export async function semanticSplitJa(
   glossaryTerms: string[] = [],
 ): Promise<SemanticSplitJaResult> {
   // 書きおこし（元言語）の script。ラテン文字はWhisperXが単語単位でタイムスタンプを
-  // 返すため、buildAsrCharStream/alignCuesToAsr の両方に伝える必要がある（asrAlignment.ts参照）。
+  // 返すため、buildAsrCharStreamWithRanges/alignCuesToAsr の両方に伝える必要がある
+  // （asrAlignment.ts参照）。
   const scriptResolution = resolveTranscriptScript(settings, segments)
   const transcriptScript = scriptResolution.script
   const maxSegmentsPerRequest = resolveAiProvider(settings) === 'local_openai'
@@ -793,7 +1003,8 @@ export async function semanticSplitJa(
   }
 
   // セグメント順にユニットを収集し、フォールバック込みで全セグメント分をフラットな
-  // 時系列順リストにする。アライメントはこのあとセグメント境界を無視して一括で行う。
+  // 時系列順リストにする。アライメントはこのあと由来セグメント±1の範囲に限定して行う
+  // （`alignUnitsGlobally` 参照。実測で99.7%が由来セグメント1つに収まるため）。
   const orderedUnits: RawSemanticUnit[] = []
   for (const segment of segments) {
     let segmentUnits = unitsBySegment.get(segment.id) ?? []
@@ -811,19 +1022,21 @@ export async function semanticSplitJa(
     orderedUnits.push(...segmentUnits)
   }
 
-  const asrStream = buildAsrCharStream(segments, { script: transcriptScript })
+  const { stream: asrStream, ranges: segmentRanges } = buildAsrCharStreamWithRanges(segments, { script: transcriptScript })
   let aligned: AlignedUnit[]
   let collapsedMerged = 0
+  let clampedSegmentIds = 0
   if (asrStream.length === 0) {
     aligned = alignUnitsProportionalFallback(orderedUnits, segments, thresholds, glossaryTerms)
   } else {
-    const globallyAligned = alignUnitsGlobally(orderedUnits, asrStream, thresholds, glossaryTerms, transcriptScript)
-    const resolved = resolveCollapsedUnits(globallyAligned)
+    const globallyAligned = alignUnitsGlobally(orderedUnits, asrStream, segmentRanges, thresholds, glossaryTerms, transcriptScript)
+    const resolved = resolveCollapsedUnits(globallyAligned.units)
     aligned = resolved.units
     collapsedMerged = resolved.collapsedMerged
+    clampedSegmentIds = globallyAligned.clampedSegmentIds
   }
 
-  return { blocks: buildJaBlocks(aligned), scriptResolution, collapsedMerged }
+  return { blocks: buildJaBlocks(aligned), scriptResolution, collapsedMerged, clampedSegmentIds }
 }
 
 /** アライン済みユニット列から JaBlock 配列を組み立てる（id採番・空テキストスキップ）。*/
@@ -857,4 +1070,6 @@ export const __testing = {
   resolveTranscriptScript,
   isCollapsedUnit,
   resolveCollapsedUnits,
+  groupUnitsBySegment,
+  resolveSegmentWindow,
 }
