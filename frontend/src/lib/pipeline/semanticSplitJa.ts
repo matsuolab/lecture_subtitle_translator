@@ -364,8 +364,15 @@ function findNearestRangeIndex(
  *
  * 開始 = 1つ前のセグメントの startIdx（無ければ自身の startIdx）
  * 終了 = 1つ後のセグメントの endIdx（無ければ自身の endIdx）
+ *
+ * 窓が休憩などの無音を含んでも構わない。ここは「どこを探すか」であり、「いつ表示するか」
+ * とは別の関心事である。スパンが無音を覆わないことは asrAlignment.ts の不変条件
+ * （findSilenceBoundaries / clipSpanToSpeech）が保証する。
  */
-function resolveSegmentWindow(ranges: readonly AsrSegmentRange[], segmentId: number): SegmentWindow | null {
+function resolveSegmentWindow(
+  ranges: readonly AsrSegmentRange[],
+  segmentId: number,
+): SegmentWindow | null {
   const found = findNearestRangeIndex(ranges, segmentId)
   if (!found) return null
   const { index, clamped } = found

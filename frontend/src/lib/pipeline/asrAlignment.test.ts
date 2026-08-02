@@ -380,7 +380,7 @@ describe('外れ値ガード（buildProvisionalSpans: 逆行除去・かたま�
     globalMatches.set(54, 11)
     const cueBounds = [{ start: 0, end: 55 }]
 
-    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
     // 主かたまり(53文字, asrIndex100-152)だけが採用され、遠方の2文字は捨てられる。
     expect(info.matchedChars).toBe(53)
@@ -453,7 +453,7 @@ describe('外れ値ガード（buildProvisionalSpans: 逆行除去・かたま�
     for (let k = 0; k < 5; k += 1) globalMatches.set(10 + k, 500 + k)
     const cueBounds = [{ start: 0, end: 20 }]
 
-    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
     expect(info.matchedChars).toBe(5)
     expect(info.needsInterpolation).toBe(true)
@@ -467,7 +467,7 @@ describe('外れ値ガード（buildProvisionalSpans: 逆行除去・かたま�
     for (let k = 12; k <= 19; k += 1) globalMatches.set(k, 110 + (k - 12)) // cue1: chars12-19 -> asrIndex110-117
     const cueBounds = [{ start: 0, end: 10 }, { start: 10, end: 20 }]
 
-    const [span0, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const [span0, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
     // cue0の末尾は元の採用範囲(106)より伸びるが、cue1の元の採用範囲(110以降)には届かない。
     expect(span0.lastCharIndex).toBeGreaterThan(106)
@@ -485,7 +485,7 @@ describe('外れ値ガード（buildProvisionalSpans: 逆行除去・かたま�
     for (let k = 2; k <= 8; k += 1) globalMatches.set(k, 2 + (k - 2)) // chars2-8 -> asrIndex2-8
     const cueBounds = [{ start: 0, end: 10 }]
 
-    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const [info] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
     // 先頭2文字(0,1)ぶん手前へ、末尾1文字(9)ぶん後ろへ伸びる。
     expect(info.firstCharIndex).toBe(0)
@@ -522,7 +522,7 @@ describe('修正3: 包絡伸長のギャップ吸収（extendEnvelopes / MAX_GAP
     for (let k = 6; k <= 9; k += 1) globalMatches.set(k, 11 + (k - 6)) // cue1: chars6-9 -> asrIndex11-14
     const cueBounds = [{ start: 0, end: 5 }, { start: 5, end: 10 }]
 
-    const [span0, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const [span0, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
     expect(span0.lastCharIndex).toBe(4) // cue0は完全一致(trailingUnmatched=0)なので伸びない
     // cue1の先頭は空き領域(asrIndex5)まで丸ごと伸びる（1.5秒 <= MAX_GAP_ABSORB_SEC）。
@@ -554,7 +554,7 @@ describe('修正3: 包絡伸長のギャップ吸収（extendEnvelopes / MAX_GAP
     for (let k = 6; k <= 9; k += 1) globalMatches.set(k, 11 + (k - 6))
     const cueBounds = [{ start: 0, end: 5 }, { start: 5, end: 10 }]
 
-    const [, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const [, span1] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
     // 未対応文字数(1文字)ぶんだけ伸びる: asrIndex11 -> 10（空き領域の全体(5)までは届かない）。
     expect(span1.firstCharIndex).toBe(10)
@@ -580,7 +580,7 @@ describe('修正3: 包絡伸長のギャップ吸収（extendEnvelopes / MAX_GAP
     for (let k = 0; k <= 4; k += 1) globalMatches.set(k, k) // cue0: chars0-4 -> asrIndex0-4（完全一致）
     const cueBounds = [{ start: 0, end: 5 }]
 
-    const [span0] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const [span0] = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
     expect(span0.lastCharIndex).toBe(4)
     expect(span0.endSec).toBeCloseTo(5, 5)
@@ -712,7 +712,7 @@ describe('修正2: 補間スロットの退化ガード（distributeRun / interp
     ]
     const asr: AsrChar[] = [makeChar('x', 0, 10), makeChar('y', 100, 110)]
 
-    const didBorrow = __testing.distributeRun(provisional, results, 1, 2, asr)
+    const didBorrow = __testing.distributeRun(provisional, results, 1, 2, asr, new Set())
 
     expect(didBorrow).toBe(true)
     // 直前キュー(results[0])の末尾から借用するため、[1]は直前キューのendSec(10)を
@@ -767,7 +767,7 @@ describe('修正: 按分の座標系を索引空間へ（無音区間を跨が�
     ]
     const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 0 }, { startSec: 0, endSec: 0 }]
 
-    const didBorrow = __testing.distributeRun(provisional, results, 0, 2, asr)
+    const didBorrow = __testing.distributeRun(provisional, results, 0, 2, asr, new Set())
 
     expect(didBorrow).toBe(false)
     expect(results[0]).toEqual({ startSec: 0, endSec: 2 })
@@ -800,7 +800,7 @@ describe('修正: 按分の座標系を索引空間へ（無音区間を跨が�
     ]
     const asr: AsrChar[] = [makeChar('x', 0, 1), makeChar('y', 300, 301)]
 
-    __testing.distributeRun(provisional, results, 1, 2, asr)
+    __testing.distributeRun(provisional, results, 1, 2, asr, new Set())
 
     expect(results[0].endSec - results[0].startSec).toBeGreaterThanOrEqual(MIN_SPAN_SEC_FOR_TEST - 1e-9)
     expect(results[1].endSec).toBeLessThanOrEqual(1)
@@ -820,7 +820,7 @@ describe('修正: 按分の座標系を索引空間へ（無音区間を跨が�
     ]
     const asr: AsrChar[] = [makeChar('x', 0, 0.05), makeChar('y', 300, 301)]
 
-    expect(() => __testing.distributeRun(provisional, results, 1, 2, asr)).not.toThrow()
+    expect(() => __testing.distributeRun(provisional, results, 1, 2, asr, new Set())).not.toThrow()
 
     // 直前キューはこれ以上削れない（すでにMIN_SPAN_SEC相当）ため、借用できず
     // 直前キューの終了時刻に長さ0で並ぶ。
@@ -836,7 +836,7 @@ describe('修正: 按分の座標系を索引空間へ（無音区間を跨が�
     const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 0 }, { startSec: 300, endSec: 310 }]
     const asr: AsrChar[] = [makeChar('x', 300, 310)]
 
-    const didBorrow = __testing.distributeRun(provisional, results, 0, 1, asr)
+    const didBorrow = __testing.distributeRun(provisional, results, 0, 1, asr, new Set())
 
     expect(didBorrow).toBe(true)
     // 直後キュー(results[1])の先頭から借用するため、[0]は直後キューのstartSec(300)を
@@ -854,7 +854,7 @@ describe('修正: 按分の座標系を索引空間へ（無音区間を跨が�
     ]
     const results: { startSec: number; endSec: number }[] = [{ startSec: 0, endSec: 2 }, { startSec: 0, endSec: 0 }]
 
-    const didBorrow = __testing.distributeRun(provisional, results, 1, 2, asr)
+    const didBorrow = __testing.distributeRun(provisional, results, 1, 2, asr, new Set())
 
     // rangeStartIdx=2, rangeEndIdx=asr.length-1=4 と索引の余地があるため、通常の
     // 索引按分になり借用は起きない。
@@ -881,9 +881,9 @@ describe('修正: 按分の座標系を索引空間へ（無音区間を跨が�
     const globalMatches = new Map<number, number>()
     for (let k = 0; k < 4; k += 1) globalMatches.set(cueBounds[0].start + k, k) // cue0 -> asrIndex0-3
     for (let k = 0; k < 4; k += 1) globalMatches.set(cueBounds[2].start + k, 4 + k) // cue2 -> asrIndex4-7
-    const provisional = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches)
+    const provisional = __testing.buildProvisionalSpans(asr, cueBounds, globalMatches, new Set())
 
-    const { borrowedRunCount } = __testing.interpolateSpansWithDiagnostics(provisional, asr)
+    const { borrowedRunCount } = __testing.interpolateSpansWithDiagnostics(provisional, asr, new Set())
 
     expect(borrowedRunCount).toBe(1)
   })

@@ -161,6 +161,11 @@ const MIN_SPAN_SEC = 0.05
 // 届かない。2.0秒以内なら「同じ発話が続いている隙間」とみなして丸ごと取り込み、それを
 // 超える場合は無関係な発話区間まで飲み込むリスクがあるため従来どおり文字数ぶんに留める。
 const MAX_GAP_ABSORB_SEC = 2.0
+/**
+ * ここから先を「字幕を消してよい無音」と見なす間隔（秒）。根拠は findSilenceBoundaries を参照。
+ * BBCガイドライン（最低1.0秒、望ましくは1.5秒）と実測分布の谷が一致する値。
+ */
+const SILENCE_MIN_GAP_SEC = 1.0
 
 interface ResolvedOptions {
   windowChars: number
@@ -649,14 +654,17 @@ function longestNonDecreasingSubsequence(pairs: readonly CharPair[]): CharPair[]
  * LLMが長い区間を書き換えた場合、生の飛びは大きくてもキュー側も同じだけ進むため excess は
  * 小さく保たれる。生の飛びで判定すると正当な書き換えを誤って分割してしまう。
  */
-function selectLargestCluster(pairs: readonly CharPair[]): CharPair[] {
+function selectLargestCluster(pairs: readonly CharPair[], silenceAfter?: ReadonlySet<number>): CharPair[] {
   if (pairs.length === 0) return []
   const clusters: CharPair[][] = [[pairs[0]]]
   for (let i = 1; i < pairs.length; i += 1) {
     const prev = pairs[i - 1]
     const cur = pairs[i]
     const excess = cur.asrIndex - prev.asrIndex - (cur.cueCharIndex - prev.cueCharIndex)
-    if (excess > EXCESS_SPLIT_THRESHOLD) {
+    // 無音区間を跨ぐ対応は、たとえ excess が小さくても別のかたまりとして切る。
+    // 1つの字幕が無音を挟んで表示され続けるのを構造的に防ぐため（不変条件の実装）。
+    const crossesSilence = silenceAfter ? spansSilence(prev.asrIndex, cur.asrIndex, silenceAfter) : false
+    if (excess > EXCESS_SPLIT_THRESHOLD || crossesSilence) {
       clusters.push([cur])
     } else {
       clusters[clusters.length - 1].push(cur)
@@ -670,6 +678,107 @@ function selectLargestCluster(pairs: readonly CharPair[]): CharPair[] {
 }
 
 /**
+ * 開始時刻が無音区間の内側に入っているスパンを、その無音が明ける時刻へ寄せる。
+ * 重なり解消（enforceMonotonicSpans）は時刻を後ろへ押し出すため、押し出した先が
+ * 無音になることがある。不変条件「無音のあいだ字幕を出さない」を最後に担保する。
+ */
+function snapStartsOutOfSilence(
+  spans: readonly TimedSpan[],
+  asr: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
+): TimedSpan[] {
+  if (silenceAfter.size === 0 || asr.length === 0) return [...spans]
+  const gaps = [...silenceAfter].sort((a, b) => a - b).map(i => [asr[i].end, asr[i + 1].start] as const)
+  return spans.map(span => {
+    const hit = gaps.find(([gs, ge]) => span.startSec > gs && span.startSec < ge)
+    if (!hit) return span
+    const startSec = hit[1]
+    return { startSec, endSec: Math.max(startSec, span.endSec) }
+  })
+}
+
+/** `idx` より手前で最も近い無音境界の直後のトークン索引（無ければ0）。 */
+function nearestSilenceBefore(idx: number, silenceAfter: ReadonlySet<number>): number {
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    if (silenceAfter.has(i)) return i + 1
+  }
+  return 0
+}
+
+/** `idx` より後ろで最も近い無音境界のトークン索引（無ければ末尾）。 */
+function nearestSilenceAfter(idx: number, silenceAfter: ReadonlySet<number>, length: number): number {
+  for (let i = idx; i < length - 1; i += 1) {
+    if (silenceAfter.has(i)) return i
+  }
+  return length - 1
+}
+
+/** [fromIdx, toIdx) の間に無音境界が1つでもあるか。 */
+function spansSilence(fromIdx: number, toIdx: number, silenceAfter: ReadonlySet<number>): boolean {
+  for (let i = fromIdx; i < toIdx; i += 1) {
+    if (silenceAfter.has(i)) return true
+  }
+  return false
+}
+
+/**
+ * 無音境界の集合を求める。`i` が含まれるとき、トークン `i` と `i+1` の間に
+ * SILENCE_MIN_GAP_SEC 以上の無音があることを表す。
+ *
+ * 無音は判定するものではなくデータに存在する（トークンが無い時間＝無音）。
+ * どこからを「字幕を消してよい無音」と見なすかだけが設計判断であり、
+ * BBCの字幕ガイドラインは「間があるとき字幕の間に空白を作ってよいのは最低1.0秒、
+ * 望ましくは1.5秒。それ未満で消すとガタついた見え方になる」としている。
+ * 実測（7データセット）のトークン間隔の分布も 0.5〜1.0秒に谷があり、1.0〜1.5秒で
+ * 再び盛り上がる（語句内の間と、文の切れ目の間が分かれる）。業界基準と実測分布が
+ * 独立に同じ境界を示しているため 1.0秒を採る。
+ */
+export function findSilenceBoundaries(
+  asr: readonly AsrChar[],
+  minGapSec: number = SILENCE_MIN_GAP_SEC,
+): Set<number> {
+  const boundaries = new Set<number>()
+  for (let i = 0; i < asr.length - 1; i += 1) {
+    if (asr[i + 1].start - asr[i].end >= minGapSec) boundaries.add(i)
+  }
+  return boundaries
+}
+
+/**
+ * スパンが無音区間と重ならないようにクリップする。
+ *
+ * 「無音のあいだ字幕を表示しない」はプロジェクトの既存ドキュメント（字幕ベスト
+ * プラクティス「無音区間が長い場合は字幕も早めに消してよい」）とBBCガイドラインの
+ * 双方が示す原則。スパンが無音を含む場合、実測トークンが最も多く含まれる側だけを残す。
+ */
+function clipSpanToSpeech(
+  span: TimedSpan,
+  info: ProvisionalSpanInfo,
+  asr: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
+): TimedSpan {
+  if (silenceAfter.size === 0 || asr.length === 0) return span
+  const first = info.firstCharIndex
+  const last = info.lastCharIndex
+  if (first === null || last === null || first > last) return span
+  if (!spansSilence(first, last, silenceAfter)) return span
+  // 無音境界で区切り、トークン数が最大の区画を採用する（同数なら先の区画）。
+  let bestFrom = first
+  let bestTo = first
+  let curFrom = first
+  for (let i = first; i <= last; i += 1) {
+    if (i === last || silenceAfter.has(i)) {
+      if (i - curFrom > bestTo - bestFrom) {
+        bestFrom = curFrom
+        bestTo = i
+      }
+      curFrom = i + 1
+    }
+  }
+  return { startSec: asr[bestFrom].start, endSec: asr[bestTo].end }
+}
+
+/**
  * 1キュー分の対応ペアから、外れ値（逆行・遠方への誤マッチ）を除いた「採用かたまり」を
  * 選び、その範囲だけで包絡（startSec/endSec/firstCharIndex/lastCharIndex）を作る。
  * 隣キューへの伸長は行わない（extendEnvelopes で別途行う）。
@@ -679,6 +788,7 @@ function buildRawProvisionalSpan(
   start: number,
   end: number,
   globalMatches: ReadonlyMap<number, number>,
+  silenceAfter: ReadonlySet<number>,
 ): ProvisionalSpanInfo {
   const totalChars = end - start
   const rawPairs = collectCharPairs(start, end, globalMatches)
@@ -695,7 +805,7 @@ function buildRawProvisionalSpan(
       trailingUnmatched: 0,
     }
   }
-  const cluster = selectLargestCluster(longestNonDecreasingSubsequence(rawPairs))
+  const cluster = selectLargestCluster(longestNonDecreasingSubsequence(rawPairs), silenceAfter)
   const minA = cluster[0].asrIndex
   const maxA = cluster[cluster.length - 1].asrIndex
   const [leftIdx, rightIdx] = trimEnvelopeByScore(asr, minA, maxA)
@@ -776,7 +886,11 @@ function resolveExtendedRightIdx(
  * ただし隣キューの採用範囲には食い込ませない（隣が補間対象なら制約なし）。
  * 伸長は常に「外側へ広げる」方向のみ（Math.min/maxで、採用済みの核を縮める側には動かさない）。
  */
-function extendEnvelopes(provisional: readonly ProvisionalSpanInfo[], asr: readonly AsrChar[]): ProvisionalSpanInfo[] {
+function extendEnvelopes(
+  provisional: readonly ProvisionalSpanInfo[],
+  asr: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
+): ProvisionalSpanInfo[] {
   return provisional.map((info, index) => {
     const firstCharIndex = info.firstCharIndex
     const lastCharIndex = info.lastCharIndex
@@ -785,8 +899,11 @@ function extendEnvelopes(provisional: readonly ProvisionalSpanInfo[], asr: reado
     }
     const prevLast = adoptedLastCharIndex(provisional[index - 1])
     const nextFirst = adoptedFirstCharIndex(provisional[index + 1])
-    const lowerBound = prevLast !== null ? prevLast + 1 : 0
-    const upperBound = nextFirst !== null ? nextFirst - 1 : asr.length - 1
+    // 伸長は無音境界を越えない（越えると無音のあいだ字幕が表示され続ける）。
+    const silenceLower = nearestSilenceBefore(firstCharIndex, silenceAfter)
+    const silenceUpper = nearestSilenceAfter(lastCharIndex, silenceAfter, asr.length)
+    const lowerBound = Math.max(prevLast !== null ? prevLast + 1 : 0, silenceLower)
+    const upperBound = Math.min(nextFirst !== null ? nextFirst - 1 : asr.length - 1, silenceUpper)
     const newLeftIdx = resolveExtendedLeftIdx(info, asr, firstCharIndex, lowerBound)
     const newRightIdx = resolveExtendedRightIdx(info, asr, lastCharIndex, upperBound)
     if (newLeftIdx === firstCharIndex && newRightIdx === lastCharIndex) return info
@@ -804,9 +921,10 @@ function buildProvisionalSpans(
   asr: readonly AsrChar[],
   cueBounds: readonly CueBound[],
   globalMatches: ReadonlyMap<number, number>,
+  silenceAfter: ReadonlySet<number>,
 ): ProvisionalSpanInfo[] {
-  const raw = cueBounds.map(({ start, end }) => buildRawProvisionalSpan(asr, start, end, globalMatches))
-  return extendEnvelopes(raw, asr)
+  const raw = cueBounds.map(({ start, end }) => buildRawProvisionalSpan(asr, start, end, globalMatches, silenceAfter))
+  return extendEnvelopes(raw, asr, silenceAfter)
 }
 
 /**
@@ -862,6 +980,34 @@ function resolveSlot(info: ProvisionalSpanInfo, slotStart: number, slotEnd: numb
  * indexPosToSec で時刻へ変換する。小数位置は必ず単一トークンの内側に収まる
  * （indexPosToSec 参照）ため、トークンを跨いだ補間は起こらない。
  */
+/**
+ * [rangeStartIdx, rangeEndIdx] を無音境界で区切り、発話区間（トークンが連続している
+ * 区間）の一覧にする。補間キューはこの区間の中にしか置けない。
+ */
+function speechRunsInRange(
+  rangeStartIdx: number,
+  rangeEndIdx: number,
+  silenceAfter: ReadonlySet<number>,
+): Array<[number, number]> {
+  const runs: Array<[number, number]> = []
+  let start = rangeStartIdx
+  for (let i = rangeStartIdx; i <= rangeEndIdx; i += 1) {
+    if (i === rangeEndIdx || silenceAfter.has(i)) {
+      runs.push([start, i])
+      start = i + 1
+    }
+  }
+  return runs
+}
+
+/**
+ * 補間キューを索引空間へ配分する。無音境界を壁として扱い、発話区間を順に埋める。
+ *
+ * 一致トークンを持つキューは「実測トークンが多い区画を残す」という証拠に基づく判断が
+ * できる（clipSpanToSpeech）が、補間キューにはその証拠が無い。証拠が無いキューについて
+ * 確実に言えるのは「無音には置かない」ことだけなので、配分の段階で無音を跨げない
+ * ようにする（起きた違反を後から直すのではなく、起こり得ない配分にする）。
+ */
 function distributeRunByIndex(
   provisional: readonly ProvisionalSpanInfo[],
   results: TimedSpan[],
@@ -870,20 +1016,31 @@ function distributeRunByIndex(
   rangeStartIdx: number,
   rangeEndIdx: number,
   asr: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
 ): void {
   const chunk = provisional.slice(from, to)
   const totalChunkChars = chunk.reduce((sum, item) => sum + Math.max(1, item.totalChars), 0)
-  const idxSpan = Math.max(0, rangeEndIdx + 1 - rangeStartIdx)
-  let cursor = rangeStartIdx
+  const runs = speechRunsInRange(rangeStartIdx, rangeEndIdx, silenceAfter)
+  const capacity = runs.reduce((sum, [a, b]) => sum + (b + 1 - a), 0)
+  let runIndex = 0
+  let cursor = runs.length > 0 ? runs[0][0] : rangeStartIdx
   for (let k = from; k < to; k += 1) {
     const info = provisional[k]
-    const share = Math.max(1, info.totalChars) / Math.max(1, totalChunkChars)
+    const share = capacity * (Math.max(1, info.totalChars) / Math.max(1, totalChunkChars))
+    const runEndExclusive = runs.length > 0 ? runs[runIndex][1] + 1 : rangeEndIdx + 1
     const isLast = k === to - 1
-    const endPos = isLast ? rangeStartIdx + idxSpan : cursor + idxSpan * share
-    const slotStart = indexPosToSec(asr, cursor, rangeEndIdx)
-    const slotEnd = indexPosToSec(asr, Math.max(cursor, endPos), rangeEndIdx)
+    // 区間の壁を越えないように切り詰める。最後のキューは現在の区間の末尾まで使う。
+    const endPos = Math.min(runEndExclusive, isLast ? runEndExclusive : cursor + share)
+    const clampIdx = runs.length > 0 ? runs[runIndex][1] : rangeEndIdx
+    const slotStart = indexPosToSec(asr, cursor, clampIdx)
+    const slotEnd = indexPosToSec(asr, Math.max(cursor, endPos), clampIdx)
     results[k] = resolveSlot(info, slotStart, slotEnd)
     cursor = endPos
+    // 区間を使い切ったら次の発話区間へ移る（無音は飛ばす）。
+    if (cursor >= runEndExclusive && runIndex < runs.length - 1) {
+      runIndex += 1
+      cursor = runs[runIndex][0]
+    }
   }
 }
 
@@ -993,6 +1150,7 @@ function distributeRun(
   from: number,
   to: number,
   asr: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
 ): boolean {
   const prevLastCharIndex = from > 0 ? provisional[from - 1].lastCharIndex : null
   const nextFirstCharIndex = to < provisional.length ? provisional[to].firstCharIndex : null
@@ -1000,7 +1158,7 @@ function distributeRun(
   const rangeEndIdx = nextFirstCharIndex !== null ? nextFirstCharIndex - 1 : asr.length - 1
 
   if (rangeEndIdx >= rangeStartIdx) {
-    distributeRunByIndex(provisional, results, from, to, rangeStartIdx, rangeEndIdx, asr)
+    distributeRunByIndex(provisional, results, from, to, rangeStartIdx, rangeEndIdx, asr, silenceAfter)
     return false
   }
 
@@ -1037,6 +1195,7 @@ interface InterpolationDiagnostics {
 function interpolateSpansWithDiagnostics(
   provisional: readonly ProvisionalSpanInfo[],
   asr: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
 ): InterpolationDiagnostics {
   const results: TimedSpan[] = new Array(provisional.length)
   provisional.forEach((info, i) => {
@@ -1054,7 +1213,7 @@ function interpolateSpansWithDiagnostics(
     }
     let runEnd = index
     while (runEnd < provisional.length && results[runEnd] === undefined) runEnd += 1
-    const didBorrow = distributeRun(provisional, results, index, runEnd, asr)
+    const didBorrow = distributeRun(provisional, results, index, runEnd, asr, silenceAfter)
     if (didBorrow) borrowedRunCount += 1
     index = runEnd
   }
@@ -1062,8 +1221,8 @@ function interpolateSpansWithDiagnostics(
   return { spans: results, borrowedRunCount }
 }
 
-function interpolateSpans(provisional: readonly ProvisionalSpanInfo[], asr: readonly AsrChar[]): TimedSpan[] {
-  return interpolateSpansWithDiagnostics(provisional, asr).spans
+function interpolateSpans(provisional: readonly ProvisionalSpanInfo[], asr: readonly AsrChar[], silenceAfter: ReadonlySet<number> = new Set()): TimedSpan[] {
+  return interpolateSpansWithDiagnostics(provisional, asr, silenceAfter).spans
 }
 
 /**
@@ -1134,10 +1293,15 @@ export function alignCuesToAsr(
   const cueBounds = computeCueBounds(cueTokenLists.map(tokens => tokens.length))
   const cueTokensFlat = cueTokenLists.flat()
 
+  const silenceAfter = findSilenceBoundaries(asr)
   const globalMatches = buildGlobalMatches(asr, cueTokenLists, cueBounds, cueTokensFlat, resolved)
-  const provisional = buildProvisionalSpans(asr, cueBounds, globalMatches)
-  const interpolated = interpolateSpans(provisional, asr)
-  const monotonic = enforceMonotonicSpans(interpolated)
+  const provisional = buildProvisionalSpans(asr, cueBounds, globalMatches, silenceAfter)
+  const interpolated = interpolateSpans(provisional, asr, silenceAfter)
+  // 不変条件: キューのスパンは無音区間と重ならない（無音のあいだ字幕を出さない）。
+  const clipped = interpolated.map((span, index) => clipSpanToSpeech(span, provisional[index], asr, silenceAfter))
+  // 重なり解消は後ろのキューの開始を押し出すため、押し出した先が無音になり得る。
+  // 不変条件を最後に必ず満たすよう、押し出し後に開始時刻を発話の先頭へ寄せ直す。
+  const monotonic = snapStartsOutOfSilence(enforceMonotonicSpans(clipped), asr, silenceAfter)
 
   return monotonic.map((span, index) => finalizeSpan(span, provisional[index]))
 }
