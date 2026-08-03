@@ -18,6 +18,7 @@ import {
   buildAsrCharStreamWithRanges,
   detectAsrScriptDetail,
   enforceMonotonicSpans,
+  findSilenceBoundaries,
   type AlignedSpan,
   type AsrChar,
   type AsrSegmentRange,
@@ -27,6 +28,16 @@ const MAX_SEGMENTS_PER_REQUEST = 4
 const LOCAL_MAX_SEGMENTS_PER_REQUEST = 2
 // オーバーロング分割の再アライン回数上限。旧実装(alignUnits)のループ回数を踏襲。
 const MAX_OVERLONG_SPLIT_LOOPS = 8
+
+/**
+ * 「字幕が出ていない」とみなす発話の最小長（秒）。実機データ（117分）で
+ * これ以上の欠損は38箇所・計139.2秒あり、最大16.5秒。1.0秒未満の欠損は
+ * 端点の丸め誤差の範囲なので対象にしない。
+ */
+const MIN_UNCOVERED_SEC = 1.0
+
+/** 1グループあたりのカバレッジ修復の試行上限。*/
+const MAX_COVERAGE_SPLIT_LOOPS = 8
 
 /**
  * 「物理的にあり得ないキュー」判定のしきい値（文字/秒）。
@@ -325,6 +336,11 @@ function groupUnitsBySegment(units: readonly RawSemanticUnit[]): SegmentGroup[] 
 interface SegmentWindow {
   startIdx: number
   endIdx: number
+  /** そのセグメント自身（隣接±1を含まない）のASR文字ストリーム上の索引範囲（閉区間）。
+   * カバレッジ修復（`repairGroupCoverage`）が「隣のセグメントの発話は隣のグループが
+   * 覆う」という前提のもと、探索対象を自セグメントの発話区間だけに絞るために使う。*/
+  ownStartIdx: number
+  ownEndIdx: number
   /** segmentId が ranges に存在せず、最も近い既知のセグメントへ丸めたか。*/
   clamped: boolean
 }
@@ -382,6 +398,8 @@ function resolveSegmentWindow(
   return {
     startIdx: prev ? prev.startIdx : own.startIdx,
     endIdx: next ? next.endIdx : own.endIdx,
+    ownStartIdx: own.startIdx,
+    ownEndIdx: own.endIdx,
     clamped,
   }
 }
@@ -424,17 +442,300 @@ function alignGroupWithinWindow(
   }))
 }
 
+/**
+ * ASR文字ストリームの索引範囲 `[fromIdx, toIdx]`（閉区間）を、無音境界（`silenceAfter`。
+ * `findSilenceBoundaries` 参照）で区切った発話区間（実際に声が出ている時間区間）の
+ * 一覧にする。`fromIdx > toIdx`（空範囲）のときは空配列を返す。
+ */
+function speechRunsInRange(
+  asrStream: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
+  fromIdx: number,
+  toIdx: number,
+): Array<{ start: number; end: number }> {
+  const runs: Array<{ start: number; end: number }> = []
+  let runStart = fromIdx
+  for (let i = fromIdx; i <= toIdx; i += 1) {
+    if (i === toIdx || silenceAfter.has(i)) {
+      runs.push({ start: asrStream[runStart].start, end: asrStream[i].end })
+      runStart = i + 1
+    }
+  }
+  return runs
+}
+
+/**
+ * 発話区間 `runs` のうち、`spans`（`startSec`/`endSec`）のどれにも覆われていない
+ * 区間を求める（`uncoveredIntervals`/`totalUncoveredSec` 共通の内部計算）。
+ * こちらは閾値でのフィルタを行わない生の欠損区間（改善量の測定に使う）。
+ */
+function computeUncoveredGaps(
+  runs: readonly { start: number; end: number }[],
+  spans: readonly AlignedSpan[],
+): Array<{ start: number; end: number }> {
+  const gaps: Array<{ start: number; end: number }> = []
+  for (const run of runs) {
+    const covered = spans
+      .map(span => ({ start: Math.max(span.startSec, run.start), end: Math.min(span.endSec, run.end) }))
+      .filter(part => part.end > part.start)
+      .sort((a, b) => a.start - b.start)
+    let cursor = run.start
+    for (const part of covered) {
+      if (part.start > cursor) gaps.push({ start: cursor, end: part.start })
+      cursor = Math.max(cursor, part.end)
+    }
+    if (run.end > cursor) gaps.push({ start: cursor, end: run.end })
+  }
+  return gaps
+}
+
+/**
+ * 発話区間のうち、どのスパンにも覆われていない区間（`MIN_UNCOVERED_SEC` 以上のもの）を
+ * 返す。カバレッジ修復ループ（`repairGroupCoverage`）が「直すべき穴」を見つけるために使う。
+ */
+function uncoveredIntervals(
+  runs: readonly { start: number; end: number }[],
+  spans: readonly AlignedSpan[],
+): Array<{ start: number; end: number }> {
+  return computeUncoveredGaps(runs, spans).filter(gap => gap.end - gap.start >= MIN_UNCOVERED_SEC)
+}
+
+/**
+ * 未カバー区間の合計秒数（閾値フィルタなし）。`repairGroupCoverage` が分割の前後で
+ * 比較し、実際に改善したか（無音の向こう側の本文が届くようになったか）を判定するのに使う。
+ */
+function totalUncoveredSec(
+  runs: readonly { start: number; end: number }[],
+  spans: readonly AlignedSpan[],
+): number {
+  return computeUncoveredGaps(runs, spans).reduce((sum, gap) => sum + (gap.end - gap.start), 0)
+}
+
+/** カバレッジ修復ループが分割の採用を決める最小改善量（秒）。*/
+const MIN_COVERAGE_IMPROVEMENT_SEC = 0.5
+
+/** カバレッジ修復ループが分割対象として受け付ける本文の最小文字数。`chooseSafeSplitIndex` が
+ * 意味のある分割位置（先頭・末尾25%を除く範囲）を選べる最小限の長さ。*/
+const MIN_SPLITTABLE_TEXT_LENGTH = 16
+
+interface GroupAlignment {
+  units: RawSemanticUnit[]
+  spans: AlignedSpan[]
+  /** `units[i]` がグループ内の元の（分割前の）何番目のユニット（0-indexed）に由来するか。
+   * 分割で1つのユニットが2断片に増えた場合、両断片が同じ値を持つ。呼び出し元
+   * （`computeInitialSpansBySegment`）が `group.indices` と組み合わせて元の絶対 index への
+   * 書き戻しに使う。unitId 文字列の解析に頼らないため、分割の連鎖（分割断片がさらに
+   * 分割される）が起きても安全に対応関係を追える。*/
+  originGroupIndices: number[]
+}
+
+/** hole の直前で終わっているスパンのうち最も後ろのもの（無ければ -1）。 */
+function findSpanEndingBeforeHole(spans: readonly AlignedSpan[], holeStart: number): number {
+  let targetIndex = -1
+  let bestEndSec = Number.NEGATIVE_INFINITY
+  for (let i = 0; i < spans.length; i += 1) {
+    if (spans[i].endSec <= holeStart && spans[i].endSec > bestEndSec) {
+      bestEndSec = spans[i].endSec
+      targetIndex = i
+    }
+  }
+  return targetIndex
+}
+
+/** hole の直後から始まっているスパンのうち最も手前のもの（無ければ -1）。 */
+function findSpanStartingAfterHole(spans: readonly AlignedSpan[], holeEnd: number): number {
+  let targetIndex = -1
+  let bestStartSec = Number.POSITIVE_INFINITY
+  for (let i = 0; i < spans.length; i += 1) {
+    if (spans[i].startSec >= holeEnd && spans[i].startSec < bestStartSec) {
+      bestStartSec = spans[i].startSec
+      targetIndex = i
+    }
+  }
+  return targetIndex
+}
+
+interface CoverageSplitCandidate {
+  units: RawSemanticUnit[]
+  spans: AlignedSpan[]
+  originGroupIndices: number[]
+  /** この候補を採用した場合の未カバー秒数の減少量（採用判定・prev/next比較の両方に使う）。*/
+  improvementSec: number
+}
+
+/**
+ * `targetIndex` のユニットを分割して hole を埋める候補を1つ組み立てる。分割位置の
+ * 目安は `side` で変える: 'prev'（hole の手前で終わっているユニット）は分割後の
+ * *後半*が hole 側を埋めるので `preferred = len * covered/(covered+holeLen)`。
+ * 'next'（hole の後ろから始まっているユニット）は分割後の*前半*が hole 側を埋めるので
+ * `preferred = len * holeLen/(covered+holeLen)`（対称）。
+ *
+ * 分割できない（本文が短すぎる／分割位置が退化する）、または再アライン後の改善量が
+ * `MIN_COVERAGE_IMPROVEMENT_SEC` 未満なら null を返す（呼び出し側が「この側は不採用」
+ * と判断できるようにする）。
+ */
+function buildCoverageSplitCandidate(
+  units: readonly RawSemanticUnit[],
+  spans: readonly AlignedSpan[],
+  originGroupIndices: readonly number[],
+  targetIndex: number,
+  hole: { start: number; end: number },
+  side: 'prev' | 'next',
+  runs: readonly { start: number; end: number }[],
+  window: SegmentWindow,
+  asrStream: readonly AsrChar[],
+  script: LanguageScript,
+  glossaryTerms: string[],
+): CoverageSplitCandidate | null {
+  const targetUnit = units[targetIndex]
+  if (targetUnit.jaText.length < MIN_SPLITTABLE_TEXT_LENGTH) return null
+
+  const targetSpan = spans[targetIndex]
+  const covered = targetSpan.endSec - targetSpan.startSec
+  const holeLen = hole.end - hole.start
+  const preferred = side === 'prev'
+    ? Math.round(targetUnit.jaText.length * covered / (covered + holeLen))
+    : Math.round(targetUnit.jaText.length * holeLen / (covered + holeLen))
+  const splitAt = chooseSafeSplitIndex(targetUnit.jaText, preferred, glossaryTerms)
+  const firstText = targetUnit.jaText.slice(0, splitAt)
+  const secondText = targetUnit.jaText.slice(splitAt)
+  if (!firstText || !secondText) return null
+
+  const firstUnit: RawSemanticUnit = {
+    ...targetUnit,
+    unitId: `${targetUnit.unitId}_c1`,
+    jaText: firstText,
+    canMergeWithNext: true,
+  }
+  const secondUnit: RawSemanticUnit = {
+    ...targetUnit,
+    unitId: `${targetUnit.unitId}_c2`,
+    jaText: secondText,
+    canMergeWithNext: targetUnit.canMergeWithNext,
+  }
+  const candidateUnits = [
+    ...units.slice(0, targetIndex),
+    firstUnit,
+    secondUnit,
+    ...units.slice(targetIndex + 1),
+  ]
+  const candidateSpans = alignGroupWithinWindow(candidateUnits, window, asrStream, script)
+
+  const before = totalUncoveredSec(runs, spans)
+  const after = totalUncoveredSec(runs, candidateSpans)
+  const improvementSec = before - after
+  if (improvementSec < MIN_COVERAGE_IMPROVEMENT_SEC) return null
+
+  const targetOriginIndex = originGroupIndices[targetIndex]
+  const candidateOriginIndices = [
+    ...originGroupIndices.slice(0, targetIndex),
+    targetOriginIndex,
+    targetOriginIndex,
+    ...originGroupIndices.slice(targetIndex + 1),
+  ]
+
+  return { units: candidateUnits, spans: candidateSpans, originGroupIndices: candidateOriginIndices, improvementSec }
+}
+
+/** 2つの分割候補（無い場合は null）のうち、未カバー秒数の減少がより大きい方を選ぶ。 */
+function pickBetterCandidate(
+  a: CoverageSplitCandidate | null,
+  b: CoverageSplitCandidate | null,
+): CoverageSplitCandidate | null {
+  if (!a) return b
+  if (!b) return a
+  return a.improvementSec >= b.improvementSec ? a : b
+}
+
+/**
+ * グループのキューが由来セグメントの発話区間を覆えていない場合に、
+ * 該当ユニットの本文を分割して再アラインする。
+ *
+ * 無音を跨ぐキューは asrAlignment の selectLargestCluster / clipSpanToSpeech が
+ * 「一致が最も多い発話区画だけ」に切り詰める。本文が片側にしか無ければこれは正しいが、
+ * 本文が無音の両側で話されている場合は、後半の本文が前半の時間帯に押し込まれ、
+ * 後半の発話が無字幕になる（実機データで38箇所・計139.2秒、最大16.5秒）。
+ *
+ * どちらの場合かは事前には判定せず、分割して再アラインした結果で判定する
+ * （本文が本当に両側にあれば、後半の断片は無音の向こう側へアラインされ未カバーが減る。
+ * 片側にしか無ければ減らないので元に戻す）。閾値を増やさずに済ませるための構成。
+ *
+ * hole を埋め得るユニットは「直前で終わっている側」と「直後から始まっている側」の
+ * どちらもあり得る（実機データ seg102: id=288 の直後に無字幕区間があるが、実際に
+ * 話されているのは "直後" の id=289 の前半だった。分割前は id=289 のスパンが遅延して
+ * いて前半の一致が切り捨てられていたケース）。両側を候補として試し、より改善する方を
+ * 採用する（`buildCoverageSplitCandidate`/`pickBetterCandidate`）。
+ *
+ * 1つの hole を直しても改善しない（＝分割不能、または改善量が閾値未満）場合は、その
+ * hole を「試行済み」として記録し、ループ全体を止めずに次の hole を試す
+ * （`triedHoleStarts`）。hole の同定は `start` の値で十分（採用が起きるとスパンが
+ * 変わって hole の座標も変わるため、同じ座標が再出現しても無限ループにはならない）。
+ * 試行済み集合はループ全体を通して持ち回る（クリアしない）。
+ */
+function repairGroupCoverage(
+  groupUnits: readonly RawSemanticUnit[],
+  window: SegmentWindow,
+  segmentRange: AsrSegmentRange,
+  asrStream: readonly AsrChar[],
+  silenceAfter: ReadonlySet<number>,
+  script: LanguageScript,
+  glossaryTerms: string[],
+): GroupAlignment {
+  let units: RawSemanticUnit[] = [...groupUnits]
+  let originGroupIndices: number[] = groupUnits.map((_, i) => i)
+  let spans = alignGroupWithinWindow(units, window, asrStream, script)
+  // 窓（window）ではなく、そのセグメント自身の範囲（segmentRange）を使う。窓は±1セグメント
+  // ぶん広く、隣のセグメントの発話は隣のグループが覆うため、ここで対象にすると重複修復や
+  // 誤った分割を招く。
+  const runs = speechRunsInRange(asrStream, silenceAfter, segmentRange.startIdx, segmentRange.endIdx)
+  const triedHoleStarts = new Set<number>()
+
+  for (let loop = 0; loop < MAX_COVERAGE_SPLIT_LOOPS; loop += 1) {
+    const holes = uncoveredIntervals(runs, spans)
+    const hole = holes.find(h => !triedHoleStarts.has(h.start))
+    if (!hole) break
+
+    const prevIndex = findSpanEndingBeforeHole(spans, hole.start)
+    const nextIndex = findSpanStartingAfterHole(spans, hole.end)
+    const prevCandidate = prevIndex >= 0
+      ? buildCoverageSplitCandidate(units, spans, originGroupIndices, prevIndex, hole, 'prev', runs, window, asrStream, script, glossaryTerms)
+      : null
+    const nextCandidate = nextIndex >= 0
+      ? buildCoverageSplitCandidate(units, spans, originGroupIndices, nextIndex, hole, 'next', runs, window, asrStream, script, glossaryTerms)
+      : null
+    const chosen = pickBetterCandidate(prevCandidate, nextCandidate)
+
+    if (!chosen) {
+      triedHoleStarts.add(hole.start)
+      continue
+    }
+
+    units = chosen.units
+    spans = chosen.spans
+    originGroupIndices = chosen.originGroupIndices
+  }
+
+  return { units, spans, originGroupIndices }
+}
+
 interface InitialSpansResult {
-  /** units と同じ並び順（元の順序）の初期スパン。*/
+  /** units と同じ並び順（元の順序）の初期スパン。カバレッジ修復（`repairGroupCoverage`）で
+   * ユニットが分割されている場合、元の `units` より要素数が増えていることがある。*/
+  units: RawSemanticUnit[]
   spans: AlignedSpan[]
   /** sourceSegmentId が ranges に存在せず、最も近いセグメントへ丸めたグループの件数。*/
   clampedSegmentIds: number
+  /** カバレッジ修復で分割したユニットの件数。診断用。*/
+  coverageSplits: number
 }
 
 /**
  * 全ユニットを `sourceSegmentId` ごとにグループ化し、グループごとに「由来セグメント
  * ±1」の窓へ限定してアラインする（`resolveSegmentWindow`/`alignGroupWithinWindow`
- * 参照）。結果は units と同じ順序（元の順序）で返す。
+ * 参照）。アライン後、グループのキューが由来セグメントの発話区間を覆えていなければ
+ * `repairGroupCoverage` で分割・再アラインする。結果は元の units の順序を保ったまま
+ * 返す（グループ内で分割が起きると要素数が増えるため、単純な書き戻しではなく
+ * 「元 index → 断片リスト」の対応を flatMap で組み立て直す）。
  *
  * グループの探索範囲どうしは隣接セグメント分だけ重なり得る（±1窓のため）ため、
  * ここで返す時点ではグループ境界で startSec/endSec の重なりが残っている場合がある。
@@ -446,27 +747,56 @@ function computeInitialSpansBySegment(
   asrStream: readonly AsrChar[],
   segmentRanges: readonly AsrSegmentRange[],
   script: LanguageScript,
+  glossaryTerms: string[],
 ): InitialSpansResult {
-  const spans: AlignedSpan[] = new Array(units.length)
+  const silenceAfter = findSilenceBoundaries(asrStream)
   const groups = groupUnitsBySegment(units)
   let clampedSegmentIds = 0
+  let coverageSplits = 0
+
+  // 元の絶対 index → その位置が展開された結果のユニット・スパンのリスト。
+  const unitsByOriginalIndex = new Map<number, RawSemanticUnit[]>()
+  const spansByOriginalIndex = new Map<number, AlignedSpan[]>()
 
   for (const group of groups) {
     const window = resolveSegmentWindow(segmentRanges, group.segmentId)
     if (!window) {
       group.indices.forEach((originalIndex, i) => {
-        spans[originalIndex] = degenerateSpan(group.units[i].jaText)
+        unitsByOriginalIndex.set(originalIndex, [group.units[i]])
+        spansByOriginalIndex.set(originalIndex, [degenerateSpan(group.units[i].jaText)])
       })
       continue
     }
     if (window.clamped) clampedSegmentIds += 1
-    const groupSpans = alignGroupWithinWindow(group.units, window, asrStream, script)
-    group.indices.forEach((originalIndex, i) => {
-      spans[originalIndex] = groupSpans[i]
+    const segmentRange: AsrSegmentRange = { segmentId: group.segmentId, startIdx: window.ownStartIdx, endIdx: window.ownEndIdx }
+    const repaired = repairGroupCoverage(group.units, window, segmentRange, asrStream, silenceAfter, script, glossaryTerms)
+    coverageSplits += repaired.units.length - group.units.length
+
+    // repaired.units は分割で元の group.units より増えている場合がある。
+    // originGroupIndices[i]（グループ内の元の位置）→ group.indices（units 内での絶対位置）
+    // で元の絶対 index へ書き戻す。
+    const fragmentsByOriginalIndex = new Map<number, { units: RawSemanticUnit[]; spans: AlignedSpan[] }>()
+    repaired.units.forEach((fragmentUnit, i) => {
+      const originalIndex = group.indices[repaired.originGroupIndices[i]]
+      const entry = fragmentsByOriginalIndex.get(originalIndex) ?? { units: [], spans: [] }
+      entry.units.push(fragmentUnit)
+      entry.spans.push(repaired.spans[i])
+      fragmentsByOriginalIndex.set(originalIndex, entry)
+    })
+    fragmentsByOriginalIndex.forEach((entry, originalIndex) => {
+      unitsByOriginalIndex.set(originalIndex, entry.units)
+      spansByOriginalIndex.set(originalIndex, entry.spans)
     })
   }
 
-  return { spans, clampedSegmentIds }
+  const resultUnits: RawSemanticUnit[] = []
+  const resultSpans: AlignedSpan[] = []
+  units.forEach((_, originalIndex) => {
+    resultUnits.push(...(unitsByOriginalIndex.get(originalIndex) ?? []))
+    resultSpans.push(...(spansByOriginalIndex.get(originalIndex) ?? []))
+  })
+
+  return { units: resultUnits, spans: resultSpans, clampedSegmentIds, coverageSplits }
 }
 
 export interface AlignUnitsGloballyResult {
@@ -474,6 +804,9 @@ export interface AlignUnitsGloballyResult {
   /** `computeInitialSpansBySegment` が最も近いセグメントへ丸めた（sourceSegmentId が
    * ranges に存在しなかった）グループの件数。診断用。*/
   clampedSegmentIds: number
+  /** `computeInitialSpansBySegment`（`repairGroupCoverage`）がカバレッジ修復のために
+   * 分割したユニットの件数。診断用。*/
+  coverageSplits: number
 }
 
 /**
@@ -504,13 +837,21 @@ function alignUnitsGlobally(
   glossaryTerms: string[],
   script: LanguageScript = 'japanese',
 ): AlignUnitsGloballyResult {
-  const { spans: spansBySegment, clampedSegmentIds } = computeInitialSpansBySegment(units, asrStream, segmentRanges, script)
+  const {
+    units: unitsBySegment,
+    spans: spansBySegment,
+    clampedSegmentIds,
+    coverageSplits,
+  } = computeInitialSpansBySegment(units, asrStream, segmentRanges, script, glossaryTerms)
   // グループ（由来セグメント±1の窓）どうしは隣接1セグメント分重なり得るため、
   // 組み立て後に全体で1回、既存と同じ非対称の規則（後ろを押し出す・前は不変）で
   // 重なりを解消する（enforceMonotonicSpans は asrAlignment.ts の alignCuesToAsr 内部でも
   // 使っているのと同じロジック。firstCharIndex/lastCharIndex は変更しない）。
   const initialSpans = enforceMonotonicSpans(spansBySegment)
-  let entries: OverlongScanEntry[] = units.map((unit, index) => ({
+  // カバレッジ修復（`computeInitialSpansBySegment`/`repairGroupCoverage`）でユニット数が
+  // 増えている場合があるため、以降は引数 units ではなく unitsBySegment（同じ並び順の
+  // 展開後リスト）を使う。
+  let entries: OverlongScanEntry[] = unitsBySegment.map((unit, index) => ({
     unit,
     span: initialSpans[index],
     accepted: false,
@@ -542,6 +883,7 @@ function alignUnitsGlobally(
   return {
     units: entries.map(entry => toAlignedUnit(entry.unit, entry.span, asrStream)),
     clampedSegmentIds,
+    coverageSplits,
   }
 }
 
@@ -898,6 +1240,9 @@ export interface SemanticSplitJaResult {
    * 診断用（0件でも意味を持つ。通常はLLMが返す source_segment_id が実在のセグメントIDと
    * ずれていないことを示す）。*/
   clampedSegmentIds: number
+  /** `repairGroupCoverage`（無音を跨ぐユニットのカバレッジ修復）で分割したユニットの件数。
+   * 診断用（0件でも意味を持つ）。*/
+  coverageSplits: number
 }
 
 /**
@@ -973,6 +1318,15 @@ export function formatClampedSegmentIdsSummary(clampedSegmentIds: number): strin
   return `セグメントID丸め=${clampedSegmentIds}件`
 }
 
+/**
+ * `SemanticSplitJaResult.coverageSplits`（`repairGroupCoverage` が無音を跨ぐユニットの
+ * カバレッジ修復のために分割した件数）を localPipeline.ts のトレース summary 用に整形する。
+ * 0件のときも表示する（無音を跨ぐ発話がどれだけ本文カバレッジ修復を要したかの指標になるため）。
+ */
+export function formatCoverageSplitsSummary(coverageSplits: number): string {
+  return `カバレッジ修復分割=${coverageSplits}件`
+}
+
 export async function semanticSplitJa(
   segments: CorrectedSegmentLite[],
   settings: AdminSettings,
@@ -1033,6 +1387,7 @@ export async function semanticSplitJa(
   let aligned: AlignedUnit[]
   let collapsedMerged = 0
   let clampedSegmentIds = 0
+  let coverageSplits = 0
   if (asrStream.length === 0) {
     aligned = alignUnitsProportionalFallback(orderedUnits, segments, thresholds, glossaryTerms)
   } else {
@@ -1041,9 +1396,10 @@ export async function semanticSplitJa(
     aligned = resolved.units
     collapsedMerged = resolved.collapsedMerged
     clampedSegmentIds = globallyAligned.clampedSegmentIds
+    coverageSplits = globallyAligned.coverageSplits
   }
 
-  return { blocks: buildJaBlocks(aligned), scriptResolution, collapsedMerged, clampedSegmentIds }
+  return { blocks: buildJaBlocks(aligned), scriptResolution, collapsedMerged, clampedSegmentIds, coverageSplits }
 }
 
 /** アライン済みユニット列から JaBlock 配列を組み立てる（id採番・空テキストスキップ）。*/
@@ -1079,4 +1435,7 @@ export const __testing = {
   resolveCollapsedUnits,
   groupUnitsBySegment,
   resolveSegmentWindow,
+  speechRunsInRange,
+  uncoveredIntervals,
+  repairGroupCoverage,
 }

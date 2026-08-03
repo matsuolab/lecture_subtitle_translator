@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { __testing } from './semanticSplitJa'
-import { buildAsrCharStream, buildAsrCharStreamWithRanges } from './asrAlignment'
+import { buildAsrCharStream, buildAsrCharStreamWithRanges, findSilenceBoundaries } from './asrAlignment'
 import { DEFAULT_PIPELINE_THRESHOLDS, type PipelineThresholds } from './blockTypes'
 import type { CorrectedSegmentLite } from './correct'
 import type { TranscriptSegment } from './types'
@@ -654,5 +654,125 @@ describe('semanticSplitJa: 探索範囲を由来セグメント±1に限定す�
     const aligned = __testing.alignUnitsGlobally(units, stream, ranges, DEFAULT_PIPELINE_THRESHOLDS, []).units
 
     expect(aligned[0].end).toBeLessThanOrEqual(aligned[1].start)
+  })
+})
+
+interface SilenceSpanFixture {
+  description: string
+  segments: Array<FixtureSegment & { correctedText: string }>
+}
+
+/**
+ * 無音を内部に含むセグメントの実データ（seg181/182/183、4383.17-4462.38秒）。
+ * seg182 はクランプ後のASR文字ストリーム上で 4420.63-4422.21（1.58秒）の無音を含む。
+ */
+function loadSilenceSpanFixture(): SilenceSpanFixture {
+  const path = `${process.cwd()}/src/lib/pipeline/__fixtures__/semanticSplitJa.silenceSpan.json`
+  return JSON.parse(readFileSync(path, 'utf-8')) as SilenceSpanFixture
+}
+
+/**
+ * ASR文字ストリームの索引範囲 [fromIdx, toIdx] を、無音境界で区切った発話ラン
+ * （実際に声が出ている時間区間）の配列にする。
+ */
+function speechRuns(
+  asrStream: readonly { start: number; end: number }[],
+  silenceAfter: ReadonlySet<number>,
+  fromIdx: number,
+  toIdx: number,
+): Array<{ start: number; end: number }> {
+  const runs: Array<{ start: number; end: number }> = []
+  let runStart = fromIdx
+  for (let i = fromIdx; i <= toIdx; i += 1) {
+    if (i === toIdx || silenceAfter.has(i)) {
+      runs.push({ start: asrStream[runStart].start, end: asrStream[i].end })
+      runStart = i + 1
+    }
+  }
+  return runs
+}
+
+/** 発話ラン run のうち、どのキューのスパンにも覆われていない秒数。*/
+function uncoveredSec(
+  run: { start: number; end: number },
+  spans: ReadonlyArray<{ start: number; end: number }>,
+): number {
+  const covered = spans
+    .map(span => ({ start: Math.max(span.start, run.start), end: Math.min(span.end, run.end) }))
+    .filter(part => part.end > part.start)
+    .sort((a, b) => a.start - b.start)
+  let total = 0
+  let cursor = run.start
+  for (const part of covered) {
+    if (part.start > cursor) total += part.start - cursor
+    cursor = Math.max(cursor, part.end)
+  }
+  return total + Math.max(0, run.end - cursor)
+}
+
+describe('semanticSplitJa: 無音を跨ぐユニットは切り詰めず分割する（実データフィクスチャ）', () => {
+  const fixture = loadSilenceSpanFixture()
+  const segments: TranscriptSegment[] = fixture.segments.map(segment => ({
+    id: segment.id,
+    start: segment.start,
+    end: segment.end,
+    text: segment.text,
+    words: segment.words,
+  }))
+  const { stream: asrStream, ranges: segmentRanges } = buildAsrCharStreamWithRanges(segments)
+  // duration超過による分割（別欠陥）を無効化し、「発話を覆えていない」ことだけを
+  // 分割の契機として検証する。
+  const noOverlongSplit: PipelineThresholds = { ...DEFAULT_PIPELINE_THRESHOLDS, mergedLongDurationSec: 300 }
+
+  // 実運用と同じ状況: 補正LLMの分割カバレッジが不足し、セグメント全文が1ユニットになる。
+  const units = fixture.segments.map(segment =>
+    makeRawUnit(segment.id, segment.correctedText, `u_fallback_${segment.id}`))
+
+  it('前提: seg182 のASR範囲は内部に無音を1つ含む', () => {
+    const range = segmentRanges.find(r => r.segmentId === 182)!
+    const silenceAfter = findSilenceBoundaries(asrStream)
+    const runs = speechRuns(asrStream, silenceAfter, range.startIdx, range.endIdx)
+
+    expect(runs).toHaveLength(2)
+    expect(runs[0].end).toBeCloseTo(4420.63, 1)
+    expect(runs[1].start).toBeCloseTo(4422.21, 1)
+    expect(runs[1].end).toBeCloseTo(4432.09, 1)
+  })
+
+  it('seg182 の発話区間は、そのセグメント由来のキューで漏れなく覆われる', () => {
+    const result = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, noOverlongSplit, [])
+    const range = segmentRanges.find(r => r.segmentId === 182)!
+    const silenceAfter = findSilenceBoundaries(asrStream)
+    const runs = speechRuns(asrStream, silenceAfter, range.startIdx, range.endIdx)
+    const spans = result.units
+      .filter(unit => unit.unit.sourceSegmentId === 182)
+      .map(unit => ({ start: unit.start, end: unit.end }))
+
+    // 実測（修正前）: 後半ラン 4422.21-4432.09 の 9.88秒が丸ごと無字幕になる。
+    for (const run of runs) {
+      expect(uncoveredSec(run, spans)).toBeLessThan(1.0)
+    }
+  })
+
+  it('無音を跨ぐユニットは2つ以上のキューに分割され、本文は失われない', () => {
+    const result = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, noOverlongSplit, [])
+    const seg182Units = result.units.filter(unit => unit.unit.sourceSegmentId === 182)
+
+    expect(seg182Units.length).toBeGreaterThanOrEqual(2)
+    const joined = seg182Units.map(unit => unit.unit.jaText).join('')
+    expect(joined).toBe(fixture.segments.find(segment => segment.id === 182)!.correctedText)
+  })
+
+  it('分割後のどのキューも無音区間を跨がない（既存の不変条件を壊さない）', () => {
+    const result = __testing.alignUnitsGlobally(units, asrStream, segmentRanges, noOverlongSplit, [])
+    const silenceAfter = findSilenceBoundaries(asrStream)
+    const silences = [...silenceAfter].map(i => ({ start: asrStream[i].end, end: asrStream[i + 1].start }))
+
+    for (const unit of result.units) {
+      for (const silence of silences) {
+        const overlap = Math.min(unit.end, silence.end) - Math.max(unit.start, silence.start)
+        expect(overlap).toBeLessThan(0.5)
+      }
+    }
   })
 })

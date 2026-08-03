@@ -8,6 +8,7 @@ import {
   formatTranscriptScriptSummary,
   formatCollapsedMergedSummary,
   formatClampedSegmentIdsSummary,
+  formatCoverageSplitsSummary,
   type SemanticSplitJaResult,
 } from './semanticSplitJa'
 import { mergeShort } from './mergeShort'
@@ -64,7 +65,7 @@ export async function runPhase1(
     'semanticSplitJa',
     () => semanticSplitJa(corrected, settings, thresholds, options.glossaryTerms ?? []),
     (result: SemanticSplitJaResult) =>
-      `${formatTranscriptScriptSummary(result.scriptResolution)} / ${formatCollapsedMergedSummary(result.collapsedMerged)} / ${formatClampedSegmentIdsSummary(result.clampedSegmentIds)}`,
+      `${formatTranscriptScriptSummary(result.scriptResolution)} / ${formatCollapsedMergedSummary(result.collapsedMerged)} / ${formatClampedSegmentIdsSummary(result.clampedSegmentIds)} / ${formatCoverageSplitsSummary(result.coverageSplits)}`,
   )
   const split = splitResult.blocks
   // Phase1: 「文脈上は一体で扱うべき cue」を context group としてタグ付けする。
