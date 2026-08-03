@@ -147,6 +147,8 @@ export interface LocaleStrings {
   settingsEnMaxLines: string
   settingsEnMaxCps: string
   settingsSubtitleMinDuration: string
+  settingsSubtitleMaxGapSec: string
+  settingsSubtitleMaxGapSecHint: string
   settingsQualityCorrectionThreshold: string
   settingsPipelineThresholdsTitle: string
   settingsPipelineShortDurationSec: string

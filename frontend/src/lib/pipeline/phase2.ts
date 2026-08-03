@@ -16,10 +16,14 @@ import { runCoverageRepairAgent } from './coverageRepairAgent'
 import { runGeneralRepairAgent } from './generalRepairAgent'
 import { redistributeJaSpan } from './redistributeJaSpan'
 import { tightenTiming } from './tightenTiming'
+import { closeSubtitleGaps, formatCloseSubtitleGapsSummary } from './closeSubtitleGaps'
 import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
 import { buildPartialFailureWarning } from './partialFailureSummary'
 
-type RunNode = <T>(nodeId: string, run: () => Promise<T> | T) => Promise<T>
+// summarize は任意。localPipeline.ts の runNode が「成功時のtrace summary」を
+// 結果から抽出するために使う（phase1.ts の RunNode と同じ形。closeSubtitleGaps の
+// 閉じた件数・合計秒数を人が読める形で trace へ残すために利用する）。
+type RunNode = <T>(nodeId: string, run: () => Promise<T> | T, summarize?: (result: T) => string | undefined) => Promise<T>
 
 // ツール警告コールバック: blockId, strategy, LLM 実レスポンスを含む診断メッセージ
 type OnWarning = (nodeId: string, message: string) => void
@@ -166,6 +170,50 @@ export async function runPhase2(
         runGeneralRepairAgent(blocks, segments, coverageReport, settings, thresholds),
       )
       blocks = generalResult.blocks
+    }
+  }
+
+  // Stage 4: closeSubtitleGaps — 表示層の「短い空白を閉じる」処理（決定的・LLM不要）
+  // アライメント層（asrAlignment.ts）が返す「実際に話された区間」の正しさはそのまま
+  // 尊重しつつ、発話中に画面が一瞬空白になる短いギャップだけを前の cue を延ばして
+  // 閉じる。長い間（実質的な無音）はそのまま空白を保つ（放送・配信の慣行）。
+  // タイミングの正しさ（アライメント層）と表示の連続性（表示層）は別レイヤーとして
+  // 扱う方針のため、ここまでの補正・修復ロジックには一切手を入れない。
+  //
+  // 配置順序について（実装時に確認した内容）:
+  //   - tightenTiming（本ファイル前段）は「gap が minGapSec 未満」を widen して
+  //     解消する処理。closeSubtitleGaps は逆に「gap を狭める」処理なので、素朴に
+  //     先に実行すると互いの結果を打ち消し合う恐れがある → tightenTiming より
+  //     後段に置く。さらに closeSubtitleGaps 自体に tightenTiming と同じ
+  //     minGapSec を渡し、閉じた後の gap が minGapSec を下回らないようにする
+  //     （= gap_too_short を再発させない）。
+  //   - classifyViolation（metrics.ts）は duration に依存し、cue を延ばすと cps は
+  //     下がる方向に動く。verbose_en 等のCPS超過違反を新たに生むことはないはずだが、
+  //     slow_speech（cps < slowCps）は duration が伸びるほど発生しやすくなる方向に
+  //     働く。closeSubtitleGaps を CPS 検査・修復ノード（checkCpsAfterTighten /
+  //     cpsReliefRebalance / coverageRepairAgent / generalRepairAgent）より前段に
+  //     置くと、閉じたことで新たに生まれた slow_speech が「直すべき違反」として
+  //     後段の repair agent に渡り、LLM が cue を縮めて閉じたギャップを打ち消し
+  //     かねない。そのため repair 系ノードすべての後段（phase2 の最終段）に置く。
+  //     cps / violation フィールドは参考情報として checkCpsViolations で再計算する
+  //     が、この再計算はここでは何もトリガーしない（表示専用の後処理のため）。
+  {
+    const agentThresholdsForGapClose = buildAgentThresholds({
+      subtitleMinDurationSec: settings.subtitleMinDurationSec,
+    })
+    const gapCloseResult = await runNode(
+      'closeSubtitleGaps',
+      () =>
+        closeSubtitleGaps(
+          blocks,
+          settings.subtitleMaxGapSec,
+          agentThresholdsForGapClose.minInterSubtitleGapMs / 1000,
+        ),
+      formatCloseSubtitleGapsSummary,
+    )
+    blocks = gapCloseResult.blocks
+    if (gapCloseResult.closedCount > 0) {
+      blocks = await runNode('checkCpsAfterGapClose', () => checkCpsViolations(blocks, thresholds))
     }
   }
 

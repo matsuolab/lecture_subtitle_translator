@@ -1303,6 +1303,17 @@ export function SettingsTab({
             step={0.001}
             onChange={(value) => onAdminSettingsChange({ subtitleMinDurationSec: value })}
           />
+          <NumberField
+            theme={theme}
+            label={t.settingsSubtitleMaxGapSec}
+            value={adminSettings.subtitleMaxGapSec}
+            min={0}
+            step={0.1}
+            onChange={(value) => onAdminSettingsChange({ subtitleMaxGapSec: value })}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            {t.settingsSubtitleMaxGapSecHint}
+          </div>
         </FieldCard>
 
         <FieldCard theme={theme}>

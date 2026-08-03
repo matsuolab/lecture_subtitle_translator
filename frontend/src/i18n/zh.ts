@@ -256,6 +256,8 @@ export const zh: LocaleStrings = {
   settingsEnMaxLines: '最大行数',
   settingsEnMaxCps: '最大CPS（字符/秒）',
   settingsSubtitleMinDuration: '字幕最短显示时间（秒）',
+  settingsSubtitleMaxGapSec: '字幕间的最大间隔（秒）',
+  settingsSubtitleMaxGapSecHint: '小于此值的空白将通过延长前一条字幕来闭合（防止闪烁）。设为 0 则不闭合。',
   settingsQualityCorrectionThreshold: '补正质量阈值（Embedding距离）',
   settingsPipelineThresholdsTitle: '流水线阈值',
   settingsPipelineShortDurationSec: '合并短于此值的字幕（秒）',

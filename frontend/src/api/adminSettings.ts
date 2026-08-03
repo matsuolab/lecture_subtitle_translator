@@ -77,6 +77,11 @@ export function getDefaultAdminSettings(): AdminSettings {
     enMaxLines: 2,
     enMaxCps: 16.9,
     subtitleMinDurationSec: 0.833,
+    // 放送・配信の慣行に寄せた保守的な値。ちらつき防止に必要な最小限だけを閉じる目的で、
+    // 「短い空白」と「実質的な無音」の境目として 0.5 秒を既定にした（0 秒キュー修正の
+    // 実測分類: 削除起因21件・実質無音19件のうち、ちらつきの原因になり得るのは前者側の
+    // 短いギャップのみ、という知見から）。0 にすると閉じる処理自体をスキップする。
+    subtitleMaxGapSec: 0.5,
     qualityCorrectionThreshold: 0.15,
     spellUserDictionary: [],
     spellImportedDictionaryLabels: [],
@@ -128,6 +133,13 @@ export function getDefaultAdminSettings(): AdminSettings {
 function normalizePositiveNumber(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : parseFloat(value as string)
   return isFinite(n) && n > 0 ? n : fallback
+}
+
+// normalizePositiveNumber と異なり 0 を有効値として許容する。
+// subtitleMaxGapSec のように「0 = 機能オフ」を表す設定向け。
+function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : parseFloat(value as string)
+  return isFinite(n) && n >= 0 ? n : fallback
 }
 
 function normalizeBoundedInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -249,6 +261,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     enMaxLines: normalizePositiveNumber(raw.enMaxLines, defaults.enMaxLines),
     enMaxCps: normalizePositiveNumber(raw.enMaxCps, defaults.enMaxCps),
     subtitleMinDurationSec: normalizePositiveNumber(raw.subtitleMinDurationSec, defaults.subtitleMinDurationSec),
+    subtitleMaxGapSec: normalizeNonNegativeNumber(raw.subtitleMaxGapSec, defaults.subtitleMaxGapSec),
     qualityCorrectionThreshold: normalizePositiveNumber(raw.qualityCorrectionThreshold, defaults.qualityCorrectionThreshold),
     spellUserDictionary: Array.isArray(raw.spellUserDictionary)
       ? raw.spellUserDictionary.filter((w): w is string => typeof w === 'string' && w.trim().length > 0)

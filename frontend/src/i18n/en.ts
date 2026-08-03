@@ -256,6 +256,8 @@ export const en: LocaleStrings = {
   settingsEnMaxLines: 'Max lines',
   settingsEnMaxCps: 'Max CPS (chars/sec)',
   settingsSubtitleMinDuration: 'Min subtitle duration (sec)',
+  settingsSubtitleMaxGapSec: 'Max gap between subtitles (sec)',
+  settingsSubtitleMaxGapSecHint: 'Gaps shorter than this are closed by extending the previous subtitle (prevents flicker). Set to 0 to disable.',
   settingsQualityCorrectionThreshold: 'Correction quality threshold (embedding dist)',
   settingsPipelineThresholdsTitle: 'Pipeline Thresholds',
   settingsPipelineShortDurationSec: 'Merge subtitles shorter than (sec)',

@@ -257,6 +257,8 @@ export const ja: LocaleStrings = {
   settingsEnMaxLines: '最大行数',
   settingsEnMaxCps: '最大CPS（文字/秒）',
   settingsSubtitleMinDuration: '字幕最短表示時間（秒）',
+  settingsSubtitleMaxGapSec: '字幕間の最大ギャップ（秒）',
+  settingsSubtitleMaxGapSecHint: 'これ以下の空白は前の字幕を延ばして閉じます（ちらつき防止）。0 にすると閉じません',
   settingsQualityCorrectionThreshold: '補正品質閾値（Embedding距離）',
   settingsPipelineThresholdsTitle: 'パイプライン閾値',
   settingsPipelineShortDurationSec: '短い字幕を結合するしきい値（秒）',

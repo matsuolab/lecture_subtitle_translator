@@ -45,6 +45,10 @@ export interface AdminSettings {
   enMaxLines: number
   enMaxCps: number
   subtitleMinDurationSec: number
+  // 表示層のギャップ閉じ（closeSubtitleGaps.ts）: これ以下の隣接 cue 間の空白は
+  // 前の cue を延ばして閉じる（ちらつき防止）。0 なら閉じない。
+  // アライメント層（asrAlignment.ts）が返す時刻の正しさとは別レイヤーの設定。
+  subtitleMaxGapSec: number
   qualityCorrectionThreshold: number
 
   // 字幕スペル校正（subtitle側）。対応辞書がある言語なら自動チェック。詳細: docs/adr/0003-subtitle-spellcheck.md
