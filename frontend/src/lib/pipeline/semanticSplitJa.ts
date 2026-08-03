@@ -120,11 +120,62 @@ function isUnsafeSplit(text: string, index: number, ranges: Array<{ start: numbe
   return (isKatakana(prev) && isKatakana(next)) || (isAsciiWord(prev) && isAsciiWord(next))
 }
 
-function chooseSafeSplitIndex(text: string, preferred: number, glossaryTerms: string[]): number {
-  const min = Math.max(1, Math.floor(text.length * 0.25))
-  const max = Math.min(text.length - 1, Math.ceil(text.length * 0.75))
+/**
+ * 分割位置の選び方。
+ * - 'balanced': 長すぎるキューをバランス良く割る用（`splitOverlongUnit`）。本文の25%〜75%に
+ *   限定し、その窓内に句読点があれば距離に関係なくそこを選ぶ。preferred はあくまで目安
+ *   （だいたい半分）であり、読みやすい位置を優先してよいケース向け。
+ * - 'targeted': 分割位置が証拠（発話をどこまで覆えているか）で決まっている用
+ *   （`repairGroupCoverage`）。本文全体を探索し、preferred に最も近い安全な位置を選ぶ。
+ *   同じ距離なら句読点の直後を優先するが、距離そのものは上書きしない。
+ */
+type SplitPositionPolicy = 'balanced' | 'targeted'
+
+/**
+ * 分割位置を選ぶ。既定の `'balanced'` は元の実装のまま（本文の25%〜75%に限定し、窓内に
+ * 句読点があれば距離を無視してそこを選ぶ）で、`splitOverlongUnit` の挙動を変えない。
+ *
+ * `'targeted'` は `repairGroupCoverage` 専用。`'balanced'` の2つの制約は、分割位置が
+ * 証拠で決まっているカバレッジ修復では逆に邪魔になることが実測で分かっている:
+ * - 25%〜75%の窓: 本文76文字・preferred=69(91%)は窓外のため返り値38(50%)（31文字ずれ）。
+ *   本文49文字・preferred=43(88%)は窓外のため返り値24(49%)（19文字ずれ）。
+ * - 句読点ボーナス-1000（距離を完全に上書き）: 本文73文字・preferred=56(77%)は窓内の
+ *   句読点を優先し返り値50(68%)（6文字ずれ）。本文37文字・preferred=28(76%)も同様に
+ *   返り値21(57%)（7文字ずれ）。
+ * いずれのケースも意図した断片が作れず、再アラインしても未カバー秒数が減らないため
+ * 修復が棄却され、実機データで26箇所・計51.5秒が「キューの端が数文字ぶん削れている」
+ * まま残っていた。そのため `'targeted'` は本文全体（1〜text.length-1）を探索し、
+ * スコアを `距離*2 + (直前が句読点でなければ+1)` として句読点を同距離のときの
+ * タイブレークのみに使う（距離を上書きしない）。`isUnsafeSplit` による除外
+ * （用語内部・カタカナ同士・英数同士）はどちらの policy でも変わらず適用する。
+ */
+function chooseSafeSplitIndex(
+  text: string,
+  preferred: number,
+  glossaryTerms: string[],
+  policy: SplitPositionPolicy = 'balanced',
+): number {
   const ranges = noBreakRanges(text, glossaryTerms)
   const punctuation = ['。', '、', '，', '．', '！', '？']
+
+  if (policy === 'targeted') {
+    let best = -1
+    let bestScore = Number.POSITIVE_INFINITY
+    for (let index = 1; index < text.length; index += 1) {
+      if (isUnsafeSplit(text, index, ranges)) continue
+      const prev = text[index - 1] ?? ''
+      const score = Math.abs(index - preferred) * 2 + (punctuation.includes(prev) ? 0 : 1)
+      if (score < bestScore) {
+        best = index
+        bestScore = score
+      }
+    }
+    if (best >= 0) return best
+    return Math.max(1, Math.min(text.length - 1, preferred))
+  }
+
+  const min = Math.max(1, Math.floor(text.length * 0.25))
+  const max = Math.min(text.length - 1, Math.ceil(text.length * 0.75))
   let best = -1
   let bestDistance = Number.POSITIVE_INFINITY
   for (let index = min; index <= max; index += 1) {
@@ -596,7 +647,7 @@ function buildCoverageSplitCandidate(
   const preferred = side === 'prev'
     ? Math.round(targetUnit.jaText.length * covered / (covered + holeLen))
     : Math.round(targetUnit.jaText.length * holeLen / (covered + holeLen))
-  const splitAt = chooseSafeSplitIndex(targetUnit.jaText, preferred, glossaryTerms)
+  const splitAt = chooseSafeSplitIndex(targetUnit.jaText, preferred, glossaryTerms, 'targeted')
   const firstText = targetUnit.jaText.slice(0, splitAt)
   const secondText = targetUnit.jaText.slice(splitAt)
   if (!firstText || !secondText) return null
