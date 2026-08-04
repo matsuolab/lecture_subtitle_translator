@@ -186,7 +186,7 @@ export function resolveMicroModelId(
 
 // splitJa（semantic 分割）用モデル解決。
 // splitJaModel が空なら microModel、compressModel、translationModel の順でフォールバック。
-// 既定は gpt-5.4-nano（軽量・意味境界判定のみで翻訳生成は不要なため）。
+// 既定は gpt-5.6-luna。用途としては軽量・意味境界判定のみで翻訳生成は不要なため、より小型のモデルでも足りる。
 export function resolveSplitJaModelId(
   settings: { splitJaModel?: string; microModel?: string; compressModel?: string; translationModel?: string },
 ): string {

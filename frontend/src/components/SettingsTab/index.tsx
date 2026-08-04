@@ -259,13 +259,13 @@ export function SettingsTab({
       openaiCompatibleBaseUrl: '',
       translationModel: DEFAULT_OPENAI_CHAT_MODEL,
       correctionModel: DEFAULT_OPENAI_CHAT_MODEL,
-      pdfExtractionVisionModel: 'gpt-5.4-nano',
+      pdfExtractionVisionModel: DEFAULT_OPENAI_CHAT_MODEL,
       pdfFormulaMiniModel: DEFAULT_OPENAI_CHAT_MODEL,
       compressModel: DEFAULT_OPENAI_CHAT_MODEL,
-      microModel: 'gpt-5.4-nano',
+      microModel: DEFAULT_OPENAI_CHAT_MODEL,
       expandModel: DEFAULT_OPENAI_CHAT_MODEL,
       contextMergeModel: DEFAULT_OPENAI_CHAT_MODEL,
-      splitJaModel: 'gpt-5.4-nano',
+      splitJaModel: DEFAULT_OPENAI_CHAT_MODEL,
     })
   }
 
@@ -1099,16 +1099,16 @@ export function SettingsTab({
             theme={theme}
             label={t.settingsMicroModel}
             value={adminSettings.microModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="1単語ずつ削るマイクロ圧縮用。処理が極めて単純なので、軽量・低コストのモデルで十分です（default: gpt-5.4-nano）。空欄 = 圧縮モデルと同じにフォールバック"
+            hint="1単語ずつ削るマイクロ圧縮用。処理が極めて単純なので、軽量・低コストのモデルでも十分です（default: gpt-5.6-luna）。空欄 = 圧縮モデルと同じにフォールバック"
             onChange={(value) => onAdminSettingsChange({ microModel: value })}
           />
           <ComboField
             theme={theme}
             label="文脈統合モデル (Context Merge)"
             value={adminSettings.contextMergeModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-mini')}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
             hint="文脈依存の短い断片を前後どちらに統合するか判断するモデル。前/後の二択なので、軽量なモデルで十分です"
             onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
@@ -1117,9 +1117,9 @@ export function SettingsTab({
             theme={theme}
             label="日本語分割モデル (splitJa)"
             value={adminSettings.splitJaModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="日本語を意味単位に分割する用途。翻訳生成は不要なので、軽量・小型のモデルで十分です（default: gpt-5.4-nano）。空欄 = マイクロ圧縮モデルと同じ"
+            hint="日本語を意味単位に分割する用途。翻訳生成は不要なので、軽量・小型のモデルでも十分です（default: gpt-5.6-luna）。空欄 = マイクロ圧縮モデルと同じ"
             onChange={(value) => onAdminSettingsChange({ splitJaModel: value })}
           />
 
@@ -1375,9 +1375,9 @@ export function SettingsTab({
             theme={theme}
             label="coverage_repair モデル"
             value={adminSettings.coverageRepairModel}
-            placeholder={getChatModelPlaceholder('gpt-5.4-mini')}
+            placeholder={getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.4-mini"
+            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.6-luna"
             onChange={(value) => onAdminSettingsChange({ coverageRepairModel: value })}
           />
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1425,9 +1425,9 @@ export function SettingsTab({
             theme={theme}
             label="general_repair モデル"
             value={adminSettings.generalRepairModel}
-            placeholder={getChatModelPlaceholder('gpt-5.4-mini')}
+            placeholder={getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.4-mini"
+            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.6-luna"
             onChange={(value) => onAdminSettingsChange({ generalRepairModel: value })}
           />
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1791,9 +1791,9 @@ export function SettingsTab({
             theme={theme}
             label={t.settingsIncompleteEndDetectionModel}
             value={adminSettings.incompleteEndDetectionModel}
-            placeholder={getChatModelPlaceholder('gpt-5.4-nano')}
+            placeholder={getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="未完結末尾の判定モデル。バッチ + 並列で高速判定。default: gpt-5.4-nano"
+            hint="未完結末尾の判定モデル。バッチ + 並列で高速判定。default: gpt-5.6-luna"
             onChange={(value) => onAdminSettingsChange({ incompleteEndDetectionModel: value })}
           />
           <NumberField

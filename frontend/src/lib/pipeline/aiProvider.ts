@@ -4,7 +4,7 @@ export const OPENAI_CHAT_BASE_URL = 'https://api.openai.com/v1'
 export const GEMINI_OPENAI_COMPAT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai'
 export const LOCAL_OPENAI_COMPAT_BASE_URL = 'http://127.0.0.1:1234/v1'
 export const LOCAL_OLLAMA_OPENAI_COMPAT_BASE_URL = 'http://127.0.0.1:11434/v1'
-export const DEFAULT_OPENAI_CHAT_MODEL = 'gpt-5.4-mini'
+export const DEFAULT_OPENAI_CHAT_MODEL = 'gpt-5.6-luna'
 export const DEFAULT_GEMINI_CHAT_MODEL = 'gemini-3-flash-preview'
 
 export type AiProvider = Extract<TranslationProvider, 'openai' | 'gemini' | 'local_openai'>
