@@ -145,9 +145,27 @@ function localizeModelFields(settings: AdminSettings): AdminSettings {
   return patched as AdminSettings
 }
 
+/**
+ * 環境変数 `OPENAI_API_KEY` が設定されていれば OpenAI 本番プロバイダで実行する。
+ *
+ * 既定（未設定）はこれまでどおり LM Studio（local_openai）向けで、モデルIDも
+ * ローカルで動くものへ寄せる（`localizeModelFields`）。一方、本番の実行結果と
+ * 比較したい計測では同じモデルで走らせる必要があるため、その場合だけ OpenAI に切り替える。
+ * プロジェクトJSONの `openaiApiKey` はエクスポート時に `[configured]` へ伏せられるので、
+ * 鍵は環境変数からのみ受け取る（`src/lib/aiGateway/openaiSmoke.test.ts` と同じ方式）。
+ */
 function buildSettings(projectJson: unknown): AdminSettings {
   const raw = extractSessionAdminSettingsRaw(projectJson)
   const normalized = normalizeAdminSettings(raw)
+  const openaiApiKey = process.env.OPENAI_API_KEY?.trim() ?? ''
+  if (openaiApiKey) {
+    return {
+      ...normalized,
+      openaiApiKey,
+      openaiCompatibleBaseUrl: process.env.OPENAI_BASE_URL?.trim() ?? '',
+      translationProvider: 'openai',
+    }
+  }
   return localizeModelFields({
     ...normalized,
     openaiCompatibleBaseUrl: 'http://127.0.0.1:1234/v1',
