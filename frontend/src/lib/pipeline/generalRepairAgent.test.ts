@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { getDefaultAdminSettings } from '@/api/adminSettings'
+import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from './blockTypes'
-import { hasHardMetricRegression, partitionRewritesBySafety } from './generalRepairAgent'
+import { hasHardMetricRegression, partitionRewritesBySafety, runGeneralRepairAgent } from './generalRepairAgent'
 import { countCpsChars } from '../subtitleMetrics'
 
 const thresholds: PipelineThresholds = {
@@ -165,5 +167,83 @@ describe('partitionRewritesBySafety', () => {
     const { safe, dropped } = partitionRewritesBySafety(before, after, rewrites, thresholds)
     expect(safe).toHaveLength(2)
     expect(dropped).toHaveLength(0)
+  })
+})
+
+/**
+ * runGeneralRepairAgent は coverage（sourceTextLexicalOverlap の重なり率）を一切引数に取らない。
+ * 過去はこの重なり率の低さも起動条件に含めていたため、correctJa 等で意図的に書き換えられた
+ * 日本語を「欠落」と誤認して不要な repair を走らせてしまっていた（sourceTextLexicalOverlap.ts
+ * 冒頭コメント参照）。ここでは「block 単位の violation だけが起動条件である」ことを、
+ * LLM 呼出の有無（fetch が呼ばれたかどうか）で検証する。
+ */
+describe('runGeneralRepairAgent の起動条件（coverage を判断材料にしない）', () => {
+  function settings(overrides: Partial<AdminSettings> = {}): AdminSettings {
+    return {
+      ...getDefaultAdminSettings(),
+      translationProvider: 'openai',
+      openaiApiKey: 'sk-test',
+      generalRepairEnabled: true,
+      ...overrides,
+    }
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('全 block が制約を満たしていれば（＝重なり率が低いだけの状態相当）LLM を一切呼ばない', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const blocks = [
+      block({ id: 1, jaText: '短くなった原文の断片', enText: 'A short line.', cps: 5, violation: 'ok' }),
+      block({ id: 2, jaText: '別の断片', enText: 'Another short line.', cps: 6, violation: 'ok' }),
+    ]
+
+    const result = await runGeneralRepairAgent(blocks, settings(), thresholds)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(result.enabled).toBe(true)
+    expect(result.initialViolatingBlocks).toBe(0)
+    expect(result.finalViolatingBlocks).toBe(0)
+    expect(result.entries).toHaveLength(0)
+    expect(result.blocks).toBe(blocks)
+  })
+
+  it('block 単位の violation があれば従来どおり LLM を呼び出す', async () => {
+    const rewriteResponse = new Response(
+      JSON.stringify({
+        choices: [{
+          finish_reason: 'stop',
+          message: {
+            content: JSON.stringify({
+              rationale: 'shortened to fit cps',
+              rewrites: [{ block_id: 9, en: 'Shorter line.' }],
+            }),
+            refusal: null,
+          },
+        }],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+    const fetchMock = vi.fn(async () => rewriteResponse)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const blocks = [
+      block({
+        id: 9,
+        jaText: '関数として使うことはできないと、',
+        enText: "BatchNorm has learnable parameters, so it can't be used functionally as a plain stateless transformation.",
+        cps: 19.0,
+        violation: 'verbose_en',
+      }),
+    ]
+
+    const result = await runGeneralRepairAgent(blocks, settings(), thresholds, ['low'])
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result.entries).toHaveLength(1)
+    expect(result.entries[0].blocksTargetedIds).toEqual([9])
   })
 })

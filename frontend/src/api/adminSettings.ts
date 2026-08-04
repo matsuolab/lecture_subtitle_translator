@@ -118,6 +118,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     translationFewShotJson: DEFAULT_TRANSLATION_FEW_SHOT_JSON,
     compressPromptOverride: '',
     expandPromptOverride: '',
+    // 非推奨。coverageRepairAgent 廃止に伴い未使用（古い保存プロジェクトとの互換性のため型・既定値のみ残す）。
     coverageRepairEnabled: true,
     coverageRepairModel: 'gpt-5.6-luna',
     coverageRepairEffort: 'low',
@@ -304,6 +305,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     translationFewShotJson: typeof raw.translationFewShotJson === 'string' ? raw.translationFewShotJson : defaults.translationFewShotJson,
     compressPromptOverride: typeof raw.compressPromptOverride === 'string' ? raw.compressPromptOverride : '',
     expandPromptOverride: typeof raw.expandPromptOverride === 'string' ? raw.expandPromptOverride : '',
+    // 非推奨。coverageRepairAgent 廃止に伴い未使用（古い保存プロジェクトを開いても壊れないよう正規化のみ残す）。
     coverageRepairEnabled: typeof raw.coverageRepairEnabled === 'boolean' ? raw.coverageRepairEnabled : defaults.coverageRepairEnabled,
     coverageRepairModel: typeof raw.coverageRepairModel === 'string' ? raw.coverageRepairModel : defaults.coverageRepairModel,
     coverageRepairEffort: normalizeReasoningEffort(raw.coverageRepairEffort, defaults.coverageRepairEffort),

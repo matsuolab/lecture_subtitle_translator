@@ -109,11 +109,12 @@ export interface AdminSettings {
   compressPromptOverride: string
   expandPromptOverride: string
 
-  // coverage_repair_agent の有効化（source_text_undercovered 検出時に発動）
+  // 非推奨。coverageRepairAgent 廃止に伴い未使用。
+  // 古い保存プロジェクトの設定ファイルを壊さないよう型・正規化のみ残している（UIからは削除済み）。
   coverageRepairEnabled: boolean
-  // coverage_repair_agent 用モデル（空欄なら compressModel にフォールバック）
+  // 非推奨。coverageRepairAgent 廃止に伴い未使用。
   coverageRepairModel: string
-  // coverage_repair_agent の reasoning effort
+  // 非推奨。coverageRepairAgent 廃止に伴い未使用。
   coverageRepairEffort: ReasoningEffort
 
   // general_repair_agent エスカレーション（low → medium → high）の有効化

@@ -11,10 +11,8 @@ import { mergeContextFragments } from './contextMergeFragments'
 import { finalSafeMerge } from './finalSafeMerge'
 import { cpsReliefRebalance } from './cpsReliefRebalance'
 import { semanticValidation } from './semanticValidation'
-import { validateCoverage } from './coverageValidator'
-import { runCoverageRepairAgent } from './coverageRepairAgent'
+import { measureSourceTextLexicalOverlap } from './sourceTextLexicalOverlap'
 import { runGeneralRepairAgent } from './generalRepairAgent'
-import { redistributeJaSpan } from './redistributeJaSpan'
 import { tightenTiming } from './tightenTiming'
 import { closeSubtitleGaps, formatCloseSubtitleGapsSummary } from './closeSubtitleGaps'
 import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
@@ -131,43 +129,28 @@ export async function runPhase2(
     blocks = reliefResult.blocks
   }
 
-  // coverage_validator: 最終 plan が source JA を十分カバーしているか検証（決定的・LCSベース）
-  // correctedSegments が渡された場合のみ動作。issue は trace に残るが pipeline は止めない。
+  // sourceTextLexicalOverlap: 原文 JA と、時間が重なるブロックの JA との文字レベル重なり率を
+  // 観測する（決定的・LCSベース）。correctedSegments が渡された場合のみ動作。
+  //
+  // このノードはトレース記録専用で、戻り値は以降の分岐を一切駆動しない。
+  // 過去はこの重なり率の低さを合否判定として扱い、原文を機械的に再配分したり日本語を
+  // LLM に書き換えさせたりする自動修復のトリガーに使っていたが（いずれも廃止済み）、
+  // このパイプラインは correctJa の整形や correctionEngine の split_block によるフィラー除去で
+  // 意図的に日本語を書き換えるため、重なりが低いことは「内容が失われた」ことを意味しない
+  // （実測: 違反62件の内訳は書き換え81%・誤帰属8%・フィラー除去11%、内容欠落0件）。
+  // 詳細は sourceTextLexicalOverlap.ts 冒頭コメント参照。
   if (options.correctedSegments && options.correctedSegments.length > 0) {
     const segments = options.correctedSegments
-    let coverageReport = await runNode('coverageValidator', () => validateCoverage(blocks, segments))
-
-    // Stage 2: redistribute_ja_span — coverage 違反を決定的に救えるものは救う（LLM不要）
-    // 境界の取りこぼし等の機械的な不足を時間比例配分で修復。
-    // 改善しないケースは内部で revert される（悪化させない）。
-    if (!coverageReport.ok) {
-      const redistribResult = await runNode('redistributeJaSpan', () =>
-        redistributeJaSpan(blocks, segments, coverageReport),
-      )
-      blocks = redistribResult.blocks
-      coverageReport = redistribResult.finalReport
-    }
-
-    // coverage_repair_agent: 上記で救えなかった分（意味的な欠落）を mini + low reasoning で修復
-    // settings.coverageRepairEnabled が false の場合は完全スキップ（コスト0）
-    if (!coverageReport.ok && settings.coverageRepairEnabled) {
-      const repairResult = await runNode('coverageRepairAgent', () =>
-        runCoverageRepairAgent(blocks, segments, coverageReport, settings, thresholds),
-      )
-      blocks = repairResult.blocks
-      // coverage_repair で何か変えたなら再 validate
-      coverageReport = validateCoverage(blocks, segments)
-    }
+    await runNode('sourceTextLexicalOverlap', () => measureSourceTextLexicalOverlap(blocks, segments))
 
     // Stage 3: general_repair_agent エスカレーション (low → medium → high)
-    // - block-level 違反 と coverage 残存違反 の両方を見て修復
+    // - block 単位の violation のみを見て修復する（coverage の重なり率は判断材料にしない）
     // - 3 段階のうち改善した時点で break、最後まで失敗したら manual_review に確定
     // - PoC 同等プロセス保証: 「PoC でも救えなかった真の難ケース」のみ manual_review
-    const hasResidualViolations =
-      blocks.some((b) => b.violation !== 'ok' && b.violation !== 'slow_speech') || !coverageReport.ok
+    const hasResidualViolations = blocks.some((b) => b.violation !== 'ok' && b.violation !== 'slow_speech')
     if (hasResidualViolations && settings.generalRepairEnabled) {
       const generalResult = await runNode('generalRepairAgent', () =>
-        runGeneralRepairAgent(blocks, segments, coverageReport, settings, thresholds),
+        runGeneralRepairAgent(blocks, settings, thresholds),
       )
       blocks = generalResult.blocks
     }
@@ -191,7 +174,7 @@ export async function runPhase2(
   //     下がる方向に動く。verbose_en 等のCPS超過違反を新たに生むことはないはずだが、
   //     slow_speech（cps < slowCps）は duration が伸びるほど発生しやすくなる方向に
   //     働く。closeSubtitleGaps を CPS 検査・修復ノード（checkCpsAfterTighten /
-  //     cpsReliefRebalance / coverageRepairAgent / generalRepairAgent）より前段に
+  //     cpsReliefRebalance / generalRepairAgent）より前段に
   //     置くと、閉じたことで新たに生まれた slow_speech が「直すべき違反」として
   //     後段の repair agent に渡り、LLM が cue を縮めて閉じたギャップを打ち消し
   //     かねない。そのため repair 系ノードすべての後段（phase2 の最終段）に置く。

@@ -120,9 +120,10 @@ export function normalizeSnapshotItems(result: unknown): Record<string, unknown>
     if (Array.isArray(row.misses)) {
       return row.misses.map((miss, index) => ({ id: index + 1, miss }))
     }
-    // Validator 系（coverageValidator）: summary を1番目に + 各 issue を続けて記録
-    if (Array.isArray(row.issues)) {
-      return [buildSnapshotSummary(row, 'issues'), ...buildSnapshotDetailItems(row.issues, 'issue')]
+    // 観測系（sourceTextLexicalOverlap）: summary を1番目に + 各 observation を続けて記録。
+    // 合否を持たない観測専用ノードのため、閾値で絞らず全件をそのまま残す。
+    if (Array.isArray(row.observations)) {
+      return [buildSnapshotSummary(row, 'observations'), ...buildSnapshotDetailItems(row.observations, 'observation')]
     }
     // デバッグ計測（correctionDebug など）: summary を1番目に + 各 entry を続けて
     // agent 系 result は entries と blocks の両方を持つため、blocks より先にここで扱う。

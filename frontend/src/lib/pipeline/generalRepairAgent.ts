@@ -1,10 +1,7 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import { createAiGateway } from '@/lib/aiGateway'
 import type { EnBlock, PipelineThresholds } from './blockTypes'
-import type { CorrectedSegmentLite } from './correct'
-import type { CoverageReport } from './coverageValidator'
 import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
-import { validateCoverage } from './coverageValidator'
 import { checkCpsViolations } from './checkCpsViolations'
 import { meetsConstraints } from './correctionAgent/patchUtils'
 import { requireChatModelForProvider } from './aiProvider'
@@ -49,8 +46,6 @@ export interface GeneralRepairLogEntry {
   changedBlockIds: number[]
   violationsBefore: number
   violationsAfter: number
-  coverageFailedBefore: number
-  coverageFailedAfter: number
   status: 'improved' | 'improved_partial' | 'no_change' | 'reverted' | 'llm_error' | 'parse_error'
   rationale?: string
   errorMessage?: string
@@ -70,21 +65,22 @@ export interface GeneralRepairLogEntry {
  */
 export interface GeneralRepairResult {
   enabled: boolean
-  /** 修復対象の初期違反数（block 単位 + coverage segment 単位）*/
+  /** 修復対象の初期違反数（block 単位）*/
   initialViolatingBlocks: number
-  initialCoverageFailed: number
   finalViolatingBlocks: number
-  finalCoverageFailed: number
   attemptedEfforts: RepairEffort[]
   blocks: EnBlock[]
   entries: GeneralRepairLogEntry[]
-  finalCoverageReport: CoverageReport | null
 }
 
 interface LlmRewrite {
   blockId: number
-  jaSpan: string
   en: string
+  /**
+   * LLM がプロンプトの指示に反して ja_span を返してくることがあるため型としては受け取るが、
+   * `applyRewrites` では一切使わない（日本語は書き換えさせない。理由はファイル冒頭コメント参照）。
+   */
+  jaSpan?: string
 }
 
 interface LlmResponse {
@@ -97,22 +93,22 @@ interface LlmResponse {
 function buildSystemPrompt(transcriptLabel: string): string {
   return `You are GeneralRepairAgent — the LAST repair pass for academic lecture subtitles.
 
-The pipeline has already tried rule-based corrections and a coverage-focused repair agent.
-What remains are the hardest cases. You get one more chance per effort level (low → medium → high).
-If you cannot fix it, the block goes to manual_review.
+The pipeline has already tried rule-based corrections. What remains are the hardest cases.
+You get one more chance per effort level (low → medium → high). If you cannot fix it, the block
+goes to manual_review.
 
 You will be given:
 - chunk_blocks: all blocks for the current chunk, in time order, with current violations and correction history.
-- residual_violations: per-block violations (cps_over, line_length_only, long_segment, etc.) + chunk-level coverage gaps.
+- residual_violations: per-block violations (cps_over, line_length_only, long_segment, etc.).
 - constraints: hard limits (max_cps, max_chars_per_line, max_segment_chars, min_duration, etc.). MUST respect.
-- source_segments: original ${transcriptLabel} corrected text (post-correctJa) for coverage reference.
 
-Your job: rewrite the affected cues to resolve as many violations as possible.
+Your job: rewrite the affected cues' en text to resolve as many violations as possible.
 
 Rules:
-- Return JSON only: { "rationale": "...", "rewrites": [{ "block_id": N, "ja_span": "...", "en": "..." }] }
+- Return JSON only: { "rationale": "...", "rewrites": [{ "block_id": N, "en": "..." }] }
 - Only return rewrites for the cues you want to change. Other cues stay as-is.
-- You may modify both ja_span (to expand/shift source coverage) and en (to fix CPS/line/length).
+- You may modify en ONLY (to fix CPS/line/length). The ja_span (source ${transcriptLabel}) is fixed
+  and must NOT be changed — it is shown to you only as translation context.
 - Preserve the cue's start/end timing (you do NOT modify timing).
 - Compute allowed en chars as floor(duration_sec × max_cps). Stay within this budget.
 - Respect max_chars_per_line per line and max_segment_chars total.
@@ -120,15 +116,12 @@ Rules:
 - Preserve technical terms / formulas exactly (post-correctJa form).
 - Do not invent proper nouns (person names, organization names) that are not in source.
 - Use correction_attempts history to AVOID repeating strategies that already failed.
-- If you cannot repair a cue without violating constraints, leave it out of rewrites and explain in rationale.
-- For coverage gaps: prefer rephrasing existing en to absorb missing content, rather than fabricating.`
+- If you cannot repair a cue without violating constraints, leave it out of rewrites and explain in rationale.`
 }
 
 interface RepairPromptInput {
   chunkBlocks: EnBlock[]
   affectedBlockIds: Set<number>
-  correctedSegments: CorrectedSegmentLite[]
-  coverageReport: CoverageReport
   thresholds: PipelineThresholds
 }
 
@@ -183,27 +176,12 @@ function buildRepairUserPrompt(input: RepairPromptInput): string {
       cps: b.cps,
       max_line_len: b.maxLineLen,
     }))
-  const coverageViolations = input.coverageReport.issues.map((i) => ({
-    source_segment_id: i.sourceSegmentId,
-    coverage_ratio: i.coverageRatio,
-    affected_block_ids: i.affectedBlockIds,
-    missing_hint: `Source needs >= 90% coverage but currently only ${Math.round(i.coverageRatio * 100)}%.`,
-  }))
 
   return JSON.stringify({
     chunk_blocks: input.chunkBlocks.map(formatBlock),
     residual_violations: {
       per_block: perBlockViolations,
-      coverage: coverageViolations,
     },
-    source_segments: input.correctedSegments.map((s) => ({
-      id: s.id,
-      start: s.start,
-      end: s.end,
-      ja_text: s.correctedText,
-      original_ja_text: s.text,
-      correction_distance: s.correctionDistance,
-    })),
     constraints: {
       max_cps: input.thresholds.verboseCps,
       max_chars_per_line: input.thresholds.maxLineLen,
@@ -213,10 +191,9 @@ function buildRepairUserPrompt(input: RepairPromptInput): string {
       long_duration_sec: input.thresholds.longDurationSec,
     },
     instruction:
-      'Rewrite the target blocks (is_target=true) to resolve remaining violations. ' +
+      'Rewrite the en text of the target blocks (is_target=true) to resolve remaining violations. ' +
       'Use correction_attempts to avoid repeating failed strategies. ' +
-      'For coverage gaps, extend ja_span and rephrase en to absorb missing source. ' +
-      'Keep timing. Respect constraints.',
+      'Keep timing and ja_span unchanged. Respect constraints.',
   })
 }
 
@@ -269,10 +246,11 @@ async function callRepairLlm(
         if (!r || typeof r !== 'object') continue
         const row = r as Record<string, unknown>
         const blockId = typeof row.block_id === 'number' ? row.block_id : null
-        const jaSpan = typeof row.ja_span === 'string' ? row.ja_span : null
         const en = typeof row.en === 'string' ? row.en : null
-        if (blockId === null || jaSpan === null || en === null) continue
-        rewrites.push({ blockId, jaSpan, en })
+        if (blockId === null || en === null) continue
+        // ja_span が返ってきても記録だけはするが（診断用）、applyRewrites では使わない。
+        const jaSpan = typeof row.ja_span === 'string' ? row.ja_span : undefined
+        rewrites.push({ blockId, en, jaSpan })
       }
       return {
         parsed: { rewrites, rationale },
@@ -296,6 +274,11 @@ async function callRepairLlm(
   }
 }
 
+/**
+ * LLM の rewrite を block へ適用する。
+ * 日本語（jaText / jaChars）は一切更新しない — LLM が ja_span を返してきても無視する
+ * （このパイプラインは coverage を自動修復の判断に使わない方針のため。ファイル冒頭コメント参照）。
+ */
 function applyRewrites(blocks: EnBlock[], rewrites: LlmRewrite[]): EnBlock[] {
   if (rewrites.length === 0) return blocks
   const byId = new Map<number, LlmRewrite>()
@@ -305,8 +288,6 @@ function applyRewrites(blocks: EnBlock[], rewrites: LlmRewrite[]): EnBlock[] {
     if (!r) return b
     return {
       ...b,
-      jaText: r.jaSpan,
-      jaChars: r.jaSpan.replace(/\s/g, '').length,
       enText: r.en,
       enRaw: r.en,
       enTextOriginal: b.enTextOriginal ?? b.enText,
@@ -361,10 +342,10 @@ export interface DroppedRewrite {
 export function partitionRewritesBySafety(
   beforeBlocks: EnBlock[],
   proposedBlocks: EnBlock[],
-  rewrites: Array<{ blockId: number; jaSpan: string; en: string }>,
+  rewrites: Array<{ blockId: number; jaSpan?: string; en: string }>,
   thresholds: PipelineThresholds,
-): { safe: Array<{ blockId: number; jaSpan: string; en: string }>; dropped: DroppedRewrite[] } {
-  const safe: Array<{ blockId: number; jaSpan: string; en: string }> = []
+): { safe: Array<{ blockId: number; jaSpan?: string; en: string }>; dropped: DroppedRewrite[] } {
+  const safe: Array<{ blockId: number; jaSpan?: string; en: string }> = []
   const dropped: DroppedRewrite[] = []
   const maxSegmentChars = thresholds.maxLineLen * 2
 
@@ -401,20 +382,19 @@ export function partitionRewritesBySafety(
  * general_repair_agent のメインエントリ。
  *
  * - settings.generalRepairEnabled === false の場合は何もせず blocks をそのまま返す
- * - 修復対象が無ければ何もしない
+ * - block 単位の違反が無ければ何もしない（coverage の重なり率は判断材料にしない。
+ *   理由: sourceTextLexicalOverlap.ts 冒頭コメント参照。書き換えられた日本語を
+ *   「欠落」と誤認して不要な repair を走らせていた過去の構造を廃止したため）
  * - 各 effort で 1 回ずつ LLM 呼出（最大 3 回）
  * - 各 attempt で:
- *   - LLM 呼出 → 提案 rewrites を仮適用
+ *   - LLM 呼出 → 提案 rewrites（en のみ）を仮適用
  *   - checkCpsViolations で violation 再計算
- *   - validateCoverage で coverage 再計算
- *   - 「違反数 < 元 OR coverage failed 数 < 元」なら採用、そうでなければ revert
+ *   - 「違反数 < 元」なら採用、そうでなければ revert
  *   - 全違反解消なら break（後続 effort 不要）
  * - 全 attempt 失敗時も blocks の violation は残ったまま → 後段で manual_review 確定
  */
 export async function runGeneralRepairAgent(
   blocks: EnBlock[],
-  correctedSegments: CorrectedSegmentLite[],
-  coverageReport: CoverageReport,
   settings: AdminSettings,
   thresholds: PipelineThresholds,
   effortsParam?: RepairEffort[],
@@ -422,40 +402,32 @@ export async function runGeneralRepairAgent(
   // settings.generalRepairMaxEffort から escalation 配列を構築（明示引数があればそちらを優先）
   const efforts: RepairEffort[] = effortsParam ?? buildEffortsFromMax(settings.generalRepairMaxEffort)
   const initialViolatingBlocks = countViolatingBlocks(blocks)
-  const initialCoverageFailed = coverageReport.failedSegments
 
   if (!settings.generalRepairEnabled) {
     return {
       enabled: false,
       initialViolatingBlocks,
-      initialCoverageFailed,
       finalViolatingBlocks: initialViolatingBlocks,
-      finalCoverageFailed: initialCoverageFailed,
       attemptedEfforts: [],
       blocks,
       entries: [],
-      finalCoverageReport: coverageReport,
     }
   }
 
-  if (initialViolatingBlocks === 0 && initialCoverageFailed === 0) {
+  if (initialViolatingBlocks === 0) {
     return {
       enabled: true,
       initialViolatingBlocks: 0,
-      initialCoverageFailed: 0,
       finalViolatingBlocks: 0,
-      finalCoverageFailed: 0,
       attemptedEfforts: [],
       blocks,
       entries: [],
-      finalCoverageReport: coverageReport,
     }
   }
 
   const model = resolveGeneralRepairModelId(settings)
   const languages = loadLanguageProfileConfig(settings)
   let currentBlocks = blocks
-  let currentCoverage = coverageReport
   const entries: GeneralRepairLogEntry[] = []
   const attemptedEfforts: RepairEffort[] = []
 
@@ -463,13 +435,10 @@ export async function runGeneralRepairAgent(
     const effort = efforts[attemptIdx]
     attemptedEfforts.push(effort)
 
-    // 対象 block: 違反のある block + coverage 影響 block を集める
+    // 対象 block: 違反のある block を集める（coverage は対象選定に使わない）
     const affectedBlockIds = new Set<number>()
     for (const b of currentBlocks) {
       if (!meetsConstraints(b)) affectedBlockIds.add(b.id)
-    }
-    for (const issue of currentCoverage.issues) {
-      for (const id of issue.affectedBlockIds) affectedBlockIds.add(id)
     }
 
     if (affectedBlockIds.size === 0) {
@@ -478,14 +447,11 @@ export async function runGeneralRepairAgent(
     }
 
     const beforeViolations = countViolatingBlocks(currentBlocks)
-    const beforeCoverageFailed = currentCoverage.failedSegments
     const beforeSnapshot = snapshotAffected(currentBlocks, affectedBlockIds)
 
     const prompt = buildRepairUserPrompt({
       chunkBlocks: currentBlocks,
       affectedBlockIds,
-      correctedSegments,
-      coverageReport: currentCoverage,
       thresholds,
     })
 
@@ -500,8 +466,6 @@ export async function runGeneralRepairAgent(
       changedBlockIds: [],
       violationsBefore: beforeViolations,
       violationsAfter: beforeViolations,
-      coverageFailedBefore: beforeCoverageFailed,
-      coverageFailedAfter: beforeCoverageFailed,
       model,
       promptTokens: llmResult.promptTokens,
       completionTokens: llmResult.completionTokens,
@@ -540,7 +504,6 @@ export async function runGeneralRepairAgent(
         blocksAfter: snapshotAffected(proposedBlocksAll, affectedBlockIds),
         changedBlockIds: [],
         violationsAfter: beforeViolations,
-        coverageFailedAfter: beforeCoverageFailed,
         rationale: `${llmResult.parsed.rationale}; reverted: all ${droppedRewrites.length} rewrites caused hard regression`,
         droppedRewrites,
       })
@@ -549,9 +512,7 @@ export async function runGeneralRepairAgent(
 
     const safeApplied = applyRewrites(currentBlocks, safeRewrites)
     const proposedBlocks = checkCpsViolations(safeApplied, thresholds)
-    const proposedCoverage = validateCoverage(proposedBlocks, correctedSegments)
     const afterViolations = countViolatingBlocks(proposedBlocks)
-    const afterCoverageFailed = proposedCoverage.failedSegments
 
     const afterSnapshot = snapshotAffected(proposedBlocks, affectedBlockIds)
     const changedIds = safeRewrites
@@ -560,19 +521,15 @@ export async function runGeneralRepairAgent(
         const before = currentBlocks.find((b) => b.id === id)
         const after = proposedBlocks.find((b) => b.id === id)
         if (!before || !after) return false
-        return before.enText !== after.enText || before.jaText !== after.jaText
+        return before.enText !== after.enText
       })
 
     // 部分採用後の global check: 違反数が増えていない (= no net regression) なら採用。
-    // coverage 悪化は採用しない (safe rewrite でも ja_span 変更で coverage を下げる可能性あり)
-    const improvedAny =
-      afterViolations < beforeViolations || afterCoverageFailed < beforeCoverageFailed
-    const regressed =
-      afterViolations > beforeViolations || afterCoverageFailed > beforeCoverageFailed
+    const improvedAny = afterViolations < beforeViolations
+    const regressed = afterViolations > beforeViolations
 
     if (improvedAny && !regressed) {
       currentBlocks = proposedBlocks
-      currentCoverage = proposedCoverage
       const isPartial = droppedRewrites.length > 0
       entries.push({
         ...baseEntry,
@@ -580,13 +537,12 @@ export async function runGeneralRepairAgent(
         blocksAfter: afterSnapshot,
         changedBlockIds: changedIds,
         violationsAfter: afterViolations,
-        coverageFailedAfter: afterCoverageFailed,
         rationale: isPartial
           ? `${llmResult.parsed.rationale}; accepted ${safeRewrites.length}/${rewrites.length} rewrites (${droppedRewrites.length} dropped for hard regression)`
           : llmResult.parsed.rationale,
         droppedRewrites: isPartial ? droppedRewrites : undefined,
       })
-      if (afterViolations === 0 && afterCoverageFailed === 0) break
+      if (afterViolations === 0) break
     } else {
       entries.push({
         ...baseEntry,
@@ -594,9 +550,8 @@ export async function runGeneralRepairAgent(
         blocksAfter: afterSnapshot,
         changedBlockIds: changedIds,
         violationsAfter: afterViolations,
-        coverageFailedAfter: afterCoverageFailed,
         rationale: regressed
-          ? `${llmResult.parsed.rationale}; reverted: net violation/coverage regression after partial adoption`
+          ? `${llmResult.parsed.rationale}; reverted: net violation regression after partial adoption`
           : `${llmResult.parsed.rationale}; reverted: no net improvement after partial adoption`,
         droppedRewrites: droppedRewrites.length > 0 ? droppedRewrites : undefined,
       })
@@ -606,13 +561,10 @@ export async function runGeneralRepairAgent(
   return {
     enabled: true,
     initialViolatingBlocks,
-    initialCoverageFailed,
     finalViolatingBlocks: countViolatingBlocks(currentBlocks),
-    finalCoverageFailed: currentCoverage.failedSegments,
     attemptedEfforts,
     blocks: currentBlocks,
     entries,
-    finalCoverageReport: currentCoverage,
   }
 }
 

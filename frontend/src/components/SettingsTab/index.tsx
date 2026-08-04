@@ -1355,55 +1355,6 @@ export function SettingsTab({
         </FieldCard>
 
         <FieldCard theme={theme}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>カバレッジ修復エージェント</div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={adminSettings.coverageRepairEnabled}
-              onChange={(e) => onAdminSettingsChange({ coverageRepairEnabled: e.target.checked })}
-            />
-            <span style={{ fontSize: 12, color: theme.textPrimary }}>
-              coverage_repair_agent を有効化
-            </span>
-          </label>
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-            ON: ルールベース後の coverage 違反（source_text_undercovered）を mini + reasoning で自動修復。
-            1 chunk あたり 1 回・改善しない場合は revert（コスト 0.02 USD 程度／発動）。
-            OFF: coverage 違反は次段 general_repair か manual_review に流れる（API 呼出なし）。
-          </div>
-          <ComboField
-            theme={theme}
-            label="coverage_repair モデル"
-            value={adminSettings.coverageRepairModel}
-            placeholder={getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
-            listId="available-models-list"
-            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.6-luna"
-            onChange={(value) => onAdminSettingsChange({ coverageRepairModel: value })}
-          />
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>coverage_repair reasoning effort</span>
-            <select
-              value={adminSettings.coverageRepairEffort}
-              onChange={(e) => onAdminSettingsChange({ coverageRepairEffort: e.target.value as 'minimal' | 'low' | 'medium' | 'high' })}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                borderRadius: 8,
-                border: `1px solid ${theme.panelBorder}`,
-                background: theme.panelBg,
-                color: theme.textPrimary,
-                fontSize: 12,
-              }}
-            >
-              <option value="minimal">minimal（最小）</option>
-              <option value="low">low（推奨・default）</option>
-              <option value="medium">medium</option>
-              <option value="high">high（高コスト）</option>
-            </select>
-          </label>
-        </FieldCard>
-
-        <FieldCard theme={theme}>
           <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>汎用修復エージェント（最終救済）</div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
