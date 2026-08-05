@@ -9,7 +9,10 @@ export type ViolationCode =
   | 'ok'
   | 'short_duration'
   | 'over_compressed'
+  // 非推奨。classifyViolation は生成しない（旧 enJaRatio による誤検知が多く cps_over に分離した）。
+  // 過去に保存されたプロジェクト JSON の violation フィールドを読めるようにするため型には残す。
   | 'verbose_en'
+  | 'cps_over'
   | 'line_length_only'
   | 'long_segment'
   | 'proportional_ts'

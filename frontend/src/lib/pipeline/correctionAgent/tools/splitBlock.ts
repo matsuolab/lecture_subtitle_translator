@@ -340,7 +340,7 @@ export const splitBlockTool: Tool = {
     const isDurationViolation =
       ctx.block.violation === 'long_segment' || ctx.block.violation === 'merged_long'
     const isExtremeReadabilityViolation =
-      (ctx.block.violation === 'verbose_en' || ctx.block.violation === 'line_length_only') &&
+      (ctx.block.violation === 'cps_over' || ctx.block.violation === 'line_length_only') &&
       m.tier === 'extreme' &&
       normalizeForLengthCheck(block.jaText).length >= 45
     if (!isDurationViolation && !isExtremeReadabilityViolation) return false

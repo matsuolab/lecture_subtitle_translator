@@ -33,7 +33,7 @@ function block(partial: Partial<EnBlock> & Pick<EnBlock, 'id' | 'jaText' | 'enTe
     enChars: countCpsChars(enText),
     cps,
     maxLineLen: Math.max(...enText.split('\n').map(line => line.length)),
-    violation: 'verbose_en',
+    violation: 'cps_over',
     alignConf: 'exact',
     merged: false,
     expandCount: 0,
@@ -236,7 +236,7 @@ describe('runGeneralRepairAgent の起動条件（coverage を判断材料にし
         jaText: '関数として使うことはできないと、',
         enText: "BatchNorm has learnable parameters, so it can't be used functionally as a plain stateless transformation.",
         cps: 19.0,
-        violation: 'verbose_en',
+        violation: 'cps_over',
       }),
     ]
 
@@ -273,10 +273,9 @@ describe('runGeneralRepairAgent のバッチ分割（TPM 超過 429 の再現防
   })
 
   /**
-   * id を 1 始まりで振った、全件 verbose_en（CPS超過）で違反している block 群を作る。
-   * jaText はあえて 40 文字にしている: classifyViolation は cps だけでなく
-   * en/ja 文字数比（enJaRatio > verboseEnRatio(1.5)）でも verbose_en 判定するため、
-   * jaText が短すぎると「rewrite で英文を短縮しても比率が高いままで直らない」誤テストになる。
+   * id を 1 始まりで振った、全件 cps_over（CPS超過）で違反している block 群を作る。
+   * classifyViolation は現在 CPS 超過のみで cps_over を判定する（enJaRatio による判定は
+   * 廃止済み）ため、jaText の長さは判定に影響しない。
    */
   function makeViolatingBlocks(count: number): EnBlock[] {
     return Array.from({ length: count }, (_, i) => block({
@@ -285,7 +284,7 @@ describe('runGeneralRepairAgent のバッチ分割（TPM 超過 429 の再現防
       // countCpsChars は空白を除去してカウントするため、空白無しの80文字で cps=80/4=20 (> verboseCps 16.9)。
       enText: 'x'.repeat(80),
       cps: 20,
-      violation: 'verbose_en',
+      violation: 'cps_over',
     }))
   }
 
@@ -368,7 +367,7 @@ describe('runGeneralRepairAgent のバッチ分割（TPM 超過 429 の再現防
 
     const fixedBlock = result.blocks.find((b) => b.id === 45)
     expect(fixedBlock?.enText).toBe(fixedEnText)
-    expect(fixedBlock?.violation).not.toBe('verbose_en')
+    expect(fixedBlock?.violation).not.toBe('cps_over')
 
     // 失敗したバッチの対象 block (1-40) は元のまま残っている。
     const untouchedBlock = result.blocks.find((b) => b.id === 1)
@@ -385,7 +384,7 @@ describe('runGeneralRepairAgent のバッチ分割（TPM 超過 429 の再現防
         jaText: 'てすと',
         enText: isTarget ? 'x'.repeat(80) : 'short line',
         cps: isTarget ? 20 : 5,
-        violation: isTarget ? 'verbose_en' : 'ok',
+        violation: isTarget ? 'cps_over' : 'ok',
       })
     })
 

@@ -131,7 +131,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
   if (left.alignConf !== 'exact' || right.alignConf !== 'exact') {
     return { reason: `non-exact timing (${left.alignConf}, ${right.alignConf})` }
   }
-  const mergeableExistingViolations: ViolationCode[] = ['ok', 'slow_speech', 'verbose_en', 'line_length_only', 'short_duration']
+  const mergeableExistingViolations: ViolationCode[] = ['ok', 'slow_speech', 'cps_over', 'line_length_only', 'short_duration']
   if (![left.violation, right.violation].every(v => mergeableExistingViolations.includes(v))) {
     return { reason: `existing violation (${left.violation}, ${right.violation})` }
   }
@@ -176,7 +176,13 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
   if (metrics.cps > thresholds.verboseCps) {
     return { reason: `CPS ${metrics.cps.toFixed(1)} > ${thresholds.verboseCps.toFixed(1)}` }
   }
-  if (violation !== 'ok' && violation !== 'slow_speech' && violation !== 'verbose_en') {
+  // 従来 verbose_en は enJaRatio でも立っていたため、結合後に行長超過になったブロックも
+  // verbose_en として許可されていた。line_length_only を許可に加えないと、この変更で
+  // 結合が従来より厳しくなりキュー数が変わってしまう。CPS 超過は直前の176行で別途拒否している。
+  if (
+    violation !== 'ok' && violation !== 'slow_speech'
+    && violation !== 'cps_over' && violation !== 'line_length_only'
+  ) {
     return { reason: `new violation ${violation}` }
   }
 

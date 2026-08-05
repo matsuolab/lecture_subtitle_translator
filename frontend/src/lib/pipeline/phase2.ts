@@ -171,7 +171,7 @@ export async function runPhase2(
   //     minGapSec を渡し、閉じた後の gap が minGapSec を下回らないようにする
   //     （= gap_too_short を再発させない）。
   //   - classifyViolation（metrics.ts）は duration に依存し、cue を延ばすと cps は
-  //     下がる方向に動く。verbose_en 等のCPS超過違反を新たに生むことはないはずだが、
+  //     下がる方向に動く。cps_over 等のCPS超過違反を新たに生むことはないはずだが、
   //     slow_speech（cps < slowCps）は duration が伸びるほど発生しやすくなる方向に
   //     働く。closeSubtitleGaps を CPS 検査・修復ノード（checkCpsAfterTighten /
   //     cpsReliefRebalance / generalRepairAgent）より前段に
@@ -205,7 +205,7 @@ export async function runPhase2(
 
 function needsCorrection(block: EnBlock): boolean {
   return (
-    block.violation === 'verbose_en' ||
+    block.violation === 'cps_over' ||
     block.violation === 'line_length_only' ||
     block.violation === 'long_segment' ||
     block.violation === 'merged_long'

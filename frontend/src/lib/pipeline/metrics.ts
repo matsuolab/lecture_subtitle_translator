@@ -45,8 +45,17 @@ export function classifyViolation(
   ) {
     return 'over_compressed'
   }
-  if (metrics.enJaRatio > thresholds.verboseEnRatio || metrics.cps > thresholds.verboseCps) {
-    return 'verbose_en'
+  // en/ja 比（enJaRatio）はここでは違反判定に使わない。実測（117分・923キュー、閾値は
+  // CPS>18 / 行長>75 / 比>1.5）で比の中央値は 2.21 だった。日英翻訳は文字数が2倍強になるのが
+  // 標準のため、閾値1.5では9割のブロックが該当してしまい検知として機能しない。
+  // また比が先にマッチすることで CPS 内・行長超過の 21件がすべて 'verbose_en' の裏に隠れ、
+  // line_length_only として一度も出力されていなかった。視聴者が実際に経験する制約は
+  // CPS（読める速さ）と行長（画面に収まるか）であり、比は「翻訳が冗長かもしれない」という
+  // 推測に過ぎない。そのため比による判定はやめ、CPS 超過を独立コード cps_over として返す。
+  // 比は診断値として computeMetrics には残し、over_compressed（比が小さすぎる＝訳し落とし）
+  // の判定とレビュー表示（reviewDiagnostics の verbose-ratio 項目）では引き続き使う。
+  if (metrics.cps > thresholds.verboseCps) {
+    return 'cps_over'
   }
   if (metrics.maxLineLen > thresholds.maxLineLen) return 'line_length_only'
   if (metrics.cps < thresholds.slowCps && metrics.enJaRatio >= thresholds.overCompressedRatio) {

@@ -79,8 +79,8 @@ function shouldReportVerboseRatio(metrics: ReturnType<typeof computeMetrics>, th
 
 function violationTitle(violation: EnBlock['violation']): { title: string; action: string } {
   switch (violation) {
-    case 'verbose_en':
-      return { title: '英文が長すぎる可能性があります', action: 'CPSではなく英日比・情報量の過多として確認してください' }
+    case 'cps_over':
+      return { title: '読み速度(CPS)が上限を超えています', action: '短縮するか、表示時間を延ばせるか確認してください' }
     case 'line_length_only':
       return { title: '1行の文字数が長すぎます', action: '改行位置、短縮、または分割を確認してください' }
     case 'long_segment':
@@ -230,11 +230,10 @@ export function buildReviewItemsForBlock(
     }))
   }
 
-  if (
-    block.violation === 'verbose_en' &&
-    metrics.cps <= thresholds.verboseCps &&
-    shouldReportVerboseRatio(metrics, thresholds)
-  ) {
+  // 比が高いことは classifyViolation 上は違反ではなくなった（cps_over に分離済み）が、
+  // レビュー時の参考ヒントとしては残したいため、violation への依存はやめて
+  // metrics 由来の値だけで判定する。
+  if (metrics.cps <= thresholds.verboseCps && shouldReportVerboseRatio(metrics, thresholds)) {
     items.push(baseItem(block, 'verbose-ratio', {
       nodeId: 'subtitleReview',
       reason: 'verbose_ratio_over_limit',
@@ -344,7 +343,7 @@ export function buildReviewItemsForBlock(
     items.length === 0 &&
     block.violation !== 'ok' &&
     block.violation !== 'slow_speech' &&
-    block.violation !== 'verbose_en'
+    block.violation !== 'cps_over'
   ) {
     const fallback = violationTitle(block.violation)
     items.push(baseItem(block, `violation-${block.violation}`, {

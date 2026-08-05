@@ -214,7 +214,7 @@ function makeDecisionContext(settings: AdminSettings): DecisionContext {
     enChars: 21,
     cps: 5,
     maxLineLen: 21,
-    violation: 'verbose_en',
+    violation: 'cps_over',
     alignConf: 'exact',
     merged: false,
     expandCount: 0,
