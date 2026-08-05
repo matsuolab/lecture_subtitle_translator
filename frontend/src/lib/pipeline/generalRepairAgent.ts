@@ -9,6 +9,33 @@ import { resolveCompressModelId } from './prompts'
 import { loadLanguageProfileConfig, type LanguageProfileConfig } from './languageProfileConfig'
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { getCurrentLlmUsageSink } from './llmUsageSink'
+import { mapWithConcurrency } from '@/lib/concurrency'
+
+/**
+ * 1リクエストあたりの修復対象ブロック数の上限。
+ * 実測: 923ブロック全件を1リクエストにすると259,465トークンとなり、
+ * TPM上限200,000を超えて必ず 429 になる（実機3回の実行すべてで発生。
+ * 2026-08-03/04/05 の各実行ログ参照。errorMessage: "Requested 259465, Limit 200000"）。
+ * 1ブロックあたり約280トークン（259465/923）なので、対象40件＋前後2件の文脈で
+ * およそ (40 + 4) * 280 ≈ 1.2万トークン。上限200,000に対して十分な余裕がある。
+ */
+const MAX_TARGETS_PER_BATCH = 40
+
+/**
+ * バッチの対象ブロックの前後に含める隣接ブロック数（翻訳文脈のためだけに必要）。
+ * 全ブロックを文脈として渡す必要はなく、直近の前後だけで十分（実際に対象選定は
+ * violation のある block のみなので、直前直後の流れが分かれば言い換えの根拠になる）。
+ */
+const CONTEXT_NEIGHBORS = 2
+
+/**
+ * バッチ実行の並列度。
+ * TPM（1分あたりのトークン上限）は時間窓での合算であり、settings.apiRequestConcurrency
+ * （翻訳・拡張など他ノード向けの汎用並列度設定）をそのまま使うと、対象件数に応じて
+ * バッチ数が増えるほど「合算トークン/分」も比例して増え、結局 429 を再発しかねない。
+ * ここは他ノードの設定から独立させ、安全側に倒して固定値 2 とする。
+ */
+const BATCH_CONCURRENCY = 2
 
 /**
  * 段階的 escalation のエフォート値。PoC の検証で low が大半、medium で残り、high で最後の救済の構造を確認済み。
@@ -55,9 +82,18 @@ export interface GeneralRepairLogEntry {
   model: string
   /**
    * 部分採用で除外された rewrite。LLM の提案数のうち、自分の block で hard regression を
-   * 起こすため採用しなかったものを記録する。0 件なら全採用、>=1 件なら partial。
+   * 起こすため採用しなかったもの、およびバッチ単位で違反数が増えたため丸ごと破棄した
+   * ものを記録する。0 件なら全採用、>=1 件なら partial。
    */
   droppedRewrites?: DroppedRewrite[]
+  /** このattemptで実行したバッチ数 */
+  batchCount: number
+  /** そのうちLLM呼び出しに成功したバッチ数 */
+  batchesSucceeded: number
+  /** そのうち採用されたバッチ数（違反数が増えなかったもの）*/
+  batchesApplied: number
+  /** バッチごとのエラー（あれば）。全バッチ失敗の切り分け用 */
+  batchErrors: string[]
 }
 
 /**
@@ -195,6 +231,46 @@ function buildRepairUserPrompt(input: RepairPromptInput): string {
       'Use correction_attempts to avoid repeating failed strategies. ' +
       'Keep timing and ja_span unchanged. Respect constraints.',
   })
+}
+
+/**
+ * 対象 block を MAX_TARGETS_PER_BATCH 件ずつのバッチに分割する。
+ * blocks（時系列順）内の出現順で affectedBlockIds をソートしてから分割することで、
+ * バッチ内の block が時間的に隣接しやすくなる（buildBatchChunkBlocks の前後文脈と整合させるため）。
+ */
+function buildTargetBatches(blocks: EnBlock[], affectedBlockIds: Set<number>): number[][] {
+  const orderedIds = blocks.filter((b) => affectedBlockIds.has(b.id)).map((b) => b.id)
+  const batches: number[][] = []
+  for (let i = 0; i < orderedIds.length; i += MAX_TARGETS_PER_BATCH) {
+    batches.push(orderedIds.slice(i, i + MAX_TARGETS_PER_BATCH))
+  }
+  return batches
+}
+
+/**
+ * バッチの chunk_blocks を「対象ブロック＋前後 CONTEXT_NEIGHBORS 件」に絞り込む。
+ * 全 923 ブロックを毎回まとめて送っていたことが 429 (TPM 超過) の直接原因だったため
+ * （ファイル冒頭の MAX_TARGETS_PER_BATCH コメント参照）、文脈として本当に必要な範囲だけに絞る。
+ */
+function buildBatchChunkBlocks(blocks: EnBlock[], targetIds: number[]): EnBlock[] {
+  const indexById = new Map<number, number>()
+  blocks.forEach((b, idx) => indexById.set(b.id, idx))
+  const includedIndices = new Set<number>()
+  for (const id of targetIds) {
+    const idx = indexById.get(id)
+    if (idx === undefined) continue
+    for (let offset = -CONTEXT_NEIGHBORS; offset <= CONTEXT_NEIGHBORS; offset += 1) {
+      const neighborIdx = idx + offset
+      if (neighborIdx >= 0 && neighborIdx < blocks.length) includedIndices.add(neighborIdx)
+    }
+  }
+  return [...includedIndices].sort((a, b) => a - b).map((idx) => blocks[idx])
+}
+
+/** number | undefined の配列を合算する。全件 undefined なら undefined を返す（usage 未取得時の区別のため）。 */
+function sumDefined(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((v): v is number => typeof v === 'number')
+  return defined.length > 0 ? defined.reduce((a, b) => a + b, 0) : undefined
 }
 
 interface LlmCallResult {
@@ -378,6 +454,96 @@ export function partitionRewritesBySafety(
   return { safe, dropped }
 }
 
+interface RepairBatchOutcome {
+  targetIds: number[]
+  /**
+   * error: LLM 呼出自体が失敗（fetch 失敗 / HTTP エラー / JSON parse 失敗）。
+   * no_change: LLM が rewrite を1件も返さなかった（変更不要と判断した）。
+   * rejected: rewrite はあったが、block 単位 hard regression、またはバッチ内で
+   *   違反数が増えたため丸ごと破棄した。
+   * applied: rewrite の一部または全部を採用した。
+   */
+  status: 'error' | 'no_change' | 'rejected' | 'applied'
+  /** status === 'applied' のときのみ非空。採用された rewrite。 */
+  rewrites: LlmRewrite[]
+  droppedRewrites: DroppedRewrite[]
+  rationale?: string
+  errorMessage?: string
+  promptTokens?: number
+  completionTokens?: number
+  reasoningTokens?: number
+}
+
+/**
+ * 1 バッチ（対象 block <= MAX_TARGETS_PER_BATCH 件 ＋ 前後 CONTEXT_NEIGHBORS 件の文脈）分の
+ * repair を実行する。他バッチと独立に動くため、baseBlocks は attempt 開始時点のスナップショット
+ * （このバッチの実行中に他バッチの結果で更新されることはない）を渡す。
+ */
+async function runRepairBatch(
+  targetIds: number[],
+  baseBlocks: EnBlock[],
+  settings: AdminSettings,
+  model: string,
+  effort: RepairEffort,
+  languages: LanguageProfileConfig,
+  thresholds: PipelineThresholds,
+): Promise<RepairBatchOutcome> {
+  const targetIdSet = new Set(targetIds)
+  const chunkBlocks = buildBatchChunkBlocks(baseBlocks, targetIds)
+  const prompt = buildRepairUserPrompt({ chunkBlocks, affectedBlockIds: targetIdSet, thresholds })
+  const llmResult = await callRepairLlm(prompt, settings, model, effort, languages)
+  const tokenFields = {
+    promptTokens: llmResult.promptTokens,
+    completionTokens: llmResult.completionTokens,
+    reasoningTokens: llmResult.reasoningTokens,
+  }
+
+  if (!llmResult.parsed) {
+    return { targetIds, status: 'error', rewrites: [], droppedRewrites: [], errorMessage: llmResult.errorMessage, ...tokenFields }
+  }
+
+  // 文脈として渡した is_target:false のブロック（他バッチの対象かもしれない）への rewrite が
+  // 誤って返ってきても無視する。バッチは対象 block を互いに素に分割しているため、これを許すと
+  // 並列実行時に別バッチの結果と衝突しうる。
+  const rewrites = llmResult.parsed.rewrites.filter((r) => targetIdSet.has(r.blockId))
+
+  if (rewrites.length === 0) {
+    return { targetIds, status: 'no_change', rewrites: [], droppedRewrites: [], rationale: llmResult.parsed.rationale, ...tokenFields }
+  }
+
+  const rewrittenAll = applyRewrites(baseBlocks, rewrites)
+  const proposedAll = checkCpsViolations(rewrittenAll, thresholds)
+  const { safe, dropped } = partitionRewritesBySafety(baseBlocks, proposedAll, rewrites, thresholds)
+
+  if (safe.length === 0) {
+    return { targetIds, status: 'rejected', rewrites: [], droppedRewrites: dropped, rationale: llmResult.parsed.rationale, ...tokenFields }
+  }
+
+  // バッチ単位の採否判定: このバッチの対象 block だけを見て、違反数が増えていなければ採用する。
+  // 増えていればバッチごと（block 単位の安全チェックを通過した rewrite も含めて）破棄する。
+  const beforeViolationsInBatch = baseBlocks.filter((b) => targetIdSet.has(b.id) && !meetsConstraints(b)).length
+  const safeApplied = applyRewrites(baseBlocks, safe)
+  const proposed = checkCpsViolations(safeApplied, thresholds)
+  const afterViolationsInBatch = proposed.filter((b) => targetIdSet.has(b.id) && !meetsConstraints(b)).length
+
+  if (afterViolationsInBatch > beforeViolationsInBatch) {
+    const batchDropped: DroppedRewrite[] = safe.map((r) => ({
+      blockId: r.blockId,
+      reason: `batch discarded: violations within batch increased ${beforeViolationsInBatch} -> ${afterViolationsInBatch}`,
+    }))
+    return {
+      targetIds,
+      status: 'rejected',
+      rewrites: [],
+      droppedRewrites: [...dropped, ...batchDropped],
+      rationale: llmResult.parsed.rationale,
+      ...tokenFields,
+    }
+  }
+
+  return { targetIds, status: 'applied', rewrites: safe, droppedRewrites: dropped, rationale: llmResult.parsed.rationale, ...tokenFields }
+}
+
 /**
  * general_repair_agent のメインエントリ。
  *
@@ -385,12 +551,18 @@ export function partitionRewritesBySafety(
  * - block 単位の違反が無ければ何もしない（coverage の重なり率は判断材料にしない。
  *   理由: sourceTextLexicalOverlap.ts 冒頭コメント参照。書き換えられた日本語を
  *   「欠落」と誤認して不要な repair を走らせていた過去の構造を廃止したため）
- * - 各 effort で 1 回ずつ LLM 呼出（最大 3 回）
+ * - 各 effort で 1 回ずつ LLM 呼出……ではなく、対象 block を MAX_TARGETS_PER_BATCH 件ずつの
+ *   バッチに分割し、バッチごとに 1 回 LLM 呼出する（923 件全件を 1 リクエストに詰めて
+ *   TPM 上限超過で 429 になっていた実測の不具合を修正するため。ファイル冒頭コメント参照）。
+ *   バッチは BATCH_CONCURRENCY（固定 2）の並列度で実行し、1 バッチが失敗（LLM エラー含む）
+ *   しても他のバッチは続行する。
  * - 各 attempt で:
- *   - LLM 呼出 → 提案 rewrites（en のみ）を仮適用
- *   - checkCpsViolations で violation 再計算
+ *   - バッチごとに LLM 呼出 → 提案 rewrites（en のみ）を仮適用 → バッチ単位で採否判定
+ *   - 採用された全バッチの rewrite をまとめて適用し、attempt 全体の違反数を再計算
  *   - 「違反数 < 元」なら採用、そうでなければ revert
  *   - 全違反解消なら break（後続 effort 不要）
+ * - 全バッチが失敗（LLM 呼出が1件も成功しない）ときだけ status: 'llm_error'。
+ *   一部でも成功すれば、採用の有無に応じた通常のステータス（improved 系 / no_change / reverted）になる。
  * - 全 attempt 失敗時も blocks の violation は残ったまま → 後段で manual_review 確定
  */
 export async function runGeneralRepairAgent(
@@ -448,14 +620,31 @@ export async function runGeneralRepairAgent(
 
     const beforeViolations = countViolatingBlocks(currentBlocks)
     const beforeSnapshot = snapshotAffected(currentBlocks, affectedBlockIds)
+    // このバッチ群の間、他バッチの結果で状態が変わらないよう固定した「attempt 開始時点」の
+    // スナップショット。バッチは並列実行されるため、逐次的に currentBlocks を更新しながら
+    // 次のバッチに渡すことはしない（対象 block は互いに素なので、この設計でも結果は変わらない）。
+    const attemptBaseBlocks = currentBlocks
 
-    const prompt = buildRepairUserPrompt({
-      chunkBlocks: currentBlocks,
-      affectedBlockIds,
-      thresholds,
-    })
+    const targetBatches = buildTargetBatches(attemptBaseBlocks, affectedBlockIds)
 
-    const llmResult = await callRepairLlm(prompt, settings, model, effort, languages)
+    const batchOutcomes = await mapWithConcurrency(
+      targetBatches.length,
+      BATCH_CONCURRENCY,
+      (index) => runRepairBatch(targetBatches[index], attemptBaseBlocks, settings, model, effort, languages, thresholds),
+    )
+
+    const batchCount = batchOutcomes.length
+    const batchesSucceeded = batchOutcomes.filter((o) => o.status !== 'error').length
+    const batchesApplied = batchOutcomes.filter((o) => o.status === 'applied').length
+    const batchErrors = batchOutcomes
+      .filter((o) => o.status === 'error')
+      .map((o) => `blocks ${o.targetIds.join(',')}: ${o.errorMessage ?? 'unknown error'}`)
+
+    const promptTokens = sumDefined(batchOutcomes.map((o) => o.promptTokens))
+    const completionTokens = sumDefined(batchOutcomes.map((o) => o.completionTokens))
+    const reasoningTokens = sumDefined(batchOutcomes.map((o) => o.reasoningTokens))
+    const rationale = batchOutcomes.map((o) => o.rationale).filter((r): r is string => !!r).join(' | ') || undefined
+    const droppedRewrites = batchOutcomes.flatMap((o) => o.droppedRewrites)
 
     const baseEntry: Omit<GeneralRepairLogEntry, 'status'> = {
       attempt: attemptIdx + 1,
@@ -467,95 +656,76 @@ export async function runGeneralRepairAgent(
       violationsBefore: beforeViolations,
       violationsAfter: beforeViolations,
       model,
-      promptTokens: llmResult.promptTokens,
-      completionTokens: llmResult.completionTokens,
-      reasoningTokens: llmResult.reasoningTokens,
+      promptTokens,
+      completionTokens,
+      reasoningTokens,
+      rationale,
+      droppedRewrites: droppedRewrites.length > 0 ? droppedRewrites : undefined,
+      batchCount,
+      batchesSucceeded,
+      batchesApplied,
+      batchErrors,
     }
 
-    if (!llmResult.parsed) {
-      const status = llmResult.errorMessage?.includes('JSON parse failed') ? 'parse_error' : 'llm_error'
-      entries.push({ ...baseEntry, status, errorMessage: llmResult.errorMessage })
+    // 全バッチが失敗（LLM 呼出が1件も成功しない）ときだけ llm_error。
+    // 1件でも成功していれば、以下の通常フロー（採用の有無に応じた improved / no_change / reverted）に進む。
+    if (batchesSucceeded === 0) {
+      entries.push({ ...baseEntry, status: 'llm_error', errorMessage: batchErrors.join('; ') })
       continue
     }
 
-    const rewrites = llmResult.parsed.rewrites
-    if (rewrites.length === 0) {
-      entries.push({ ...baseEntry, status: 'no_change', rationale: llmResult.parsed.rationale })
+    const appliedRewrites = batchOutcomes.filter((o) => o.status === 'applied').flatMap((o) => o.rewrites)
+
+    if (appliedRewrites.length === 0) {
+      // 採用されたバッチが1つも無い: 全バッチが no_change（変更不要）か rejected（破棄）のいずれか。
+      const anyRejected = batchOutcomes.some((o) => o.status === 'rejected')
+      entries.push({ ...baseEntry, status: anyRejected ? 'reverted' : 'no_change' })
       continue
     }
 
-    // 仮適用 → 部分採用フィルタ → 残ったものだけ再適用して global validate
-    // 部分採用化: 1 件の hard regression で全件 revert していた旧設計を改める。
-    // 自分の block で hard regression を起こす rewrite だけを除外し、残りは採用する。
-    const rewrittenBlocksAll = applyRewrites(currentBlocks, rewrites)
-    const proposedBlocksAll = checkCpsViolations(rewrittenBlocksAll, thresholds)
-    const { safe: safeRewrites, dropped: droppedRewrites } = partitionRewritesBySafety(
-      currentBlocks,
-      proposedBlocksAll,
-      rewrites,
-      thresholds,
-    )
+    // 採用された全バッチの rewrite をまとめて適用し、attempt 全体（全 block）で違反数を再計算する。
+    // バッチ単位の採否判定は各バッチ自身の対象 block だけを見て行われるため、ここで改めて
+    // 「attempt 全体として本当に改善したか」を最終確認する（元の全件一括判定と同じ安全網）。
+    const rewrittenBlocks = applyRewrites(attemptBaseBlocks, appliedRewrites)
+    const proposedBlocks = checkCpsViolations(rewrittenBlocks, thresholds)
+    const afterViolations = countViolatingBlocks(proposedBlocks)
 
-    if (safeRewrites.length === 0) {
-      // すべて hard regression → revert
+    if (afterViolations >= beforeViolations) {
+      // 個々のバッチは「バッチ内では違反が増えていない」と判定して採用したが、attempt 全体で見ると
+      // 改善していない（起こりうるのは理論上まれだが、安全側に倒して丸ごと revert する）。
       entries.push({
         ...baseEntry,
         status: 'reverted',
-        blocksAfter: snapshotAffected(proposedBlocksAll, affectedBlockIds),
-        changedBlockIds: [],
-        violationsAfter: beforeViolations,
-        rationale: `${llmResult.parsed.rationale}; reverted: all ${droppedRewrites.length} rewrites caused hard regression`,
-        droppedRewrites,
+        blocksAfter: snapshotAffected(proposedBlocks, affectedBlockIds),
+        violationsAfter: afterViolations,
+        rationale: rationale
+          ? `${rationale}; reverted: no net improvement after batch adoption`
+          : 'reverted: no net improvement after batch adoption',
       })
       continue
     }
 
-    const safeApplied = applyRewrites(currentBlocks, safeRewrites)
-    const proposedBlocks = checkCpsViolations(safeApplied, thresholds)
-    const afterViolations = countViolatingBlocks(proposedBlocks)
-
+    currentBlocks = proposedBlocks
     const afterSnapshot = snapshotAffected(proposedBlocks, affectedBlockIds)
-    const changedIds = safeRewrites
+    const changedIds = appliedRewrites
       .map((r) => r.blockId)
       .filter((id) => {
-        const before = currentBlocks.find((b) => b.id === id)
+        const before = attemptBaseBlocks.find((b) => b.id === id)
         const after = proposedBlocks.find((b) => b.id === id)
         if (!before || !after) return false
         return before.enText !== after.enText
       })
+    // 一部でも「失敗 / 破棄 / 未採用」のバッチがあれば partial（全バッチが applied で初めて非 partial）。
+    const isPartial = batchesApplied < batchCount || droppedRewrites.length > 0
 
-    // 部分採用後の global check: 違反数が増えていない (= no net regression) なら採用。
-    const improvedAny = afterViolations < beforeViolations
-    const regressed = afterViolations > beforeViolations
-
-    if (improvedAny && !regressed) {
-      currentBlocks = proposedBlocks
-      const isPartial = droppedRewrites.length > 0
-      entries.push({
-        ...baseEntry,
-        status: isPartial ? 'improved_partial' : 'improved',
-        blocksAfter: afterSnapshot,
-        changedBlockIds: changedIds,
-        violationsAfter: afterViolations,
-        rationale: isPartial
-          ? `${llmResult.parsed.rationale}; accepted ${safeRewrites.length}/${rewrites.length} rewrites (${droppedRewrites.length} dropped for hard regression)`
-          : llmResult.parsed.rationale,
-        droppedRewrites: isPartial ? droppedRewrites : undefined,
-      })
-      if (afterViolations === 0) break
-    } else {
-      entries.push({
-        ...baseEntry,
-        status: 'reverted',
-        blocksAfter: afterSnapshot,
-        changedBlockIds: changedIds,
-        violationsAfter: afterViolations,
-        rationale: regressed
-          ? `${llmResult.parsed.rationale}; reverted: net violation regression after partial adoption`
-          : `${llmResult.parsed.rationale}; reverted: no net improvement after partial adoption`,
-        droppedRewrites: droppedRewrites.length > 0 ? droppedRewrites : undefined,
-      })
-    }
+    entries.push({
+      ...baseEntry,
+      status: isPartial ? 'improved_partial' : 'improved',
+      blocksAfter: afterSnapshot,
+      changedBlockIds: changedIds,
+      violationsAfter: afterViolations,
+    })
+    if (afterViolations === 0) break
   }
 
   return {
