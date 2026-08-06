@@ -182,7 +182,12 @@ export async function correctionEngine(
 
     if (ctx.physicalMaxChars < thresholds.minMeaningfulChars) continue
 
+    // getFeasibleStrategies はインラインの条件だけで候補を組み立てており、各ツールが
+    // 実装している canApply(ctx) を一度も呼んでいなかった（呼び出し側が存在しなかった）。
+    // ここで絞り込む。feasibility.ts 側に入れると tools/index.ts への依存が増えて
+    // 循環importの恐れがあるため、既に toolRegistry を import している loop.ts で行う。
     const feasible = getFeasibleStrategies(ctx, thresholds)
+      .filter(strategy => toolRegistry[strategy].canApply(ctx))
 
     if (feasible.length === 0) continue
 

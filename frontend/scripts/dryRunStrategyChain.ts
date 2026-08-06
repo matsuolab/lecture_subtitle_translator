@@ -18,6 +18,7 @@ import { buildContext } from '../src/lib/pipeline/correctionAgent/contextBuilder
 import { getFeasibleStrategies } from '../src/lib/pipeline/correctionAgent/feasibility'
 import { RuleBasedDecisionNode } from '../src/lib/pipeline/correctionAgent/decisionNode'
 import { buildAgentThresholds } from '../src/lib/pipeline/correctionAgent/types'
+import { toolRegistry } from '../src/lib/pipeline/correctionAgent/tools/index'
 import type {
   AgentThresholds,
   CorrectionAttempt,
@@ -143,7 +144,9 @@ async function simulateBlock(
     if (history.length >= agentThresholds.maxCorrectionRounds) { stopReason = 'max_rounds'; break }
     if (history.length > 0 && stops(history)) { stopReason = 'early_termination'; break }
     if (ctx.physicalMaxChars < agentThresholds.minMeaningfulChars) { stopReason = 'too_short_to_hold_text'; break }
+    // loop.ts と同じ絞り込み。ここを合わせないと実機と違う連鎖を出してしまう。
     const feasible = getFeasibleStrategies(ctx, agentThresholds)
+      .filter(strategy => toolRegistry[strategy].canApply(ctx))
     if (feasible.length === 0) { stopReason = 'no_feasible_strategy'; break }
     history.push(failedAttempt(await decisionNode.decide(ctx, feasible), block))
     // 旧挙動: 失敗したブロックはキューに戻されないので、ここで打ち切られる

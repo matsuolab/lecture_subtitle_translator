@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getDefaultAdminSettings } from '@/api/adminSettings'
 import type { AdminSettings } from '@/types/adminSettings'
@@ -37,15 +37,27 @@ const toolExecuteMocks = vi.hoisted(() => ({
   offload_neighbor: vi.fn(),
 }))
 
+// canApply もモック可能にしておく（Tool.canApply が feasible 絞り込みに使われることを
+// 検証するテスト用）。既定は true を返し、各ツールが呼ばれること自体は既存テストの前提を崩さない。
+const toolCanApplyMocks = vi.hoisted(() => ({
+  compress_micro: vi.fn(() => true),
+  compress_rephrase: vi.fn(() => true),
+  compress_trim: vi.fn(() => true),
+  compress_core: vi.fn(() => true),
+  split_block: vi.fn(() => true),
+  borrow_gap: vi.fn(() => true),
+  offload_neighbor: vi.fn(() => true),
+}))
+
 vi.mock('./tools/index', () => ({
   toolRegistry: {
-    compress_micro: { name: 'compress_micro', description: '', canApply: () => true, execute: toolExecuteMocks.compress_micro },
-    compress_rephrase: { name: 'compress_rephrase', description: '', canApply: () => true, execute: toolExecuteMocks.compress_rephrase },
-    compress_trim: { name: 'compress_trim', description: '', canApply: () => true, execute: toolExecuteMocks.compress_trim },
-    compress_core: { name: 'compress_core', description: '', canApply: () => true, execute: toolExecuteMocks.compress_core },
-    split_block: { name: 'split_block', description: '', canApply: () => true, execute: toolExecuteMocks.split_block },
-    borrow_gap: { name: 'borrow_gap', description: '', canApply: () => true, execute: toolExecuteMocks.borrow_gap },
-    offload_neighbor: { name: 'offload_neighbor', description: '', canApply: () => true, execute: toolExecuteMocks.offload_neighbor },
+    compress_micro: { name: 'compress_micro', description: '', canApply: toolCanApplyMocks.compress_micro, execute: toolExecuteMocks.compress_micro },
+    compress_rephrase: { name: 'compress_rephrase', description: '', canApply: toolCanApplyMocks.compress_rephrase, execute: toolExecuteMocks.compress_rephrase },
+    compress_trim: { name: 'compress_trim', description: '', canApply: toolCanApplyMocks.compress_trim, execute: toolExecuteMocks.compress_trim },
+    compress_core: { name: 'compress_core', description: '', canApply: toolCanApplyMocks.compress_core, execute: toolExecuteMocks.compress_core },
+    split_block: { name: 'split_block', description: '', canApply: toolCanApplyMocks.split_block, execute: toolExecuteMocks.split_block },
+    borrow_gap: { name: 'borrow_gap', description: '', canApply: toolCanApplyMocks.borrow_gap, execute: toolExecuteMocks.borrow_gap },
+    offload_neighbor: { name: 'offload_neighbor', description: '', canApply: toolCanApplyMocks.offload_neighbor, execute: toolExecuteMocks.offload_neighbor },
   },
 }))
 
@@ -55,6 +67,12 @@ const { meetsConstraints } = await import('./patchUtils')
 
 afterEach(() => {
   vi.resetAllMocks()
+})
+
+// resetAllMocks は canApply の既定実装（() => true）も消してしまうため、テストごとに
+// 立て直す。個々のテストで false に上書きしたい場合はテスト内で mockReturnValue(false) する。
+beforeEach(() => {
+  for (const mock of Object.values(toolCanApplyMocks)) mock.mockReturnValue(true)
 })
 
 const pipelineThresholds: PipelineThresholds = {
@@ -235,5 +253,41 @@ describe('correctionEngine', () => {
     expect(meetsConstraints(result[0])).toBe(true)
     expect(result[0].correctionAttempts).toHaveLength(1)
     expect(result[0].correctionAttempts?.[0].changed).toBe(true)
+  })
+
+  it('canApply が false を返すツールは feasible 候補から除外される', async () => {
+    const block = makeBlock()
+    const thresholds = makeThresholds()
+    toolCanApplyMocks.compress_trim.mockReturnValue(false)
+
+    let capturedFeasible: CorrectionStrategy[] = []
+    const decisionNode: DecisionNode = {
+      decide: vi.fn(async (_ctx, feasible): Promise<CorrectionStrategy> => {
+        capturedFeasible = feasible
+        return 'compress_rephrase'
+      }),
+    }
+    const shortText = 'Short subtitle text.'
+    const shortChars = countCpsChars(shortText)
+    toolExecuteMocks.compress_rephrase.mockResolvedValueOnce({
+      replaceBlocks: [{
+        ...block,
+        enText: shortText,
+        enRaw: shortText,
+        enChars: shortChars,
+        cps: shortChars / 5,
+      }],
+      dirtyBlockIds: [String(block.id)],
+      changed: true,
+    } satisfies TimelinePatch)
+
+    await correctionEngine([block], [0], decisionNode, settings, thresholds)
+
+    // compress_trim は canApply=false なので decide に渡る feasible には含まれず、
+    // execute も一度も呼ばれない。同じ理由で feasible になるはずの他の戦略は残る。
+    expect(capturedFeasible).not.toContain('compress_trim')
+    expect(capturedFeasible).toContain('compress_rephrase')
+    expect(toolExecuteMocks.compress_trim).not.toHaveBeenCalled()
+    expect(toolCanApplyMocks.compress_trim).toHaveBeenCalled()
   })
 })
