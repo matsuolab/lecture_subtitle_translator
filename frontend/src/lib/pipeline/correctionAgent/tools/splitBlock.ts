@@ -78,9 +78,14 @@ function endsWithIncompleteJapanese(text: string): boolean {
   return /([、,]|の|と|を|に|が|は|で|て|から|ため|として|について|には|では|ので|し|か|点で)$/.test(normalized)
 }
 
-function isBadJapaneseUnit(text: string): boolean {
+// exemptTrailingParticle: true の場合、「末尾が助詞・接続で終わっていないか」の判定を免除する。
+// 最小文字数（6文字未満）の判定は免除しない — 短すぎる断片は分割そのものが生んだ問題であり、
+// 入力が不完全だったかどうかとは無関係に弾くべきなため。
+function isBadJapaneseUnit(text: string, opts: { exemptTrailingParticle?: boolean } = {}): boolean {
   const normalized = normalizeJaUnit(text)
-  return normalized.length < 6 || endsWithIncompleteJapanese(normalized)
+  if (normalized.length < 6) return true
+  if (opts.exemptTrailingParticle) return false
+  return endsWithIncompleteJapanese(normalized)
 }
 
 // isBadJapaneseUnit は末尾しか見ていないため、「ということを紹介したいと思います。」のように
@@ -367,17 +372,27 @@ export const splitBlockTool: Tool = {
     if (!m.splitViable) return false
     if (ctx.attemptHistory.some(a => a.strategy === 'split_block')) return false
 
-    // Phase1 detectIncompleteEnds で「末尾 mid-sentence」と判定済の場合は分割しない。
-    // この種ブロックは LLM が「2 unit に分けられない」と返すのが既定で、無駄な API コール
-    // を避けつつログのノイズを減らす（Day4 ログでは 305件 / 752件試行で発生）。
     const block = ctx.block as { endsIncomplete?: boolean; jaText: string }
-    if (block.endsIncomplete === true) return false
+    const isDurationViolation =
+      ctx.block.violation === 'long_segment' || ctx.block.violation === 'merged_long'
+
+    // Phase1 detectIncompleteEnds で「末尾 mid-sentence」と判定済の場合、元々はここで
+    // 一律に分割を止めていた（この種ブロックは LLM が「2 unit に分けられない」と返すのが既定で、
+    // 無駄な API コールを避けつつログのノイズを減らす狙い。Day4 ログでは 305件 / 752件試行で発生）。
+    // しかしこの前提はプロンプトが本文の書き換えを一切禁じていた頃のもので、継ぎ目（各ユニットの
+    // 末尾）だけの言い切り修正を許した現在は成り立たない: 末尾が不完全なのは入力時点からであり、
+    // 分割自体はそれを悪化させない（execute 側 checkSeamOnlySplit が継ぎ目以外の書き換えを検査する）。
+    // 実際、このガードを外さないまま canApply を修復ループに繋いだ結果、実パイプライン再実行
+    // （117分・839キュー）で尺違反56件中11件（最長35.1秒など、出力中で最も長い字幕群）が
+    // 一度も分割を試みられなくなる退行を起こした。
+    // 尺違反（long_segment/merged_long）は分割以外に手段がないため、endsIncomplete でも
+    // 分割を試す。尺違反以外（cps_over/line_length_only の extreme tier）には引き続きガードを
+    // 効かせる: そちらは圧縮という代替手段があり、無駄な API コールを避ける元の意図が今も有効。
+    if (block.endsIncomplete === true && !isDurationViolation) return false
 
     // JA が短すぎる場合も同様。2 分割すると各 unit が 12 文字程度になり成立しない。
     if (normalizeForLengthCheck(block.jaText).length < SPLIT_BLOCK_MIN_TRANSCRIPT_CHARS) return false
 
-    const isDurationViolation =
-      ctx.block.violation === 'long_segment' || ctx.block.violation === 'merged_long'
     const isExtremeReadabilityViolation =
       (ctx.block.violation === 'cps_over' || ctx.block.violation === 'line_length_only') &&
       m.tier === 'extreme' &&
@@ -405,7 +420,18 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, 'split_block: rejected low-confidence split unit')
     }
 
-    const badJa = cleanUnits.find(unit => isBadJapaneseUnit(unit.text))
+    // 元のブロックの jaText が既に不完全な終わり方をしていた場合（助詞・接続表現で終わる等）、
+    // 分割後の最後のユニットは必ず原文の末尾まで到達する（checkSeamOnlySplit が「最後のユニットが
+    // tail_dropped でないこと」＝原文末尾に到達していることを保証している）。つまり最後のユニットの
+    // 末尾の不完全さは分割が生んだものではなく入力から引き継いだものであり、分割を拒否しても
+    // 不完全さは解消せず「長すぎる字幕が1枚残る」だけ悪化する。そのため最後のユニットに限り、
+    // 「末尾が助詞・接続で終わる」判定を免除する（最小文字数の判定は免除しない）。
+    // 最後のユニット以外は従来どおり全ての判定を適用する。
+    const originalWasIncomplete = endsWithIncompleteJapanese(block.jaText)
+    const badJa = cleanUnits.find((unit, index) => {
+      const isLastUnit = index === cleanUnits.length - 1
+      return isBadJapaneseUnit(unit.text, { exemptTrailingParticle: isLastUnit && originalWasIncomplete })
+    })
     if (badJa) {
       return buildFailurePatch(block, `split_block: rejected incomplete or too-short Japanese unit: ${badJa.text}`)
     }
