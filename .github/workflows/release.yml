@@ -126,11 +126,25 @@ jobs:
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
+          set -euo pipefail
           app_path="$(find frontend/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           if [[ -z "$app_path" ]]; then
             echo "macOS app bundle not found"
             exit 1
           fi
+
+          # Developer ID 署名・公証を導入するまでの暫定対応。
+          # quarantine 付き配布物で署名構造が不整合になるのを避けるため、
+          # nested code (FFmpeg) から app bundle の順に ad-hoc 再署名する。
+          ffmpeg_path="$app_path/Contents/MacOS/ffmpeg"
+          if [[ ! -f "$ffmpeg_path" ]]; then
+            echo "bundled ffmpeg not found: $ffmpeg_path" >&2
+            exit 1
+          fi
+          codesign --force --sign - --timestamp=none "$ffmpeg_path"
+          codesign --force --sign - --timestamp=none "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "${{ matrix.asset }}"
 
       - name: Prepare Linux artifact
