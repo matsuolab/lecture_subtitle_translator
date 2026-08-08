@@ -259,8 +259,12 @@ function audit(path: string, label: string): AuditResult {
     .sort((a, b) => (b.cps ?? 0) - (a.cps ?? 0))
   const lineOverItems = final.filter(i => (i.maxLineLen ?? 0) > t.maxLineLen)
     .sort((a, b) => (b.maxLineLen ?? 0) - (a.maxLineLen ?? 0))
+  // merged は最終ブロック（SubtitleBlock）には残らず toSubtitleBlocks で落ちるため、
+  // blocks[].merged を見ると常に undefined になり、結合済みキューにも緩い方の閾値を
+  // 当ててしまう。merged を保持している最後の段階（finalFormatLines）から引く。
+  const mergedById = new Map(final.map(i => [i.id, i.merged === true]))
   const durationOverBlocks = blocks
-    .filter(b => isDurationViolation({ start: b.startTime, end: b.endTime, merged: b.merged }, t))
+    .filter(b => isDurationViolation({ start: b.startTime, end: b.endTime, merged: mergedById.get(b.id) }, t))
     .sort((a, b) => (b.endTime - b.startTime) - (a.endTime - a.startTime))
   const durationShortBlocks = blocks.filter(b => b.endTime - b.startTime < t.shortDurationSec)
 
