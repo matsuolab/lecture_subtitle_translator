@@ -255,6 +255,69 @@ describe('correctionEngine', () => {
     expect(result[0].correctionAttempts?.[0].changed).toBe(true)
   })
 
+  it('splitFrom が自分自身を指す分割ブロックでも、correctionAttempts に同じ履歴が重複しない', async () => {
+    // splitBlock.ts は分割の1個目のユニットに元ブロックと同じ id を割り当てたうえで、
+    // 全ユニットに splitFrom = 元ブロックの id を付ける。そのため1個目のユニットは
+    // splitFrom === 自分の id になる。attachAttemptHistories が sourceId と block.id の
+    // 一致を確認せずに sourceHistory を連結すると、同じ Map エントリ（split_block の
+    // 1回の試行）が ownHistory と sourceHistory の両方から連結されて2回記録されてしまう
+    // （実データでは correctionAttempts の水増しにつながった回帰）。
+    const block = makeBlock()
+    const thresholds = makeThresholds()
+    const decisionNode = makeDecisionNode(['split_block'])
+
+    const shortTextA = 'Short first half.'
+    const shortTextB = 'Short second half.'
+    const childA: EnBlock = {
+      ...block,
+      id: block.id,
+      start: 0,
+      end: 2.5,
+      jaText: 'これは前半です',
+      jaChars: 7,
+      enText: shortTextA,
+      enRaw: shortTextA,
+      enChars: countCpsChars(shortTextA),
+      cps: countCpsChars(shortTextA) / 2.5,
+      maxLineLen: shortTextA.length,
+      violation: 'ok',
+    }
+    ;(childA as unknown as Record<string, unknown>).splitFrom = block.id
+    const childB: EnBlock = {
+      ...block,
+      id: block.id * 1000 + 2,
+      start: 2.5,
+      end: 5,
+      jaText: 'これは後半です',
+      jaChars: 7,
+      enText: shortTextB,
+      enRaw: shortTextB,
+      enChars: countCpsChars(shortTextB),
+      cps: countCpsChars(shortTextB) / 2.5,
+      maxLineLen: shortTextB.length,
+      violation: 'ok',
+    }
+    ;(childB as unknown as Record<string, unknown>).splitFrom = block.id
+
+    toolExecuteMocks.split_block.mockResolvedValueOnce({
+      replaceBlocks: [childA, childB],
+      dirtyBlockIds: [String(childA.id), String(childB.id)],
+      changed: true,
+    } satisfies TimelinePatch)
+
+    const result = await correctionEngine([block], [0], decisionNode, settings, thresholds)
+
+    // split_block は1回しか実行されていないので、1個目のユニット（splitFrom === 自分の id）の
+    // correctionAttempts も1件だけであるべき（重複していれば2件になる）。
+    const first = result.find((b) => b.id === block.id)
+    expect(first?.correctionAttempts).toHaveLength(1)
+    expect(first?.correctionAttempts?.[0].strategy).toBe('split_block')
+
+    // 2個目のユニット（splitFrom !== 自分の id）は親の履歴を正しく1回だけ引き継ぐ。
+    const second = result.find((b) => b.id === block.id * 1000 + 2)
+    expect(second?.correctionAttempts).toHaveLength(1)
+  })
+
   it('canApply が false を返すツールは feasible 候補から除外される', async () => {
     const block = makeBlock()
     const thresholds = makeThresholds()

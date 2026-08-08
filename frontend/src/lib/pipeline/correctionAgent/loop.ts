@@ -149,7 +149,20 @@ export async function correctionEngine(
     timelineWithResults.map((block) => {
       const ownHistory = getHistory(String(block.id))
       const sourceId = (block as { splitFrom?: number }).splitFrom
-      const sourceHistory = sourceId !== undefined ? getHistory(String(sourceId)) : []
+      // splitBlock.ts は分割後の1個目のユニットに元ブロックと同じ id を割り当てたうえで、
+      // 全ユニットに splitFrom = 元ブロックの id を付ける（「このブロックは分割の産物である」
+      // という情報自体は意味があるので splitBlock.ts 側は変えない）。そのため1個目のユニットは
+      // splitFrom === 自分の id になる。ここで一致チェックをせずに sourceHistory を連結すると
+      // getHistory(sourceId) と getHistory(String(block.id)) が同じ Map エントリを指すため、
+      // 同じ履歴配列が2回連結されて水増しされる。
+      // 実データ（117分・839キュー）で確認済み: split_block の成功は実際は40回（子キュー48件）
+      // なのに correctionAttempts 上は128件に見えていた。この水増しのせいで「分割した80件が
+      // 後段で結合されて消えた」という誤った分析を2回行っている。
+      // 出力される字幕テキスト自体は attempts 配列を再生しないため無関係で、あくまで
+      // 計測・監査（scripts/auditOutput.ts 等）だけを誤らせる問題。
+      const sourceHistory = sourceId !== undefined && String(sourceId) !== String(block.id)
+        ? getHistory(String(sourceId))
+        : []
       const attempts = [...sourceHistory, ...ownHistory].map(summarizeAttempt)
       return attempts.length > 0 ? { ...block, correctionAttempts: attempts } : block
     })
