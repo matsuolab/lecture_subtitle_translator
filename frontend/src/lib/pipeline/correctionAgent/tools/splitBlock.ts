@@ -488,9 +488,10 @@ export const splitBlockTool: Tool = {
       cursor = end + gapMs / 1000
       const enText = translated[index]
       const enChars = countCpsChars(enText)
+      const nextId = index === 0 ? block.id : block.id * 1000 + index + 1
       const nextBlock: EnBlock = {
         ...block,
-        id: index === 0 ? block.id : block.id * 1000 + index + 1,
+        id: nextId,
         start,
         end,
         jaText: unit.text,
@@ -503,6 +504,24 @@ export const splitBlockTool: Tool = {
         compressCount: 0,
         expandCount: 0,
         enTextOriginal: block.enTextOriginal ?? block.enText,
+        // 上の `...block` スプレッドで contextGroupId 等を親からそのまま引き継いでいた（元々は
+        // id・start・end 等だけを上書きするつもりで、文脈グループ情報は素通りしていた）。
+        // 親が単独の singleton グループならたまたま無害だったが、親が
+        // incomplete_end_context_group 等で複数キューのグループだった場合、子が親の
+        // contextGroupId とグループサイズ(>1)をそのまま引き継いでしまう。finalSafeMerge
+        // (finalSafeMerge.ts) は sameContextGroup && contextGroupSize>1 を結合条件にしているため、
+        // 「意図して分割した子」が直後に再結合されてしまう退行に繋がる
+        // （実測: 拒否48件中3件は singleton 化という偶然だけで結合を免れていた＝設計として
+        // 防げていなかった）。分割で生まれた子キューは実データ上も独立した文脈単位なので、
+        // contextGrouping.ts の single_cue_context_group と同じ形（size=1, role='single'）で
+        // 自分自身だけの新しい singleton グループを割り当てる。
+        contextGroupId: `cg-${nextId}`,
+        contextGroupIndex: 0,
+        contextGroupSize: 1,
+        contextGroupRole: 'single',
+        contextGroupReason: 'split_block_singleton',
+        contextGroupText: unit.text,
+        contextGroupSourceIds: [nextId],
       }
       ;(nextBlock as unknown as Record<string, unknown>).splitDepth = prevSplitDepth + 1
       ;(nextBlock as unknown as Record<string, unknown>).splitFrom = block.id

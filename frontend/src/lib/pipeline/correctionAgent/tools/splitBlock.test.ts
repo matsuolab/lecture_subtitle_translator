@@ -204,6 +204,54 @@ describe('splitBlockTool.execute', () => {
     expect(callSubtitleLlmMock).not.toHaveBeenCalled()
   })
 
+  it('分割で生まれた子キューは、親の文脈グループ情報をそのまま引き継がず独立した singleton になる', async () => {
+    // 背景: execute は子ブロックを `{ ...block, id, start, end, ... }` で作るため、以前は
+    // contextGroupId / contextGroupSize / contextGroupRole / contextGroupSourceIds が
+    // 親からそのままコピーされていた。親が複数キューの文脈グループ（incomplete_end_context_group、
+    // size>1）だった場合、finalSafeMerge.ts は sameContextGroup && contextGroupSize>1 を
+    // 結合条件にしているため、子が親のグループ ID とサイズ(>1)を引き継いだままだと
+    // 「意図して分割した子」が finalSafeMerge で直後に再結合されてしまう。
+    const thresholds = makeThresholds()
+    const jaText = 'この機能はとても便利で、多くのユーザーに使われているので'
+    const block = makeBlock({
+      jaText,
+      violation: 'long_segment',
+      start: 0,
+      end: 20,
+      contextGroupId: 'cg-1-3',
+      contextGroupIndex: 1,
+      contextGroupSize: 3,
+      contextGroupRole: 'middle',
+      contextGroupReason: 'incomplete_end_context_group',
+      contextGroupText: '（グループ全体のテキスト）',
+      contextGroupSourceIds: [0, 1, 2],
+    })
+
+    llmCallWithMetaMock.mockResolvedValueOnce(llmSuccess(JSON.stringify({
+      units: [
+        { text: 'この機能はとても便利です。' },
+        { text: '多くのユーザーに使われているので' },
+      ],
+    })))
+    checkSeamOnlySplitMock.mockReturnValueOnce(seamOk)
+    callSubtitleLlmMock
+      .mockResolvedValueOnce(translationSuccess('This feature is very convenient.'))
+      .mockResolvedValueOnce(translationSuccess('It is used by many users.'))
+
+    const patch = await splitBlockTool.execute(block, makeCtx(block, thresholds), settings, thresholds)
+
+    expect(patch.changed).toBe(true)
+    expect(patch.replaceBlocks).toHaveLength(2)
+    for (const child of patch.replaceBlocks) {
+      expect(child.contextGroupSize).toBe(1)
+      expect(child.contextGroupRole).toBe('single')
+      expect(child.contextGroupId).not.toBe(block.contextGroupId)
+      expect(child.contextGroupSourceIds).toEqual([child.id])
+    }
+    // 子同士も互いに異なる singleton グループであり、同じグループ扱いにはならない
+    expect(patch.replaceBlocks[0].contextGroupId).not.toBe(patch.replaceBlocks[1].contextGroupId)
+  })
+
   it('最後のユニットが6文字未満なら、入力が不完全でも不採用（最小文字数の判定は免除しない）', async () => {
     const thresholds = makeThresholds()
     const jaText = 'この機能はとても便利で、多くのユーザーに使われているので'
