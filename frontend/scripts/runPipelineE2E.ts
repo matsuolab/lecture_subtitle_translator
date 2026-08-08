@@ -1,13 +1,29 @@
 /**
- * WhisperX 生JSON + プロジェクトJSON (session.adminSettings) を入力に、
- * `runLocalPostPipeline()` (後段パイプライン全体) をヘッドレスで実行し、
- * `scripts/timing_probe/compare_timings.py` が読めるプロジェクトJSON形式で
- * 結果を書き出す診断スクリプト。
+ * WhisperX 生JSON または プロジェクトJSON埋め込みの書き起こし + プロジェクトJSON
+ * (session.adminSettings) を入力に、`runLocalPostPipeline()` (後段パイプライン全体) を
+ * ヘッドレスで実行し、`scripts/timing_probe/compare_timings.py` が読めるプロジェクトJSON形式、
+ * および アプリで開けるプロジェクトJSON形式（`SessionExportData`）で結果を書き出す診断スクリプト。
  *
  * 使い方 (frontend/ ディレクトリから):
+ *
+ *   1) WhisperX 生JSONを別途渡す場合（3引数）:
  *   TSX_TSCONFIG_PATH="$(pwd)/tsconfig.app.json" \
  *     node --import tsx --import ./scripts/importMetaEnvShim.mjs \
  *     scripts/runPipelineE2E.ts <whisperx_raw.json> <project.json> <出力ディレクトリ>
+ *
+ *   2) プロジェクトJSONに埋め込まれた書き起こし
+ *      (session.pipelineRun.debug.transcriptSegments) を使う場合（2引数）:
+ *   TSX_TSCONFIG_PATH="$(pwd)/tsconfig.app.json" \
+ *     node --import tsx --import ./scripts/importMetaEnvShim.mjs \
+ *     scripts/runPipelineE2E.ts <project.json> <出力ディレクトリ>
+ *
+ *   引数が2個か3個かで自動判定する。保存済みプロジェクトJSONには語単位タイムスタンプ込みの
+ *   書き起こしがそのまま残っているため、WhisperX 生JSONを別途用意できない場合でも
+ *   このスクリプトを再実行できる。
+ *
+ *   OpenAI 本番プロバイダで実行したい場合は `OPENAI_API_KEY`（または `OPENAI_API_KEY_FILE` で
+ *   鍵ファイルのパス）を渡す。詳細は `./resolveApiKey.ts` を参照。未指定時は従来どおり
+ *   LM Studio（local_openai）にフォールバックする。
  *
  * 注意:
  * - パイプライン依存モジュールの一部が `@/...` エイリアスで実行時importを行うため
@@ -26,9 +42,12 @@ import { resolve } from 'node:path'
 
 import { runLocalPostPipeline, type LocalPipelineResult } from '../src/lib/pipeline/localPipeline'
 import { normalizeAdminSettings } from '../src/api/adminSettings'
+import { resolveApiKey } from './resolveApiKey'
 import type { AdminSettings } from '../src/types/adminSettings'
 import type { TranscriptSegment, WordTimestamp } from '../src/lib/pipeline/types'
 import type { SubtitleBlock } from '../src/types/subtitle'
+import type { SessionExportData } from '../src/api/persistence'
+import type { PipelineRunDebug, PipelineRunResult } from '../src/types/pipeline'
 
 interface WhisperXRawWord {
   word: string
@@ -94,6 +113,51 @@ function toTranscriptSegments(raw: WhisperXRaw): TranscriptSegment[] {
   }))
 }
 
+interface EmbeddedTranscriptSegment {
+  id?: number
+  start: number
+  end: number
+  text: string
+  words?: WhisperXRawWord[]
+}
+
+/**
+ * 保存済みプロジェクトJSONの `session.pipelineRun.debug.transcriptSegments` を取り出す。
+ *
+ * このフィールドは実行時に既に `TranscriptSegment[]` として書き出されているため、
+ * WhisperX 生JSONを別途用意できなくても、保存済みプロジェクトJSONだけで
+ * パイプラインを再実行できる（語単位タイムスタンプ込みでそのまま残っている）。
+ * 存在しない・空の場合はここでエラーにする（後段が空データで無言のまま進むのを防ぐ）。
+ */
+function extractEmbeddedTranscriptSegmentsRaw(projectJson: unknown): unknown {
+  if (!projectJson || typeof projectJson !== 'object') return undefined
+  const session = (projectJson as Record<string, unknown>).session
+  if (!session || typeof session !== 'object') return undefined
+  const pipelineRun = (session as Record<string, unknown>).pipelineRun
+  if (!pipelineRun || typeof pipelineRun !== 'object') return undefined
+  const debug = (pipelineRun as Record<string, unknown>).debug
+  if (!debug || typeof debug !== 'object') return undefined
+  return (debug as Record<string, unknown>).transcriptSegments
+}
+
+function loadEmbeddedTranscriptSegments(projectJson: unknown): TranscriptSegment[] {
+  const raw = extractEmbeddedTranscriptSegmentsRaw(projectJson)
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(
+      'project.json に session.pipelineRun.debug.transcriptSegments が見つからないか空です。'
+      + ' WhisperX 生JSONを別途指定するか（3引数形式: <whisperx_raw.json> <project.json> <out_dir>）、'
+      + ' 書き起こしを含む保存済みプロジェクトJSONを指定してください。',
+    )
+  }
+  return (raw as EmbeddedTranscriptSegment[]).map((segment, index) => ({
+    id: typeof segment.id === 'number' ? segment.id : index + 1,
+    start: segment.start,
+    end: segment.end,
+    text: segment.text,
+    words: (segment.words ?? []).filter(isFiniteWord).map(toWordTimestamp),
+  }))
+}
+
 /**
  * project.json から実行時の設定を取り出す。
  *
@@ -146,18 +210,19 @@ function localizeModelFields(settings: AdminSettings): AdminSettings {
 }
 
 /**
- * 環境変数 `OPENAI_API_KEY` が設定されていれば OpenAI 本番プロバイダで実行する。
+ * `OPENAI_API_KEY`（または `OPENAI_API_KEY_FILE` が指す鍵ファイル）が設定されていれば
+ * OpenAI 本番プロバイダで実行する（`resolveApiKey` は scripts/measureSeamOnlySplit.ts と共有）。
  *
  * 既定（未設定）はこれまでどおり LM Studio（local_openai）向けで、モデルIDも
  * ローカルで動くものへ寄せる（`localizeModelFields`）。一方、本番の実行結果と
  * 比較したい計測では同じモデルで走らせる必要があるため、その場合だけ OpenAI に切り替える。
  * プロジェクトJSONの `openaiApiKey` はエクスポート時に `[configured]` へ伏せられるので、
- * 鍵は環境変数からのみ受け取る（`src/lib/aiGateway/openaiSmoke.test.ts` と同じ方式）。
+ * 鍵は環境変数またはファイル経由でのみ受け取る（`src/lib/aiGateway/openaiSmoke.test.ts` と同じ方式）。
  */
 function buildSettings(projectJson: unknown): AdminSettings {
   const raw = extractSessionAdminSettingsRaw(projectJson)
   const normalized = normalizeAdminSettings(raw)
-  const openaiApiKey = process.env.OPENAI_API_KEY?.trim() ?? ''
+  const openaiApiKey = resolveApiKey()
   if (openaiApiKey) {
     return {
       ...normalized,
@@ -185,36 +250,134 @@ function toCompareTimingsBlock(block: SubtitleBlock): CompareTimingsBlock {
   }
 }
 
-function parseArgs(argv: readonly string[]): { whisperxPath: string; projectPath: string; outDir: string } {
-  const [whisperxPath, projectPath, outDir] = argv
-  if (!whisperxPath || !projectPath || !outDir) {
-    throw new Error('Usage: runPipelineE2E.ts <whisperx_raw.json> <project.json> <out_dir>')
+/**
+ * 引数の個数で入力形式を判定する:
+ *   - 3個: <whisperx_raw.json> <project.json> <out_dir> （従来どおり）
+ *   - 2個: <project.json> <out_dir> （書き起こしはプロジェクトJSON埋め込みから取る）
+ */
+function parseArgs(argv: readonly string[]): { whisperxPath?: string; projectPath: string; outDir: string } {
+  if (argv.length === 3) {
+    const [whisperxPath, projectPath, outDir] = argv
+    return {
+      whisperxPath: resolve(whisperxPath),
+      projectPath: resolve(projectPath),
+      outDir: resolve(outDir),
+    }
   }
-  return {
-    whisperxPath: resolve(whisperxPath),
-    projectPath: resolve(projectPath),
-    outDir: resolve(outDir),
+  if (argv.length === 2) {
+    const [projectPath, outDir] = argv
+    return {
+      projectPath: resolve(projectPath),
+      outDir: resolve(outDir),
+    }
   }
+  throw new Error(
+    'Usage: runPipelineE2E.ts <whisperx_raw.json> <project.json> <out_dir>'
+    + '\n   or: runPipelineE2E.ts <project.json> <out_dir>  (embedded transcriptSegments)',
+  )
 }
 
 function fmtSec(ms: number): string {
   return (ms / 1000).toFixed(1)
 }
 
+/**
+ * `session.adminSettings` を書き出し用にマスクする。App.tsx の sanitizeAdminSettings と
+ * 同じ流儀（値があれば '[configured]'、無ければ空文字）に合わせる。
+ * 鍵をそのまま書き出すと、このJSONファイルを共有した瞬間に漏洩してしまうため、
+ * openaiApiKey を含む秘匿フィールドは必ずマスクしてから書き出す。
+ */
+function maskAdminSettingsForExport(settings: AdminSettings): AdminSettings {
+  const masked: AdminSettings = {
+    ...settings,
+    serviceAuthToken: settings.serviceAuthToken ? '[configured]' : '',
+    hfToken: settings.hfToken ? '[configured]' : '',
+    openaiApiKey: settings.openaiApiKey ? '[configured]' : '',
+    geminiApiKey: settings.geminiApiKey ? '[configured]' : '',
+  }
+  assertNoSecretsLeaked(masked)
+  return masked
+}
+
+// マスクは「全部展開してから既知の4フィールドを潰す」方式なので、AdminSettings に
+// 新しい鍵が追加されたときに素通りしてしまう。書き出すファイルは共有され得るため、
+// 漏洩したら取り返しがつかない。名前と値の両面から機械的に検査して、疑わしければ落とす。
+function assertNoSecretsLeaked(settings: AdminSettings): void {
+  const suspiciousName = /key|token|secret|password|credential/i
+  const allowedNames = new Set(['glossaryMaxOutputTokens', 'alignTokenMode'])
+  for (const [name, value] of Object.entries(settings)) {
+    if (typeof value !== 'string' || value === '' || value === '[configured]') continue
+    if (suspiciousName.test(name) && !allowedNames.has(name)) {
+      throw new Error(`マスク漏れの可能性: ${name} が素の文字列のまま書き出されようとしています`)
+    }
+    if (/^sk-/.test(value)) {
+      throw new Error(`マスク漏れ: ${name} の値がAPIキーの形をしています`)
+    }
+  }
+}
+
+/**
+ * アプリの「プロジェクトを開く」で読み込める形式（SessionExportData）で結果を組み立てる。
+ * `debug.transcriptSegments` に今回入力した書き起こしをそのまま入れておくと、保存済み
+ * プロジェクトJSONと同じ構造になり、`scripts/measureSeamOnlySplit.ts` 等の既存診断スクリプトが
+ * このJSONもそのまま読める。
+ */
+function buildSessionExportData(
+  result: LocalPipelineResult,
+  settings: AdminSettings,
+  transcriptSegments: TranscriptSegment[],
+  runStartedAt: number,
+  runFinishedAt: number,
+): SessionExportData {
+  const debug: PipelineRunDebug = {
+    stageSnapshots: result.stageSnapshots,
+    progressEvents: [],
+    transcriptSegments,
+  }
+  const pipelineRun: PipelineRunResult = {
+    status: 'success',
+    step: 'done',
+    message: 'runPipelineE2E.ts によるヘッドレス実行が完了しました',
+    startedAt: runStartedAt,
+    finishedAt: runFinishedAt,
+    audit: result.audit,
+    debug,
+  }
+  return {
+    version: 2,
+    savedAt: new Date().toISOString(),
+    blocks: result.blocks,
+    session: {
+      adminSettings: maskAdminSettingsForExport(settings),
+      pipelineRun,
+    },
+  }
+}
+
 async function main(): Promise<void> {
   const { whisperxPath, projectPath, outDir } = parseArgs(process.argv.slice(2))
   mkdirSync(outDir, { recursive: true })
 
-  console.log(`[runPipelineE2E] whisperx: ${whisperxPath}`)
   console.log(`[runPipelineE2E] project:  ${projectPath}`)
   console.log(`[runPipelineE2E] outDir:   ${outDir}`)
 
-  const whisperxRaw = parseWhisperXRaw(readJsonUnknown(whisperxPath))
-  const transcriptSegments = toTranscriptSegments(whisperxRaw)
+  const projectJson = readJsonUnknown(projectPath)
+
+  let transcriptSegments: TranscriptSegment[]
+  if (whisperxPath) {
+    console.log(`[runPipelineE2E] whisperx: ${whisperxPath}`)
+    const whisperxRaw = parseWhisperXRaw(readJsonUnknown(whisperxPath))
+    transcriptSegments = toTranscriptSegments(whisperxRaw)
+  } else {
+    transcriptSegments = loadEmbeddedTranscriptSegments(projectJson)
+    console.log(
+      `[runPipelineE2E] whisperx: (none — using session.pipelineRun.debug.transcriptSegments `
+      + `embedded in project.json: ${transcriptSegments.length} segments)`,
+    )
+  }
   const totalWords = transcriptSegments.reduce((sum, seg) => sum + (seg.words?.length ?? 0), 0)
   console.log(`[runPipelineE2E] segments: ${transcriptSegments.length}, words: ${totalWords}`)
 
-  const projectJson = readJsonUnknown(projectPath)
   const settings = buildSettings(projectJson)
   console.log(
     `[runPipelineE2E] settings: translationProvider=${settings.translationProvider} `
@@ -288,6 +451,9 @@ async function main(): Promise<void> {
   }
   writeFileSync(resolve(outDir, 'e2e_project.json'), JSON.stringify(compareProject, null, 2), 'utf-8')
 
+  const sessionExport = buildSessionExportData(result, settings, transcriptSegments, runStartedAt, now)
+  writeFileSync(resolve(outDir, 'e2e_session.json'), JSON.stringify(sessionExport, null, 2), 'utf-8')
+
   console.log(`[runPipelineE2E] blocks: ${result.blocks.length}`)
   console.log(
     `[runPipelineE2E] audit: mustReview=${result.audit.mustReviewCount} `
@@ -302,6 +468,7 @@ async function main(): Promise<void> {
   }
   console.log(`[runPipelineE2E] wrote ${resolve(outDir, 'e2e_project.json')}`)
   console.log(`[runPipelineE2E] wrote ${resolve(outDir, 'e2e_result_raw.json')}`)
+  console.log(`[runPipelineE2E] wrote ${resolve(outDir, 'e2e_session.json')}`)
 }
 
 main().catch((error) => {

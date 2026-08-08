@@ -73,7 +73,12 @@ function normalizeJaUnit(text: string): string {
   return normalizeSpaces(text).replace(/\s/g, '')
 }
 
-function endsWithIncompleteJapanese(text: string): boolean {
+/**
+ * 日本語テキストが文の途中で終わっているか（助詞・接続・読点で終わる）。
+ * scripts/auditOutput.ts も同じ判定を使うため export している。判定を二重実装すると
+ * 監査結果と実際の挙動がずれるので、必ずこれを使うこと。
+ */
+export function endsWithIncompleteJapanese(text: string): boolean {
   const normalized = normalizeJaUnit(text)
   return /([、,]|の|と|を|に|が|は|で|て|から|ため|として|について|には|では|ので|し|か|点で)$/.test(normalized)
 }

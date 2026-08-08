@@ -28,6 +28,7 @@ import {
   type SeamCheckClassification,
   type SeamUnitCheck,
 } from '../src/lib/pipeline/seamOnlySplitCheck'
+import { resolveApiKey } from './resolveApiKey'
 import type { AdminSettings } from '../src/types/adminSettings'
 
 const SYSTEM_PROMPT = `この日本語の講義書き起こしを、2〜3個の字幕単位に分割してください。
@@ -67,19 +68,6 @@ interface MeasuredItem {
   promptTokens: number
   completionTokens: number
   errorMessage?: string
-}
-
-/**
- * API キーを取得する。`OPENAI_API_KEY` を直接渡すか、鍵だけを書いたファイルの
- * パスを `OPENAI_API_KEY_FILE` で渡す。後者を用意しているのは、コマンドラインに
- * 鍵を書くとプロセス一覧やシェル履歴に残ってしまうため。
- */
-function resolveApiKey(): string {
-  const direct = process.env.OPENAI_API_KEY?.trim() ?? ''
-  if (direct) return direct
-  const keyFile = process.env.OPENAI_API_KEY_FILE?.trim() ?? ''
-  if (!keyFile) return ''
-  return readFileSync(keyFile, 'utf-8').trim()
 }
 
 /** OpenAI 本番プロバイダの設定を作る。runPipelineE2E.ts の buildSettings と同じ方式。 */
