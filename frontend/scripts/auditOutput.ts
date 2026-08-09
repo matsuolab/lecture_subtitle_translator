@@ -17,9 +17,9 @@
  */
 import { readFileSync } from 'node:fs'
 
-import { DEFAULT_PIPELINE_THRESHOLDS, type PipelineThresholds } from '../src/lib/pipeline/blockTypes'
+import { type PipelineThresholds } from '../src/lib/pipeline/blockTypes'
 import { endsWithIncompleteJapanese } from '../src/lib/pipeline/correctionAgent/tools/splitBlock'
-import { PIPELINE_THRESHOLD_FIELDS } from '../src/lib/pipeline/pipelineThresholdFields'
+import { resolveProjectThresholds, type ResolvedProjectThresholds } from './resolveProjectThresholds'
 import type { PipelineAuditReport, PipelineReviewItem } from '../src/types/pipeline'
 
 // 語末をこの秒数でクランプしてから無音を測る。パイプライン自身（wordToChars）が同じ
@@ -62,12 +62,6 @@ interface SnapshotItem {
 }
 type Span = [number, number]
 
-type Source = 'settingsSnapshot' | 'adminSettings' | 'コード既定値'
-interface ResolvedThresholds {
-  values: PipelineThresholds
-  sources: Map<keyof PipelineThresholds, Source>
-}
-
 interface Finding<T> {
   count: number
   examples: T[]
@@ -82,7 +76,7 @@ interface ReviewItemExample {
 interface AuditResult {
   label: string
   cues: number
-  thresholds: ResolvedThresholds
+  thresholds: ResolvedProjectThresholds
   cpsOver: Finding<SnapshotItem>
   lineOver: Finding<SnapshotItem>
   durationOver: Finding<Block>
@@ -110,46 +104,6 @@ function mmss(sec: number): string {
   const m = Math.floor(sec / 60)
   const s = Math.floor(sec % 60)
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-}
-
-function readNumber(source: Record<string, unknown>, key: string): number | undefined {
-  const value = source[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-/**
- * 閾値を解決し、各項目がどこから来たかを記録する。
- * フィールド名 → 設定キーの対応表は src/lib/pipeline/pipelineThresholdFields.ts
- * （本番の buildPipelineThresholdsFromSettings と共有）を単一の情報源として使う。
- * ただし出所の追跡（settingsSnapshot / adminSettings / コード既定値のどれで補ったか）は
- * 本番コードには無い、本スクリプト固有の機能なのでここに残す。
- */
-function resolveThresholds(project: Record<string, unknown>): ResolvedThresholds {
-  const session = (project.session ?? {}) as Record<string, unknown>
-  const admin = (session.adminSettings ?? {}) as Record<string, unknown>
-  const workLog = (session.workLog ?? {}) as Record<string, unknown>
-  const header = (workLog.header ?? {}) as Record<string, unknown>
-  const snapshot = (header.settingsSnapshot ?? {}) as Record<string, unknown>
-
-  const sources = new Map<keyof PipelineThresholds, Source>()
-  const values = {} as Record<keyof PipelineThresholds, number>
-  for (const { field, settingsKey } of PIPELINE_THRESHOLD_FIELDS) {
-    const fromSnapshot = readNumber(snapshot, settingsKey)
-    if (fromSnapshot !== undefined) {
-      sources.set(field, 'settingsSnapshot')
-      values[field] = fromSnapshot
-      continue
-    }
-    const fromAdmin = readNumber(admin, settingsKey)
-    if (fromAdmin !== undefined) {
-      sources.set(field, 'adminSettings')
-      values[field] = fromAdmin
-      continue
-    }
-    sources.set(field, 'コード既定値')
-    values[field] = DEFAULT_PIPELINE_THRESHOLDS[field] as number
-  }
-  return { values: values as PipelineThresholds, sources }
 }
 
 /** パイプラインと同じクランプを掛けた文字単位ストリームの時刻列を作る。 */
@@ -248,7 +202,7 @@ function stageItems(project: Record<string, unknown>, stage: string): SnapshotIt
 
 function audit(path: string, label: string): AuditResult {
   const project = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>
-  const thresholds = resolveThresholds(project)
+  const thresholds = resolveProjectThresholds(project)
   const t = thresholds.values
 
   const blocks = [...((project.blocks ?? []) as Block[])].sort((a, b) => a.startTime - b.startTime)

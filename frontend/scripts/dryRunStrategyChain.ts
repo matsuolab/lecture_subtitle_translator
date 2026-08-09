@@ -25,7 +25,8 @@ import type {
   CorrectionStrategy,
 } from '../src/lib/pipeline/correctionAgent/types'
 import { classifyViolation } from '../src/lib/pipeline/metrics'
-import { DEFAULT_PIPELINE_THRESHOLDS, type EnBlock, type PipelineThresholds } from '../src/lib/pipeline/blockTypes'
+import { type EnBlock, type PipelineThresholds } from '../src/lib/pipeline/blockTypes'
+import { resolveProjectThresholds } from './resolveProjectThresholds'
 import { getDefaultAdminSettings } from '../src/api/adminSettings'
 
 interface SnapshotItem {
@@ -40,34 +41,6 @@ interface SnapshotItem {
   enChars?: number
   cps?: number
   maxLineLen?: number
-}
-
-function readNumber(source: Record<string, unknown>, key: string): number | undefined {
-  const value = source[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function resolveThresholds(project: Record<string, unknown>): PipelineThresholds {
-  const session = (project.session ?? {}) as Record<string, unknown>
-  const admin = (session.adminSettings ?? {}) as Record<string, unknown>
-  const workLog = (session.workLog ?? {}) as Record<string, unknown>
-  const header = (workLog.header ?? {}) as Record<string, unknown>
-  const snapshot = (header.settingsSnapshot ?? {}) as Record<string, unknown>
-  const cfg: Record<string, unknown> = { ...admin, ...snapshot }
-  const d = DEFAULT_PIPELINE_THRESHOLDS
-  return {
-    shortDurationSec: readNumber(cfg, 'pipelineShortDurationSec') ?? d.shortDurationSec,
-    longDurationSec: readNumber(cfg, 'pipelineLongDurationSec') ?? d.longDurationSec,
-    mergedLongDurationSec: readNumber(cfg, 'pipelineMergedLongDurationSec') ?? d.mergedLongDurationSec,
-    overCompressedRatio: readNumber(cfg, 'pipelineOverCompressedRatio') ?? d.overCompressedRatio,
-    overCompressedJaChars: readNumber(cfg, 'pipelineOverCompressedJaChars') ?? d.overCompressedJaChars,
-    verboseEnRatio: readNumber(cfg, 'pipelineVerboseEnRatio') ?? d.verboseEnRatio,
-    verboseCps: readNumber(cfg, 'enMaxCps') ?? d.verboseCps,
-    maxLineLen: readNumber(cfg, 'enMaxCharsPerLine') ?? d.maxLineLen,
-    slowCps: readNumber(cfg, 'pipelineSlowCps') ?? d.slowCps,
-    maxExpandPerBlock: readNumber(cfg, 'pipelineMaxExpandPerBlock') ?? d.maxExpandPerBlock,
-    maxCompressPerBlock: readNumber(cfg, 'pipelineMaxCompressPerBlock') ?? d.maxCompressPerBlock,
-  }
 }
 
 function toBlock(item: SnapshotItem, thresholds: PipelineThresholds): EnBlock {
@@ -185,7 +158,7 @@ async function main(): Promise<void> {
   const path = process.argv[2]
   if (!path) throw new Error('Usage: dryRunStrategyChain.ts <project.json>')
   const project = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>
-  const pipelineThresholds = resolveThresholds(project)
+  const pipelineThresholds = resolveProjectThresholds(project).values
   const settings = getDefaultAdminSettings()
   // phase2.ts と同じ組み立て方。AgentThresholds を混ぜないと maxSplitDepth 等が
   // undefined になり、split_block / borrow_gap が常に不可能と判定されてしまう。

@@ -13,8 +13,7 @@
 import { readFileSync } from 'node:fs'
 
 import { classifyViolation, computeMetrics } from '../src/lib/pipeline/metrics'
-import { DEFAULT_PIPELINE_THRESHOLDS, type PipelineThresholds } from '../src/lib/pipeline/blockTypes'
-import { PIPELINE_THRESHOLD_FIELDS } from '../src/lib/pipeline/pipelineThresholdFields'
+import { resolveProjectThresholds } from './resolveProjectThresholds'
 
 interface SnapshotItem {
   id: number
@@ -30,36 +29,16 @@ interface SnapshotItem {
   violation?: string
 }
 
-function readNumber(source: Record<string, unknown>, key: string): number | undefined {
-  const value = source[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
 /**
  * 実行時の設定から閾値を組む。未設定の項目はコードの既定値で補う。
  * フィールド名 → 設定キーの対応表は src/lib/pipeline/pipelineThresholdFields.ts
  * （本番の buildPipelineThresholdsFromSettings と共有）を単一の情報源として使う。
  */
-function resolveThresholds(project: Record<string, unknown>): PipelineThresholds {
-  const session = (project.session ?? {}) as Record<string, unknown>
-  const admin = (session.adminSettings ?? {}) as Record<string, unknown>
-  const workLog = (session.workLog ?? {}) as Record<string, unknown>
-  const header = (workLog.header ?? {}) as Record<string, unknown>
-  const snapshot = (header.settingsSnapshot ?? {}) as Record<string, unknown>
-  const cfg: Record<string, unknown> = { ...admin, ...snapshot }
-  const d = DEFAULT_PIPELINE_THRESHOLDS
-  const values = {} as Record<keyof PipelineThresholds, number>
-  for (const { field, settingsKey } of PIPELINE_THRESHOLD_FIELDS) {
-    values[field] = readNumber(cfg, settingsKey) ?? (d[field] as number)
-  }
-  return values as PipelineThresholds
-}
-
 function main(): void {
   const path = process.argv[2]
   if (!path) throw new Error('Usage: reclassifyViolations.ts <project.json>')
   const project = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>
-  const thresholds = resolveThresholds(project)
+  const thresholds = resolveProjectThresholds(project).values
 
   const session = (project.session ?? {}) as Record<string, unknown>
   const run = (session.pipelineRun ?? {}) as Record<string, unknown>
