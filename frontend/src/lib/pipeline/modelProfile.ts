@@ -252,6 +252,23 @@ function resolveContextLengthCeilingTokens(runtimeContextLengthTokens: number | 
   return CONSERVATIVE_CONTEXT_LENGTH_CEILING_TOKENS
 }
 
+/**
+ * openai / gemini 経路向けに max_tokens / max_completion_tokens を body から取り除く。
+ * 新しいオブジェクトを返し、渡された body を破壊的に変更しない。
+ *
+ * なぜ削除するか（実測に基づく方針。adaptChatCompletionRequest 側のコメントも参照）:
+ * 同一入力・同一プロンプトで max_tokens だけを変えて実測したところ、バッチ件数から見積もった
+ * 376 のときだけ finishReason=length で本文 0 文字のまま切断され、1200 / 4096 / 送らない の
+ * いずれでも消費量は 450 前後で安定して stop まで完走した。上限は消費量に影響せず、成功するか
+ * どうかだけを左右していた。上限を「予測」しようとすること自体が破綻の原因だったため、
+ * openai / gemini ではフィールドごと送らず、モデル自身に止まらせる。
+ */
+export function stripTokenLimitFields(body: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(body).filter(([key]) => key !== 'max_tokens' && key !== 'max_completion_tokens'),
+  )
+}
+
 function applySampling(body: Record<string, unknown>, sampling: SamplingParams | undefined): void {
   if (!sampling) return
   if (typeof body.temperature !== 'number' && typeof sampling.temperature === 'number') body.temperature = sampling.temperature
@@ -338,17 +355,43 @@ export function adaptChatCompletionRequest(args: {
   runtimeContextLengthTokens?: number
 }): AdaptedChatRequest {
   const profile = resolveModelProfile(args.settings, args.model)
+  const provider = resolveAiProvider(args.settings)
+
+  // プロファイルが解決できない（プリセット未一致・カスタム未設定）場合でも、トークン上限の
+  // 扱いは provider だけで決まる。本番の openai/gemini 呼出はほとんどこの分岐を通る
+  // （detectIncompleteEnds.ts / translateEn.ts 等が渡すモデルは通常 gemma/qwen プリセットに
+  // 一致しないため）。ここで何もしないと、body に既に入っている max_tokens/max_completion_tokens
+  // （chatText.ts の buildChatTextBody がクランプ前に設定済み）がそのまま素通りしてしまう。
   if (!profile) {
-    return { body: args.body, messages: args.messages, profile, reasoningMode: args.reasoningMode }
+    return {
+      body: provider === 'local_openai' ? args.body : stripTokenLimitFields(args.body),
+      messages: args.messages,
+      profile,
+      reasoningMode: args.reasoningMode,
+    }
   }
 
-  const provider = resolveAiProvider(args.settings)
   const body = { ...args.body }
   let messages = profile.supportsSystemRole ? args.messages : foldSystemMessages(args.messages)
   messages = applyReasoningEnable(body, messages, profile, args.reasoningMode)
   applySampling(body, args.reasoningMode === 'thinking' ? profile.sampling.thinking : profile.sampling.nonThinking)
   let maxTokensClamp: MaxTokensClampResult | undefined
-  if (provider !== 'openai') {
+
+  /**
+   * トークン上限の扱いは provider で分ける（実測に基づく方針）:
+   *
+   * - local_openai: 解答全体が小さいコンテキスト（LM Studio JIT ロードの既定 8192）を推論と
+   *   本文で共有するため、上限が無いと推論だけでコンテキストを食い潰しかねない。上限は被害と
+   *   実行時間を抑える装置として必要なため、既存のクランプ処理をそのまま維持する。
+   * - openai / gemini: 同一入力・同一プロンプトで max_tokens だけを変えた実測で、バッチ件数から
+   *   見積もった 376 のときだけ finishReason=length で本文 0 文字のまま切断され、1200 / 4096 /
+   *   送らない のいずれでも消費量は 450 前後で安定して stop まで完走した（詳細は
+   *   stripTokenLimitFields の JSDoc 参照）。上限を決めるには「どれだけ推論するか」を事前に
+   *   知る必要があり、それ自体が破綻の原因だった。送らなければ知る必要がなくなる。
+   *   加えて、truncated 時の半割リトライはバッチ件数から max_tokens を再計算するため、割るほど
+   *   予算も一緒に減ってしまい逆効果だった（212 件が一度も救済されなかった原因）。
+   */
+  if (provider === 'local_openai') {
     const contextLengthCeilingTokens = resolveContextLengthCeilingTokens(args.runtimeContextLengthTokens)
     if (body.max_tokens !== undefined) {
       const clamp = clampMaxTokensDetailed(body.max_tokens, profile, messages, contextLengthCeilingTokens)
@@ -360,9 +403,10 @@ export function adaptChatCompletionRequest(args: {
       body.max_completion_tokens = clamp.value
       if (clamp.wasClamped) maxTokensClamp = clamp
     }
+    return { body, messages, profile, reasoningMode: args.reasoningMode, maxTokensClamp }
   }
 
-  return { body, messages, profile, reasoningMode: args.reasoningMode, maxTokensClamp }
+  return { body: stripTokenLimitFields(body), messages, profile, reasoningMode: args.reasoningMode, maxTokensClamp }
 }
 
 export function stripDelimitedReasoning(content: string, openTag?: string, closeTag?: string): string {
@@ -422,6 +466,14 @@ export function normalizeChatCompletionContent(content: string, profile?: ModelP
  * reasoning コストが出力サイズに比例せずほぼ一定である以上、正しいのは乗算ではなく
  * **固定の reasoning 予算を加算する**方式である。実測 293〜565 に安全率を見て 2048 とする。
  * 同じ設計ミスを繰り返さないよう、乗算方式に戻さないこと。
+ *
+ * 【2026-08 追記】adaptChatCompletionRequest が openai / gemini 向けには max_tokens /
+ * max_completion_tokens を送らなくなったため（stripTokenLimitFields 参照）、この定数が実際に
+ * API へ渡る値に反映されるのは local_openai 経路のみになった。openai / gemini でも
+ * withReasoningHeadroom は変わらず呼ばれ続けるが、その戻り値は adaptChatCompletionRequest の
+ * 手前で破棄される（呼出元 detectIncompleteEnds.ts / translateEn.ts /
+ * documentGlossaryGenerator.ts のコードは意図的に変更していない）。定数自体は local_openai の
+ * クランプ計算にまだ使うため削除しないこと。
  */
 export const REASONING_BUDGET_TOKENS = 2048
 
@@ -429,6 +481,11 @@ export const REASONING_BUDGET_TOKENS = 2048
  * withReasoningHeadroom の戻り値は呼出元でそのまま max_tokens に入る。
  * 0 はリクエストを破壊する最も危険な値であり「安全側」ではないため、
  * 不正入力時・クランプ後のどちらでもこの値を下回らせない。
+ *
+ * 【2026-08 追記】REASONING_BUDGET_TOKENS の追記コメントと同様、この下限が実際に API へ渡る
+ * 値として意味を持つのは local_openai 経路のみ。openai / gemini では
+ * adaptChatCompletionRequest がトークン上限フィールドごと削除するため、この値そのものは
+ * リクエストに現れない。
  */
 export const MIN_REASONING_HEADROOM_TOKENS = 256
 
@@ -456,6 +513,14 @@ function isReasoningCapableProfile(profile?: ModelProfile): boolean {
  *   戻り値はそのまま呼出元で max_tokens に渡されるため、0 はリクエストを破壊する最も
  *   危険な値であり「安全側」ではない。クランプ後の値も同様にこの下限を下回らせない
  *   （profile.maxOutputTokens が極端に小さい設定でも 0 やマイナスにならないようにする）。
+ *
+ * 【2026-08 追記】この関数自体は provider に関わらず呼ばれ続けるが、戻り値が実際に API へ渡る
+ * max_tokens / max_completion_tokens に反映されるのは local_openai 経路のみになった。
+ * openai / gemini 経路では adaptChatCompletionRequest がトークン上限フィールドごと body から
+ * 削除するため（stripTokenLimitFields 参照）、ここで計算した値は破棄される。呼出元
+ * （detectIncompleteEnds.ts 等）のコードは意図的に変更していないため、この関数を呼ぶこと自体は
+ * 無駄ではない（local_openai では今まで通り必要）が、openai / gemini では見積り値としての
+ * 意味を失っている。
  */
 export function withReasoningHeadroom(desiredOutputTokens: number, profile?: ModelProfile): number {
   if (typeof desiredOutputTokens !== 'number' || !Number.isFinite(desiredOutputTokens) || desiredOutputTokens <= 0) {

@@ -75,6 +75,9 @@ describe('AI Gateway chatText', () => {
       'Content-Type': 'application/json',
       Authorization: 'Bearer sk-test',
     })
+    // max_completion_tokens は送らない: openai / gemini では、上限を送っても消費量は変わらず
+    // 成功可否だけが左右される実測結果を受けて、adaptChatCompletionRequest がトークン上限
+    // フィールドを丸ごと取り除くようになった（modelProfile.ts の stripTokenLimitFields 参照）。
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
       model: 'gpt-4.1-mini',
       messages: [
@@ -82,7 +85,6 @@ describe('AI Gateway chatText', () => {
         { role: 'user', content: 'Say ok.' },
       ],
       temperature: 0.2,
-      max_completion_tokens: 2048,
       response_format: { type: 'json_object' },
     })
   })

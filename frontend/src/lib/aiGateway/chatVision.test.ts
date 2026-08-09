@@ -69,7 +69,8 @@ describe('AI Gateway chatVision', () => {
           ],
         },
       ],
-      max_completion_tokens: 4096,
+      // provider が openai のため、maxTokens: 4096 を渡してもトークン上限は送られない
+      // （chatVision.ts の provider 分岐 / modelProfile.ts の stripTokenLimitFields 参照）。
       response_format: { type: 'json_object' },
     })
   })
@@ -108,6 +109,9 @@ describe('AI Gateway chatVision', () => {
         schema: { type: 'object', properties: { terms: { type: 'array' } }, required: ['terms'], additionalProperties: false },
       },
     })
+    // local_openai は据え置き。小さいコンテキストを推論と本文で共有するため上限が必要で、
+    // openai / gemini と違ってトークン上限を送り続ける。
+    expect(body.max_tokens).toBe(512)
   })
 
   it('reports errorCode=truncated on finish_reason=length', async () => {

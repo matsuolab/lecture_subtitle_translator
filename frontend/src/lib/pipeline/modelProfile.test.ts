@@ -83,14 +83,82 @@ describe('adaptChatCompletionRequest', () => {
     expect(adapted.body.max_tokens).toBeLessThanOrEqual(32768)
   })
 
-  it('does not clamp token limits for the OpenAI API provider', () => {
+  it('strips token limit fields for the OpenAI API provider instead of clamping them', () => {
+    // 実測: 同一入力でも max_tokens を送るとバッチ見積り値（例: 376）だけが finishReason=length
+    // で本文 0 文字のまま切断され、送らなければ 450 前後で安定して完走した。上限は消費量を
+    // 左右せず成功可否だけを左右していたため、openai / gemini ではフィールドごと削除する
+    // （モデル未一致で profile が undefined でも同じ扱いになることを確認する）。
     const adapted = adaptChatCompletionRequest({
-      body: { model: 'gpt-5.4-mini', max_tokens: 999999 },
+      body: { model: 'gpt-5.4-mini', max_tokens: 999999, max_completion_tokens: 999999 },
       messages: [{ role: 'user', content: 'hello' }],
       settings: settings({ translationProvider: 'openai' }),
       model: 'gpt-5.4-mini',
       reasoningMode: 'nonThinking',
     })
+    expect('max_tokens' in adapted.body).toBe(false)
+    expect('max_completion_tokens' in adapted.body).toBe(false)
+  })
+
+  it('strips token limit fields for the Gemini API provider instead of clamping them', () => {
+    // 旧実装は provider !== 'openai' でクランプしていたため gemini はクランプ対象だった。
+    // 新方針では openai と同様に「送らない」扱いに変わる。
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'gemini-3-flash-preview', max_tokens: 999999 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'gemini' }),
+      model: 'gemini-3-flash-preview',
+      reasoningMode: 'nonThinking',
+    })
+    expect('max_tokens' in adapted.body).toBe(false)
+    expect('max_completion_tokens' in adapted.body).toBe(false)
+  })
+
+  it('keeps clamping token limits for the local_openai provider even when a model profile matches (e.g. a gemma/qwen-named local model)', () => {
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'gemma-4-e4b-it', max_tokens: 999999 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'gemma-4-e4b-it',
+      reasoningMode: 'nonThinking',
+    })
+    expect(adapted.body.max_tokens).toBeLessThan(999999)
+    expect(adapted.body.max_tokens as number).toBeGreaterThanOrEqual(256)
+  })
+
+  it('strips token limit fields for openai/gemini even when no model profile matches at all (the common production case: a real gpt-*/gemini-* model with no gemma/qwen profile configured)', () => {
+    // resolveModelProfile が undefined を返す（!profile の早期 return）経路でも、provider による
+    // トークン上限の扱いが正しく適用されることを確認する。detectIncompleteEnds.ts /
+    // translateEn.ts が渡す実際の本番モデル（例: gpt-5.6-luna）はここを通る。
+    const openaiAdapted = adaptChatCompletionRequest({
+      body: { model: 'gpt-5.6-luna', max_completion_tokens: 376 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'openai' }),
+      model: 'gpt-5.6-luna',
+      reasoningMode: 'nonThinking',
+    })
+    expect(openaiAdapted.profile).toBeUndefined()
+    expect('max_completion_tokens' in openaiAdapted.body).toBe(false)
+
+    const geminiAdapted = adaptChatCompletionRequest({
+      body: { model: 'gemini-3-flash-preview', max_tokens: 376 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'gemini' }),
+      model: 'gemini-3-flash-preview',
+      reasoningMode: 'nonThinking',
+    })
+    expect(geminiAdapted.profile).toBeUndefined()
+    expect('max_tokens' in geminiAdapted.body).toBe(false)
+  })
+
+  it('leaves the body untouched (no clamp, no strip) for local_openai when no model profile matches', () => {
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'mistral-small', max_tokens: 999999 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'mistral-small',
+      reasoningMode: 'nonThinking',
+    })
+    expect(adapted.profile).toBeUndefined()
     expect(adapted.body.max_tokens).toBe(999999)
   })
 

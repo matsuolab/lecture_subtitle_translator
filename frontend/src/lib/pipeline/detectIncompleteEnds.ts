@@ -47,6 +47,19 @@ import { hasSentenceEnd, loadLanguageProfileConfig, type LanguageRoleProfile } f
  *   同様の理由で、thinking 系モデル解決時はバッチサイズ自体も実行時にクランプする
  *   （設定値の incompleteEndDetectionBatchSize 自体は書き換えない）。
  *
+ *   【2026-08 追記】上記の見積り（withReasoningHeadroom の戻り値）が実際に API へ渡る
+ *   max_tokens / max_completion_tokens として使われるのは local_openai 経路のみになった。
+ *   openai / gemini 経路では、この見積りが原因で 796 ブロック中 226 件（うち 212 件が
+ *   truncated）の判定失敗を引き起こしていたことが実測で判明した。バッチ件数から見積もった
+ *   376 のときだけ finishReason=length で本文 0 文字のまま切断され、1200 / 4096 / 送らない の
+ *   いずれでも消費量は 450 前後で安定して完走した。上限は消費量を左右せず成功可否だけを
+ *   左右しており、しかも truncated 時の半割リトライはバッチ件数から予算を再計算するため、
+ *   割るほど予算も一緒に減って逆効果だった（212 件が一度も救済されなかった原因）。この事実を
+ *   受け、adaptChatCompletionRequest（modelProfile.ts）が openai / gemini 向けには
+ *   max_tokens / max_completion_tokens を丸ごと送らなくなった（stripTokenLimitFields 参照）。
+ *   このファイルの見積りロジック自体は変更していない（local_openai 向けの見積りとして
+ *   引き続き必要なため）。
+ *
  * 入力配列と出力 flags の長さ・順序は完全一致する。
  */
 

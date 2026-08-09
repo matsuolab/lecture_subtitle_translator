@@ -1,4 +1,5 @@
-import { normalizeChatCompletionContent, resolveModelProfile } from '@/lib/pipeline/modelProfile'
+import { normalizeChatCompletionContent, resolveModelProfile, stripTokenLimitFields } from '@/lib/pipeline/modelProfile'
+import { resolveAiProvider } from '@/lib/pipeline/aiProvider'
 import { beginLlmCall } from './llmActivity'
 import { acquireLlmSlot, reportLlmCallSucceeded, reportLlmRateLimitEncountered } from './llmConcurrency'
 import type { AiGatewayContext } from './connection'
@@ -72,6 +73,16 @@ export async function chatVision(
     body = stripOpenAiSamplingParams(body)
   }
   body = applyChatRequestDialect(body, apiCompatibilityProfile, { maxOutputTokens: options.maxTokens })
+  // chatText.ts と違い、この経路は adaptChatCompletionRequest を通らない（プロファイルによる
+  // サンプリング調整やコンテキスト長クランプの対象外）。そのため、トークン上限を送るかどうかの
+  // provider 分岐だけをここで同じ規則で適用する。これが無いと、用語集の画像ページ抽出
+  // （documentGlossaryGenerator.ts が hasImageMessageContent で chatVision へ分岐する経路）で、
+  // detectIncompleteEnds で実測した truncated（推論が出力予算を使い切り本文0文字で切断）と
+  // 同じ破綻が openai / gemini でも再発しうる。
+  // local_openai は据え置き: 小さいコンテキストを推論と本文で共有するため上限が必要。
+  if (resolveAiProvider(context.settings) !== 'local_openai') {
+    body = stripTokenLimitFields(body)
+  }
   // jsonSchema が指定されている場合は responseFormat: 'omit' より優先する（chatText.ts の同じ
   // 分岐を参照。'omit' と jsonSchema が同時指定されてもスキーマが黙って消えないようにするため）。
   if (options.jsonSchema || options.responseFormat !== 'omit') {
