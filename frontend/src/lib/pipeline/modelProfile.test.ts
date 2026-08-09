@@ -358,6 +358,52 @@ describe('withReasoningHeadroom', () => {
     expect(withReasoningHeadroom(Number.NaN, undefined)).toBe(MIN_REASONING_HEADROOM_TOKENS)
     expect(Number.isNaN(withReasoningHeadroom(Number.NaN, MODEL_PROFILE_PRESETS.gemma))).toBe(false)
   })
+
+  describe('reasoningBudgetOverrideTokens (implementation 3: AdminSettings.llmReasoningBudgetTokens)', () => {
+    it('falls back to the previous profile-based behavior when the override is 0 (default = auto)', () => {
+      // profile 未解決（isReasoningCapableProfile が false）のとき、override=0 なら従来どおり素通し。
+      expect(withReasoningHeadroom(1000, undefined, 0)).toBe(1000)
+      // 思考しうる profile のとき、override=0 なら従来どおり REASONING_BUDGET_TOKENS を加算。
+      const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+      expect(withReasoningHeadroom(1000, profile, 0)).toBe(1000 + REASONING_BUDGET_TOKENS)
+    })
+
+    it('always adds the override amount regardless of profile reasoning capability when override > 0', () => {
+      // profile が undefined（=推定不能なローカルモデル）でも override が指定されていれば加算する。
+      // これが実装3の主目的: モデル名が gemma/qwen に一致しないローカルモデルで割り増しが
+      // 一切効かず出力上限で切れる、という破綻の穴を利用者が埋められるようにする。
+      expect(withReasoningHeadroom(1000, undefined, 5000)).toBe(1000 + 5000)
+
+      const nonThinkingProfile = {
+        ...MODEL_PROFILE_PRESETS.gemma,
+        maxOutputTokens: 1_000_000,
+        reasoning: { ...MODEL_PROFILE_PRESETS.gemma.reasoning, capability: 'none' as const },
+      }
+      expect(withReasoningHeadroom(1000, nonThinkingProfile, 5000)).toBe(1000 + 5000)
+    })
+
+    it('overrides REASONING_BUDGET_TOKENS entirely (does not add both) when override > 0 for a reasoning-capable profile', () => {
+      const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+      const result = withReasoningHeadroom(1000, profile, 3000)
+      expect(result).toBe(1000 + 3000)
+      expect(result).not.toBe(1000 + REASONING_BUDGET_TOKENS)
+    })
+
+    it('still clamps to profile.maxOutputTokens and never drops below MIN_REASONING_HEADROOM_TOKENS with an override', () => {
+      const smallCapProfile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 2000 }
+      expect(withReasoningHeadroom(1000, smallCapProfile, 5000)).toBe(2000)
+
+      const tinyCapProfile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 10 }
+      expect(withReasoningHeadroom(1, tinyCapProfile, 5000)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+    })
+
+    it('ignores a negative or non-finite override and falls back to profile-based behavior', () => {
+      expect(withReasoningHeadroom(1000, undefined, -1)).toBe(1000)
+      expect(withReasoningHeadroom(1000, undefined, Number.NaN)).toBe(1000)
+      const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+      expect(withReasoningHeadroom(1000, profile, -1)).toBe(1000 + REASONING_BUDGET_TOKENS)
+    })
+  })
 })
 
 describe('stripDelimitedReasoning', () => {

@@ -12,6 +12,7 @@ import {
   resolveChatResponseFormatForDialect,
 } from './apiCompatibilityProfile'
 import { classifyHttpErrorCode, formatAiGatewayHttpError } from './errors'
+import { formatTruncatedMessage } from './truncatedMessage'
 import { getCurrentPipelineAbortSignal } from '@/lib/pipeline/pipelineAbort'
 import { isTimeoutError } from './timeoutError'
 import { resolveLmStudioLoadedContextLength } from './lmStudioContextLength'
@@ -394,7 +395,18 @@ export async function chatText(
   }
   if (finishReason === 'length') {
     pushLlmError({ nodeName: options.nodeName, model: options.model, errorCode: 'truncated', detail: `content_preview=${content}` })
-    return { content, finishReason, errorMessage: `truncated_at_length_limit (content_preview=${content.slice(0, 100)})`, errorCode: 'truncated', promptTokens, completionTokens, reasoningTokens, cachedInputTokens, durationMs, maxTokensClampedFromRequested }
+    // 実際に送った上限・消費内訳・本文長を含めたメッセージを組み立てる（truncatedMessage.ts 参照）。
+    // 上限がいくつだったのか・何に消費されたのかが分からないと原因究明ができなかった経緯があるため。
+    // 上限のパラメータ名は方言で決まり、ユーザー定義プロファイルでは任意名になりうる。
+    // 決め打ちにすると「上限を送っているのに送っていないと報告する」ため、解決済みの値を渡す。
+    const errorMessage = formatTruncatedMessage({
+      body,
+      completionTokens,
+      reasoningTokens,
+      contentLength: content.length,
+      activeTokenLimitParam: resolveApiCompatibilityProfile(context.settings).requestDialect.chat.tokenLimitParam,
+    })
+    return { content, finishReason, errorMessage, errorCode: 'truncated', promptTokens, completionTokens, reasoningTokens, cachedInputTokens, durationMs, maxTokensClampedFromRequested }
   }
   if (!content.trim()) {
     pushLlmError({ nodeName: options.nodeName, model: options.model, errorCode: 'empty_response', detail: `payload_keys=${Object.keys(payload).join(',')}` })

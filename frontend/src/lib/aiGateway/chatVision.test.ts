@@ -118,6 +118,7 @@ describe('AI Gateway chatVision', () => {
     const gateway = createAiGateway(settings({ translationProvider: 'openai' }), {
       fetch: async () => new Response(JSON.stringify({
         choices: [{ finish_reason: 'length', message: { content: 'partial', refusal: null } }],
+        usage: { prompt_tokens: 5, completion_tokens: 16, completion_tokens_details: { reasoning_tokens: 9 } },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
     })
 
@@ -129,7 +130,15 @@ describe('AI Gateway chatVision', () => {
     })
 
     expect(result.errorCode).toBe('truncated')
-    expect(result.errorMessage?.startsWith('truncated_at_length_limit (content_preview=')).toBe(true)
+    // provider が openai のため maxTokens: 16 を渡しても上限は送らない（chatVision.ts の provider
+    // 分岐 / modelProfile.ts の stripTokenLimitFields 参照）。分岐判定には使わない表示用メッセージ
+    // だが、原因究明に必要な情報（上限の有無・消費内訳・本文長）を含んでいることを確認する。
+    expect(result.errorMessage?.startsWith('truncated_at_length_limit:')).toBe(true)
+    expect(result.errorMessage).toContain('上限は送っていない')
+    expect(result.errorMessage).toContain('消費 completion=16（うち推論9）')
+    expect(result.errorMessage).toContain(`本文${'partial'.length}文字`)
+    expect(result.completionTokens).toBe(16)
+    expect(result.reasoningTokens).toBe(9)
   })
 
   it('reports errorCode=fetch_failed when the network request throws', async () => {
