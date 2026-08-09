@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 
 import { classifyViolation, computeMetrics } from '../src/lib/pipeline/metrics'
 import { DEFAULT_PIPELINE_THRESHOLDS, type PipelineThresholds } from '../src/lib/pipeline/blockTypes'
+import { PIPELINE_THRESHOLD_FIELDS } from '../src/lib/pipeline/pipelineThresholdFields'
 
 interface SnapshotItem {
   id: number
@@ -34,7 +35,11 @@ function readNumber(source: Record<string, unknown>, key: string): number | unde
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
-/** 実行時の設定から閾値を組む。未設定の項目はコードの既定値で補う。 */
+/**
+ * 実行時の設定から閾値を組む。未設定の項目はコードの既定値で補う。
+ * フィールド名 → 設定キーの対応表は src/lib/pipeline/pipelineThresholdFields.ts
+ * （本番の buildPipelineThresholdsFromSettings と共有）を単一の情報源として使う。
+ */
 function resolveThresholds(project: Record<string, unknown>): PipelineThresholds {
   const session = (project.session ?? {}) as Record<string, unknown>
   const admin = (session.adminSettings ?? {}) as Record<string, unknown>
@@ -43,19 +48,11 @@ function resolveThresholds(project: Record<string, unknown>): PipelineThresholds
   const snapshot = (header.settingsSnapshot ?? {}) as Record<string, unknown>
   const cfg: Record<string, unknown> = { ...admin, ...snapshot }
   const d = DEFAULT_PIPELINE_THRESHOLDS
-  return {
-    shortDurationSec: readNumber(cfg, 'pipelineShortDurationSec') ?? d.shortDurationSec,
-    longDurationSec: readNumber(cfg, 'pipelineLongDurationSec') ?? d.longDurationSec,
-    mergedLongDurationSec: readNumber(cfg, 'pipelineMergedLongDurationSec') ?? d.mergedLongDurationSec,
-    overCompressedRatio: readNumber(cfg, 'pipelineOverCompressedRatio') ?? d.overCompressedRatio,
-    overCompressedJaChars: readNumber(cfg, 'pipelineOverCompressedJaChars') ?? d.overCompressedJaChars,
-    verboseEnRatio: readNumber(cfg, 'pipelineVerboseEnRatio') ?? d.verboseEnRatio,
-    verboseCps: readNumber(cfg, 'enMaxCps') ?? d.verboseCps,
-    maxLineLen: readNumber(cfg, 'enMaxCharsPerLine') ?? d.maxLineLen,
-    slowCps: readNumber(cfg, 'pipelineSlowCps') ?? d.slowCps,
-    maxExpandPerBlock: readNumber(cfg, 'pipelineMaxExpandPerBlock') ?? d.maxExpandPerBlock,
-    maxCompressPerBlock: readNumber(cfg, 'pipelineMaxCompressPerBlock') ?? d.maxCompressPerBlock,
+  const values = {} as Record<keyof PipelineThresholds, number>
+  for (const { field, settingsKey } of PIPELINE_THRESHOLD_FIELDS) {
+    values[field] = readNumber(cfg, settingsKey) ?? (d[field] as number)
   }
+  return values as PipelineThresholds
 }
 
 function main(): void {

@@ -19,6 +19,8 @@ import { readFileSync } from 'node:fs'
 
 import { DEFAULT_PIPELINE_THRESHOLDS, type PipelineThresholds } from '../src/lib/pipeline/blockTypes'
 import { endsWithIncompleteJapanese } from '../src/lib/pipeline/correctionAgent/tools/splitBlock'
+import { PIPELINE_THRESHOLD_FIELDS } from '../src/lib/pipeline/pipelineThresholdFields'
+import type { PipelineAuditReport, PipelineReviewItem } from '../src/types/pipeline'
 
 // 語末をこの秒数でクランプしてから無音を測る。パイプライン自身（wordToChars）が同じ
 // クランプを掛けているため、これを入れないと間の無音が消えて「無字幕の発話」が測れない。
@@ -32,8 +34,8 @@ const PUNCT = new Set('。、「」『』（）()［］[]！？!?・,，. \t\r\n
 // 単独文字を入れると「もう一つは」「ところが」のような正当な文頭を誤検出するため使わない。
 const SENTENCE_INITIAL_PARTICLE = /^(には|では|からの|への|として|について|を|へ)/
 
-// 前のキューを見ないと意味が取れない英語の始まり方。splitBlock の isBadEnglishUnit が禁じている形。
-const CONTEXT_DEPENDENT_EN = /^(This|That|It|These|Those)\b/
+// 文末記号（日本語・英語）。直前ブロックがこれで終わっていれば文は完結している。
+const SENTENCE_END_PUNCT = /[。！？.!?]$/
 
 interface Word { word?: string; start?: number; end?: number }
 interface Segment { words?: Word[] }
@@ -72,6 +74,11 @@ interface Finding<T> {
   extra?: Record<string, number>
 }
 
+interface ReviewItemExample {
+  item: PipelineReviewItem
+  block?: Block
+}
+
 interface AuditResult {
   label: string
   cues: number
@@ -82,12 +89,17 @@ interface AuditResult {
   durationShort: Finding<Block>
   midPhraseStart: Finding<{ block: Block; prevTail: string }>
   incompleteEnd: Finding<Block>
-  contextDependentEn: Finding<Block>
+  contextDependentFragment: Finding<ReviewItemExample>
   uncovered: Finding<Span>
   silenceCovered: number
   untriedViolations: Finding<SnapshotItem>
   timeAnomalies: Finding<Block>
   emptyText: Finding<Block>
+  // 製品（reviewDiagnostics）が出したレビュー項目の reason 別集計。自前実装は持たず、
+  // 製品の出力をそのまま見せる（2-E）。
+  reviewItemsByReason: Map<string, number>
+  reviewItemsTotal: number
+  reviewSummary: Pick<PipelineAuditReport, 'mustReviewCount' | 'shouldReviewCount' | 'autoPassCount'>
 }
 
 function norm(text: string | undefined): string {
@@ -105,7 +117,13 @@ function readNumber(source: Record<string, unknown>, key: string): number | unde
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
-/** 閾値を解決し、各項目がどこから来たかを記録する。 */
+/**
+ * 閾値を解決し、各項目がどこから来たかを記録する。
+ * フィールド名 → 設定キーの対応表は src/lib/pipeline/pipelineThresholdFields.ts
+ * （本番の buildPipelineThresholdsFromSettings と共有）を単一の情報源として使う。
+ * ただし出所の追跡（settingsSnapshot / adminSettings / コード既定値のどれで補ったか）は
+ * 本番コードには無い、本スクリプト固有の機能なのでここに残す。
+ */
 function resolveThresholds(project: Record<string, unknown>): ResolvedThresholds {
   const session = (project.session ?? {}) as Record<string, unknown>
   const admin = (session.adminSettings ?? {}) as Record<string, unknown>
@@ -114,35 +132,24 @@ function resolveThresholds(project: Record<string, unknown>): ResolvedThresholds
   const snapshot = (header.settingsSnapshot ?? {}) as Record<string, unknown>
 
   const sources = new Map<keyof PipelineThresholds, Source>()
-  const pick = (field: keyof PipelineThresholds, key: string): number => {
-    const fromSnapshot = readNumber(snapshot, key)
+  const values = {} as Record<keyof PipelineThresholds, number>
+  for (const { field, settingsKey } of PIPELINE_THRESHOLD_FIELDS) {
+    const fromSnapshot = readNumber(snapshot, settingsKey)
     if (fromSnapshot !== undefined) {
       sources.set(field, 'settingsSnapshot')
-      return fromSnapshot
+      values[field] = fromSnapshot
+      continue
     }
-    const fromAdmin = readNumber(admin, key)
+    const fromAdmin = readNumber(admin, settingsKey)
     if (fromAdmin !== undefined) {
       sources.set(field, 'adminSettings')
-      return fromAdmin
+      values[field] = fromAdmin
+      continue
     }
     sources.set(field, 'コード既定値')
-    return DEFAULT_PIPELINE_THRESHOLDS[field] as number
+    values[field] = DEFAULT_PIPELINE_THRESHOLDS[field] as number
   }
-
-  const values: PipelineThresholds = {
-    shortDurationSec: pick('shortDurationSec', 'pipelineShortDurationSec'),
-    longDurationSec: pick('longDurationSec', 'pipelineLongDurationSec'),
-    mergedLongDurationSec: pick('mergedLongDurationSec', 'pipelineMergedLongDurationSec'),
-    overCompressedRatio: pick('overCompressedRatio', 'pipelineOverCompressedRatio'),
-    overCompressedJaChars: pick('overCompressedJaChars', 'pipelineOverCompressedJaChars'),
-    verboseEnRatio: pick('verboseEnRatio', 'pipelineVerboseEnRatio'),
-    verboseCps: pick('verboseCps', 'enMaxCps'),
-    maxLineLen: pick('maxLineLen', 'enMaxCharsPerLine'),
-    slowCps: pick('slowCps', 'pipelineSlowCps'),
-    maxExpandPerBlock: pick('maxExpandPerBlock', 'pipelineMaxExpandPerBlock'),
-    maxCompressPerBlock: pick('maxCompressPerBlock', 'pipelineMaxCompressPerBlock'),
-  }
-  return { values, sources }
+  return { values: values as PipelineThresholds, sources }
 }
 
 /** パイプラインと同じクランプを掛けた文字単位ストリームの時刻列を作る。 */
@@ -252,7 +259,10 @@ function audit(path: string, label: string): AuditResult {
 
   const final = stageItems(project, 'finalFormatLines')
   const entry = stageItems(project, 'checkCpsViolations')
-  const afterLoop = stageItems(project, 'correctionEngine')
+
+  const auditReport = (run.audit ?? {}) as Partial<PipelineAuditReport>
+  const reviewItems: PipelineReviewItem[] = auditReport.reviewItems ?? []
+  const blockById = new Map(blocks.map(b => [b.id, b]))
 
   // A. 表示制約
   const cpsOverItems = final.filter(i => (i.cps ?? 0) > t.verboseCps)
@@ -274,10 +284,22 @@ function audit(path: string, label: string): AuditResult {
     const text = (block.transcript ?? '').replace(/^[\s\u3000]+/, '')
     if (!SENTENCE_INITIAL_PARTICLE.test(text)) return
     const prev = blocks[index - 1]
+    // 直前ブロックが文末記号（。！？.!?）で終わっている場合は除外する。文が完結した後の
+    // 「では、」のような話題転換（談話標識）であって、文節の途中で切れたわけではないため。
+    if (SENTENCE_END_PUNCT.test((prev?.transcript ?? '').trim())) return
     midPhrase.push({ block, prevTail: (prev?.transcript ?? '').slice(-14) })
   })
   const incompleteEndBlocks = blocks.filter(b => endsWithIncompleteJapanese(b.transcript ?? ''))
-  const contextDependentEnBlocks = blocks.filter(b => CONTEXT_DEPENDENT_EN.test((b.subtitle ?? '').trim()))
+
+  // 「英語が文脈依存の代名詞で始まるキュー」は自前判定をやめ、製品（reviewDiagnostics の
+  // isLikelyFragment / isContextDependentSubtitle）が既に出した判定をそのまま読む。
+  // 自前実装は、外側ゲート（短い字幕のみ対象）・小文字始まりの判定・日本語側の継続助詞判定・
+  // script ゲート・mergeContextFragments の keep 判定除外の6点が製品と乖離しており、
+  // 実測で 94件 vs 製品1件、しかも取りこぼしが21件あった（2026-08）。
+  const contextDependentFragmentItems: ReviewItemExample[] = reviewItems
+    .filter(item => item.reason === 'context_dependent_fragment')
+    .map(item => ({ item, block: item.blockId !== undefined ? blockById.get(item.blockId) : undefined }))
+    .sort((a, b) => (a.block?.startTime ?? 0) - (b.block?.startTime ?? 0))
 
   // C. 発話との対応
   const speech = mergeSpans(speechSpans(asrCharSpans(segments)))
@@ -286,7 +308,11 @@ function audit(path: string, label: string): AuditResult {
   const uncoveredSec = holes.reduce((sum, [s, e]) => sum + (e - s), 0)
 
   // D. 修復の取りこぼし
-  const afterById = new Map(afterLoop.map(i => [i.id, i]))
+  // correctionAttempts は correctionEngine より後段（mergeContextFragments 等）でも追記される
+  // （実測: correctionEngine 313 → mergeContextFragments 468 → finalFormatLines 471）。
+  // どのステージを基準にするかで「未修復」件数が入れ替わってしまうため、最終段
+  // （finalFormatLines = 上で読み込み済みの final）を基準にする。
+  const afterById = new Map(final.map(i => [i.id, i]))
   const untried = entry
     .filter(i => isDurationViolation(i, t) || (i.cps ?? 0) > t.verboseCps || (i.maxLineLen ?? 0) > t.maxLineLen)
     .filter(i => ((afterById.get(i.id)?.correctionAttempts ?? []).length === 0))
@@ -300,6 +326,11 @@ function audit(path: string, label: string): AuditResult {
   })
   const emptyText = blocks.filter(b => norm(b.transcript).length === 0 || (b.subtitle ?? '').trim().length === 0)
 
+  const reviewItemsByReason = new Map<string, number>()
+  for (const item of reviewItems) {
+    reviewItemsByReason.set(item.reason, (reviewItemsByReason.get(item.reason) ?? 0) + 1)
+  }
+
   return {
     label,
     cues: blocks.length,
@@ -312,7 +343,7 @@ function audit(path: string, label: string): AuditResult {
     durationShort: find(durationShortBlocks),
     midPhraseStart: find(midPhrase),
     incompleteEnd: find(incompleteEndBlocks),
-    contextDependentEn: find(contextDependentEnBlocks),
+    contextDependentFragment: find(contextDependentFragmentItems),
     uncovered: find(holes, 5, {
       合計秒: uncoveredSec,
       最大秒: Math.max(0, ...holes.map(([s, e]) => e - s)),
@@ -321,6 +352,13 @@ function audit(path: string, label: string): AuditResult {
     untriedViolations: find(untried),
     timeAnomalies: find(timeAnomalies),
     emptyText: find(emptyText),
+    reviewItemsByReason,
+    reviewItemsTotal: reviewItems.length,
+    reviewSummary: {
+      mustReviewCount: auditReport.mustReviewCount ?? 0,
+      shouldReviewCount: auditReport.shouldReviewCount ?? 0,
+      autoPassCount: auditReport.autoPassCount ?? 0,
+    },
   }
 }
 
@@ -361,10 +399,12 @@ function printDetails(r: AuditResult): void {
       console.log(`  ${mmss(block.startTime)} id=${block.id}  …${(block.transcript ?? '').slice(-24)}`)
     }
   }
-  if (r.contextDependentEn.count > 0) {
-    console.log(`\n■ 英語が文脈依存の代名詞で始まるキュー: ${r.contextDependentEn.count} 件`)
-    for (const block of r.contextDependentEn.examples) {
-      console.log(`  ${mmss(block.startTime)} id=${block.id}  ${(block.subtitle ?? '').replace(/\n/g, ' ').slice(0, 70)}`)
+  if (r.contextDependentFragment.count > 0) {
+    console.log(`\n■ 文脈依存の断片（製品判定 context_dependent_fragment）: ${r.contextDependentFragment.count} 件`)
+    for (const { item, block } of r.contextDependentFragment.examples) {
+      const where = block ? `${mmss(block.startTime)} id=${block.id}` : `id=${item.blockId ?? '?'}`
+      const text = (block?.subtitle ?? item.details?.[0] ?? '').replace(/\n/g, ' ').slice(0, 70)
+      console.log(`  ${where}  ${text}`)
     }
   }
   if (r.durationOver.count > 0) {
@@ -409,6 +449,36 @@ function printDetails(r: AuditResult): void {
   console.log('')
 }
 
+// reason コードの日本語ラベル（reviewDiagnostics.ts の各項目に対応）。未知の reason は
+// コードのまま表示する（新しい reason が追加されても表示が欠落しないようにするため）。
+const REVIEW_REASON_LABELS: Record<string, string> = {
+  short_duration: '表示時間が短すぎる',
+  under_translated_or_over_simplified: '訳が短すぎる可能性',
+  context_dependent_fragment: '文脈依存の断片',
+  cps_over_limit: 'CPS上限超過',
+  cps_near_limit: 'CPSが上限に近い（予兆）',
+  line_length_over_limit: '行長超過',
+  long_segment: '表示時間が長め',
+  over_compressed: '訳が短すぎる（圧縮しすぎ）',
+  proportional_ts: 'タイムスタンプが比例配分',
+  auto_applied: '自動修正済み',
+}
+
+/**
+ * 製品（reviewDiagnostics）が出したレビュー項目を reason 別に集計して表示する。
+ * 監査スクリプト側で個別に自前実装を足すのではなく、製品の出力をそのまま見せる方針（2-E）。
+ */
+function printReviewItemsSummary(r: AuditResult): void {
+  console.log(`【レビュー項目】(${r.label}) 合計 ${r.reviewItemsTotal} 件`)
+  console.log(`  must_review=${r.reviewSummary.mustReviewCount} / should_review=${r.reviewSummary.shouldReviewCount} / auto_pass=${r.reviewSummary.autoPassCount}`)
+  const sorted = [...r.reviewItemsByReason.entries()].sort((a, b) => b[1] - a[1])
+  for (const [reason, count] of sorted) {
+    const label = REVIEW_REASON_LABELS[reason] ?? reason
+    console.log(`  ${label.padEnd(24)} (${reason}) ${String(count).padStart(4)} 件`)
+  }
+  console.log('')
+}
+
 interface SummaryRow { name: string; value: (r: AuditResult) => number; unit: string; lowerIsBetter: boolean }
 
 const SUMMARY_ROWS: SummaryRow[] = [
@@ -419,7 +489,7 @@ const SUMMARY_ROWS: SummaryRow[] = [
   { name: '尺が短すぎる', value: r => r.durationShort.count, unit: '件', lowerIsBetter: true },
   { name: '文節途中で切れた境界', value: r => r.midPhraseStart.count, unit: '件', lowerIsBetter: true },
   { name: '文の途中で終わるキュー', value: r => r.incompleteEnd.count, unit: '件', lowerIsBetter: true },
-  { name: '英語が代名詞で始まる', value: r => r.contextDependentEn.count, unit: '件', lowerIsBetter: true },
+  { name: '文脈依存の断片(製品判定)', value: r => r.contextDependentFragment.count, unit: '件', lowerIsBetter: true },
   { name: '無字幕の発話（合計）', value: r => r.uncovered.extra?.合計秒 ?? 0, unit: '秒', lowerIsBetter: true },
   { name: '無字幕の発話（箇所）', value: r => r.uncovered.count, unit: '箇所', lowerIsBetter: true },
   { name: '無音上の字幕', value: r => r.silenceCovered, unit: '秒', lowerIsBetter: true },
@@ -475,6 +545,8 @@ function main(): void {
 
   printThresholds(target)
   if (baseline) printThresholds(baseline)
+  printReviewItemsSummary(target)
+  if (baseline) printReviewItemsSummary(baseline)
   printDetails(target)
   printSummary(target, baseline)
 }

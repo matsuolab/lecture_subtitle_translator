@@ -4,7 +4,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
 import { resetLlmActivity } from '@/lib/aiGateway/llmActivity'
 
-import type { PipelineThresholds } from './blockTypes'
+import { buildPipelineThresholdsFromSettings } from './pipelineThresholdFields'
 import { runPhase1 } from './phase1'
 import { runPhase2 } from './phase2'
 import { runPhase3 } from './phase3'
@@ -166,22 +166,6 @@ function buildSnapshotDetailItems(items: unknown[], kind: string): Record<string
   })
 }
 
-function buildPipelineThresholds(settings: AdminSettings): PipelineThresholds {
-  return {
-    shortDurationSec: settings.pipelineShortDurationSec,
-    longDurationSec: settings.pipelineLongDurationSec,
-    mergedLongDurationSec: settings.pipelineMergedLongDurationSec,
-    overCompressedRatio: settings.pipelineOverCompressedRatio,
-    overCompressedJaChars: settings.pipelineOverCompressedJaChars,
-    verboseEnRatio: settings.pipelineVerboseEnRatio,
-    verboseCps: settings.enMaxCps,
-    maxLineLen: settings.enMaxCharsPerLine,
-    slowCps: settings.pipelineSlowCps,
-    maxExpandPerBlock: settings.pipelineMaxExpandPerBlock,
-    maxCompressPerBlock: settings.pipelineMaxCompressPerBlock,
-  }
-}
-
 export async function runLocalPostPipeline(
   transcriptSegments: TranscriptSegment[],
   settings: AdminSettings,
@@ -193,7 +177,7 @@ export async function runLocalPostPipeline(
 
   const traces: PipelineNodeTrace[] = []
   const stageSnapshots: PipelineStageSnapshot[] = []
-  const thresholds = buildPipelineThresholds(settings)
+  const thresholds = buildPipelineThresholdsFromSettings(settings)
 
   const recordStageSnapshot = (stage: string, result: unknown): void => {
     const items = normalizeSnapshotItems(result)
