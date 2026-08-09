@@ -178,3 +178,22 @@ describe('llmRequestTimeoutSec normalization', () => {
     expect(normalizeAdminSettings({ llmRequestTimeoutSec: 'not-a-number' }).llmRequestTimeoutSec).toBe(600)
   })
 })
+
+describe('llmReasoningBudgetTokens normalization (implementation 3)', () => {
+  it('defaults to 0 (auto) when unset', () => {
+    expect(getDefaultAdminSettings().llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({}).llmReasoningBudgetTokens).toBe(0)
+  })
+
+  it('keeps in-range values as-is, including 0', () => {
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 0 }).llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 4096 }).llmReasoningBudgetTokens).toBe(4096)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 32768 }).llmReasoningBudgetTokens).toBe(32768)
+  })
+
+  it('falls back to the default (0) for out-of-range or non-numeric input', () => {
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: -1 }).llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 32769 }).llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 'not-a-number' }).llmReasoningBudgetTokens).toBe(0)
+  })
+})

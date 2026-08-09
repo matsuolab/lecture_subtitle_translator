@@ -79,6 +79,14 @@ export interface AdminSettings {
   // 空欄なら splitJaModel にフォールバック。多言語対応のため LLM で判定する。
   incompleteEndDetectionModel: string
   incompleteEndDetectionBatchSize: number
+  // thinking系モデルの reasoning トークン消費分の割り増し予算（withReasoningHeadroom が加算する値）。
+  // 既定 0 は「自動」= modelProfile の reasoning.capability 推定に従う（resolveModelProfile が
+  // モデル名の部分一致 'gemma'/'qwen' 等でしか推定できず、それ以外は undefined になり割り増しが
+  // 一切効かない。この設定はその取りこぼしを利用者が明示的に埋めるためのもの）。
+  // 0より大きい値を設定すると、プロファイル推定に関係なくその値を常に加算する。
+  // 効くのは実質 local_openai 経路のみ（openai/gemini は adaptChatCompletionRequest が
+  // トークン上限フィールド自体を送らないため。modelProfile.ts の stripTokenLimitFields 参照）。
+  llmReasoningBudgetTokens: number
 
   // ノード別モデル
   compressModel: string

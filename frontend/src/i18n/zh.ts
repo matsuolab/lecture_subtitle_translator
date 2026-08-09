@@ -275,6 +275,7 @@ export const zh: LocaleStrings = {
   settingsPipelineMergeContinuationMaxTranscriptChars: '合并后转录字数上限',
   settingsIncompleteEndDetectionModel: '未完结检测模型 (nano)',
   settingsIncompleteEndDetectionBatchSize: '未完结检测批量大小',
+  settingsLlmReasoningBudgetTokens: '推理令牌预算（0=自动）',
   settingsLlmRequestTimeoutSec: 'LLM请求超时（秒）',
   settingsCompressModel: '压缩模型',
   settingsMicroModel: '微压缩模型 (Micro)',

@@ -100,6 +100,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     pipelineMergeContinuationMaxTranscriptChars: 80,
     incompleteEndDetectionModel: 'gpt-5.6-luna',
     incompleteEndDetectionBatchSize: 30,
+    llmReasoningBudgetTokens: 0,
     compressModel: 'gpt-5.6-luna',
     microModel: 'gpt-5.6-luna',
     expandModel: 'gpt-5.6-luna',
@@ -285,6 +286,10 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pipelineMergeContinuationMaxTranscriptChars: normalizePositiveNumber(raw.pipelineMergeContinuationMaxTranscriptChars, defaults.pipelineMergeContinuationMaxTranscriptChars),
     incompleteEndDetectionModel: typeof raw.incompleteEndDetectionModel === 'string' && raw.incompleteEndDetectionModel ? raw.incompleteEndDetectionModel : defaults.incompleteEndDetectionModel,
     incompleteEndDetectionBatchSize: normalizeBoundedInteger(raw.incompleteEndDetectionBatchSize, defaults.incompleteEndDetectionBatchSize, 1, 200),
+    // 0 = 自動（プロファイル推定に従う）。上限 32768 は組み込みモデルプロファイル
+    // （MODEL_PROFILE_PRESETS の maxOutputTokens）と同じ値: withReasoningHeadroom は最終的に
+    // profile.maxOutputTokens でクランプするため、それを超える値を許容しても意味を持たない。
+    llmReasoningBudgetTokens: normalizeBoundedInteger(raw.llmReasoningBudgetTokens, defaults.llmReasoningBudgetTokens, 0, 32768),
     compressModel: typeof raw.compressModel === 'string' && raw.compressModel ? raw.compressModel : defaults.compressModel,
     microModel: typeof raw.microModel === 'string' && raw.microModel ? raw.microModel : defaults.microModel,
     expandModel: typeof raw.expandModel === 'string' && raw.expandModel ? raw.expandModel : defaults.expandModel,

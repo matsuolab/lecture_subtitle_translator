@@ -837,6 +837,14 @@ export function SettingsTab({
                   onChange={(value) => onAdminSettingsChange({ embeddingProfilePreset: value })}
                 />
               </div>
+              <NumberField
+                theme={theme}
+                label={t.settingsLlmReasoningBudgetTokens}
+                value={adminSettings.llmReasoningBudgetTokens}
+                min={0}
+                hint="0 で自動（モデルプロファイルの推論特性から推定）。0より大きい値を入れると、プロファイルの推定に関係なく必ずその分だけ出力トークン上限を割り増します。効くのはローカルLLM（LM Studio/Ollama等）経路のみで、OpenAI/Gemini API経路では出力上限自体を送らないためこの設定は反映されません。"
+                onChange={(value) => onAdminSettingsChange({ llmReasoningBudgetTokens: value })}
+              />
               <TextareaField
                 theme={theme}
                 label="Chat Text カスタムプロファイルJSON"
@@ -2059,6 +2067,7 @@ function NumberField({
   value,
   min,
   step = 1,
+  hint,
   onChange,
 }: {
   theme: Theme
@@ -2066,6 +2075,7 @@ function NumberField({
   value: number
   min?: number
   step?: number
+  hint?: string
   onChange: (value: number) => void
 }) {
   const [display, setDisplay] = React.useState(() => String(value))
@@ -2101,6 +2111,9 @@ function NumberField({
           fontSize: 12,
         }}
       />
+      {hint && (
+        <span style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>{hint}</span>
+      )}
     </label>
   )
 }

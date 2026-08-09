@@ -275,6 +275,7 @@ export const en: LocaleStrings = {
   settingsPipelineMergeContinuationMaxTranscriptChars: 'Max merged transcript chars',
   settingsIncompleteEndDetectionModel: 'Unfinished-end detection model (nano)',
   settingsIncompleteEndDetectionBatchSize: 'Unfinished-end detection batch size',
+  settingsLlmReasoningBudgetTokens: 'Reasoning token budget (0 = auto)',
   settingsLlmRequestTimeoutSec: 'LLM request timeout (sec)',
   settingsCompressModel: 'Compress model',
   settingsMicroModel: 'Micro compress model',

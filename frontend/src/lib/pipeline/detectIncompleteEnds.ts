@@ -328,7 +328,7 @@ async function detectBatchOnce(items: BatchItem[], settings: AdminSettings): Pro
   }
 
   const profile = resolveModelProfile(settings, model)
-  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(items.length), profile)
+  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(items.length), profile, settings.llmReasoningBudgetTokens)
 
   const call = await llmCallWithMeta(
     {
