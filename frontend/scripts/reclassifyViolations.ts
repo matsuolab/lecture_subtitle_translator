@@ -47,7 +47,7 @@ function main(): void {
   const stage = stages.find(s => s.stage === 'finalFormatLines')
   if (!stage?.items) throw new Error('finalFormatLines スナップショットが見つかりません')
 
-  console.log(`閾値: CPS>${thresholds.verboseCps} / 行長>${thresholds.maxLineLen} / 比>${thresholds.verboseEnRatio}`)
+  console.log(`閾値: CPS>${thresholds.verboseCps} / 行長>${thresholds.maxLineLen}`)
   console.log(`対象: ${stage.items.length} キュー`)
   console.log('')
 

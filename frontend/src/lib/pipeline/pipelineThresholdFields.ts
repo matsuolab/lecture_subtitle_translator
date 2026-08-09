@@ -18,7 +18,8 @@ export const PIPELINE_THRESHOLD_FIELDS: ReadonlyArray<{
   { field: 'mergedLongDurationSec', settingsKey: 'pipelineMergedLongDurationSec' },
   { field: 'overCompressedRatio', settingsKey: 'pipelineOverCompressedRatio' },
   { field: 'overCompressedJaChars', settingsKey: 'pipelineOverCompressedJaChars' },
-  { field: 'verboseEnRatio', settingsKey: 'pipelineVerboseEnRatio' },
+  // verboseEnRatio は PipelineThresholds から削除済み（判定ロジックが英日文字比を使わなくなったため）。
+  // AdminSettings.pipelineVerboseEnRatio 自体は既存保存データ互換のため残るが、対応表には含めない。
   { field: 'verboseCps', settingsKey: 'enMaxCps' },
   { field: 'maxLineLen', settingsKey: 'enMaxCharsPerLine' },
   { field: 'slowCps', settingsKey: 'pipelineSlowCps' },

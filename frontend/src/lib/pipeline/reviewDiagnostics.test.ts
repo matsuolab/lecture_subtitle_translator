@@ -10,7 +10,6 @@ const thresholds: PipelineThresholds = {
   mergedLongDurationSec: 7,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 17,
   maxLineLen: 42,
   slowCps: 3,
@@ -37,8 +36,11 @@ function block(seed: Pick<EnBlock, 'id' | 'start' | 'end' | 'jaText' | 'enText'>
 
 describe('buildReviewItemsForBlock - cps_near_limit（旧 verbose_ratio_over_limit）', () => {
   it('does not fire on a high en/ja ratio alone when CPS is far below the limit', () => {
-    // ratio 3.33（閾値1.5の2倍以上）でも cps=5（上限17の95%=16.15から遠い）なら発火しない。
-    // 比のみによる発火（旧 clearlyVerbose）を撤去したことの確認。
+    // ratio 3.33（旧 verboseEnRatio 閾値1.5の2倍以上）でも cps=5（上限17の95%=16.15から遠い）
+    // なら発火しない。比のみによる発火（旧 clearlyVerbose）を撤去したことの確認。
+    // verboseEnRatio 自体は判定から撤去済みのため、ここでは撤去前の閾値をテスト用の
+    // 参照値としてリテラルで残す（thresholds からは読まない）。
+    const formerVerboseEnRatioThreshold = 1.5
     const b = block({
       id: 1,
       start: 0,
@@ -47,7 +49,7 @@ describe('buildReviewItemsForBlock - cps_near_limit（旧 verbose_ratio_over_lim
       enText: 'Sure, here is a short example today.',
     })
     expect(b.cps).toBeLessThan(thresholds.verboseCps * 0.95)
-    expect(b.enChars / b.jaChars).toBeGreaterThan(thresholds.verboseEnRatio)
+    expect(b.enChars / b.jaChars).toBeGreaterThan(formerVerboseEnRatioThreshold)
 
     const items = buildReviewItemsForBlock(b, thresholds)
     expect(items.map(i => i.reason)).not.toContain('cps_near_limit')

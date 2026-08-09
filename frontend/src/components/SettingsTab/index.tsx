@@ -1646,17 +1646,9 @@ export function SettingsTab({
         <SettingsGroupLabel
           theme={theme}
           title="字幕の自動調整（文字量・速度）"
-          hint="英訳の文字量や読む速さを判定し、短縮・展開する基準です。英日文字比やCPSのしきい値で制御します。"
+          hint="英訳の文字量や読む速さを判定し、短縮・展開する基準です。CPSと行長のしきい値で制御します。"
         />
         <FieldCard theme={theme}>
-          <NumberField
-            theme={theme}
-            label={t.settingsPipelineVerboseEnRatio}
-            value={adminSettings.pipelineVerboseEnRatio}
-            min={0.5}
-            step={0.1}
-            onChange={(value) => onAdminSettingsChange({ pipelineVerboseEnRatio: value })}
-          />
           <NumberField
             theme={theme}
             label={t.settingsPipelineOverCompressedRatio}

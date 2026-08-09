@@ -154,7 +154,6 @@ export interface LocaleStrings {
   settingsPipelineShortDurationSec: string
   settingsPipelineLongDurationSec: string
   settingsPipelineMergedLongDurationSec: string
-  settingsPipelineVerboseEnRatio: string
   settingsPipelineOverCompressedRatio: string
   settingsPipelineOverCompressedJaChars: string
   settingsPipelineSlowCps: string

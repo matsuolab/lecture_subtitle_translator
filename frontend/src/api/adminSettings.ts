@@ -88,6 +88,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     pipelineShortDurationSec: 1.5,
     pipelineLongDurationSec: 14.0,
     pipelineMergedLongDurationSec: 12.0,
+    // 未使用（AdminSettings 側の JSDoc 参照）。既存保存データとの互換のためだけに残す既定値。
     pipelineVerboseEnRatio: 1.5,
     pipelineOverCompressedRatio: 0.25,
     pipelineOverCompressedJaChars: 15,
@@ -274,6 +275,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pipelineShortDurationSec: normalizePositiveNumber(raw.pipelineShortDurationSec, defaults.pipelineShortDurationSec),
     pipelineLongDurationSec: normalizePositiveNumber(raw.pipelineLongDurationSec, defaults.pipelineLongDurationSec),
     pipelineMergedLongDurationSec: normalizePositiveNumber(raw.pipelineMergedLongDurationSec, defaults.pipelineMergedLongDurationSec),
+    // 未使用（AdminSettings 側の JSDoc 参照）。既存保存データを読み込み時に落とさないためだけに正規化する。
     pipelineVerboseEnRatio: normalizePositiveNumber(raw.pipelineVerboseEnRatio, defaults.pipelineVerboseEnRatio),
     pipelineOverCompressedRatio: normalizePositiveNumber(raw.pipelineOverCompressedRatio, defaults.pipelineOverCompressedRatio),
     pipelineOverCompressedJaChars: normalizePositiveNumber(raw.pipelineOverCompressedJaChars, defaults.pipelineOverCompressedJaChars),

@@ -27,7 +27,6 @@ const thresholds: PipelineThresholds = {
   mergedLongDurationSec: 7.0,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 18,
   maxLineLen: 75,
   slowCps: 3.0,

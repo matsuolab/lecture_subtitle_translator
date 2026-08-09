@@ -41,7 +41,6 @@ function normalizeThresholds(thresholds: PipelineThresholds): PipelineThresholds
     mergedLongDurationSec: finiteOrDefault(thresholds.mergedLongDurationSec, DEFAULT_PIPELINE_THRESHOLDS.mergedLongDurationSec),
     overCompressedRatio: finiteOrDefault(thresholds.overCompressedRatio, DEFAULT_PIPELINE_THRESHOLDS.overCompressedRatio),
     overCompressedJaChars: finiteOrDefault(thresholds.overCompressedJaChars, DEFAULT_PIPELINE_THRESHOLDS.overCompressedJaChars),
-    verboseEnRatio: finiteOrDefault(thresholds.verboseEnRatio, DEFAULT_PIPELINE_THRESHOLDS.verboseEnRatio),
     verboseCps: finiteOrDefault(thresholds.verboseCps, DEFAULT_PIPELINE_THRESHOLDS.verboseCps),
     maxLineLen: finiteOrDefault(thresholds.maxLineLen, DEFAULT_PIPELINE_THRESHOLDS.maxLineLen),
     slowCps: finiteOrDefault(thresholds.slowCps, DEFAULT_PIPELINE_THRESHOLDS.slowCps),

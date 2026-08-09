@@ -263,7 +263,6 @@ export const zh: LocaleStrings = {
   settingsPipelineShortDurationSec: '合并短于此值的字幕（秒）',
   settingsPipelineLongDurationSec: '分割长于此值的字幕（秒）',
   settingsPipelineMergedLongDurationSec: '合并后字幕的最长显示时间（秒）',
-  settingsPipelineVerboseEnRatio: '判定为冗长的英日字符比（上限）',
   settingsPipelineOverCompressedRatio: '判定为过度压缩的英日字符比（下限）',
   settingsPipelineOverCompressedJaChars: '过度压缩判定的最小日文字数',
   settingsPipelineSlowCps: '判定为语速过慢的CPS（下限）',

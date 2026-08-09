@@ -189,7 +189,6 @@ const thresholds: PipelineThresholds & AgentThresholds = {
   mergedLongDurationSec: 7,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 16.9,
   maxLineLen: 42,
   slowCps: 3,

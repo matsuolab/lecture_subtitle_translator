@@ -264,7 +264,6 @@ export const ja: LocaleStrings = {
   settingsPipelineShortDurationSec: '短い字幕を結合するしきい値（秒）',
   settingsPipelineLongDurationSec: '長い字幕を分割するしきい値（秒）',
   settingsPipelineMergedLongDurationSec: '結合後の字幕の最長表示時間（秒）',
-  settingsPipelineVerboseEnRatio: '冗長と判定する英日文字比（上限）',
   settingsPipelineOverCompressedRatio: '過圧縮と判定する英日文字比（下限）',
   settingsPipelineOverCompressedJaChars: '過圧縮判定の最小日本語文字数',
   settingsPipelineSlowCps: '低速発話と判定するCPS（下限）',

@@ -99,7 +99,9 @@ export interface PipelineThresholds {
   mergedLongDurationSec: number
   overCompressedRatio: number
   overCompressedJaChars: number
-  verboseEnRatio: number
+  // verboseEnRatio は撤去済み。英日文字比による判定は classifyViolation / reviewDiagnostics
+  // から廃止され、現在この値を参照する判定ロジックは存在しない（CPS・行長で制御する）。
+  // AdminSettings.pipelineVerboseEnRatio（既存保存データ互換用）とは対応しない。
   verboseCps: number
   maxLineLen: number
   slowCps: number
@@ -122,7 +124,6 @@ export const DEFAULT_PIPELINE_THRESHOLDS: PipelineThresholds = {
   mergedLongDurationSec: 7.0,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 17,
   maxLineLen: 42,
   slowCps: 3.0,

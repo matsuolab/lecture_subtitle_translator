@@ -61,6 +61,13 @@ export interface AdminSettings {
   pipelineShortDurationSec: number
   pipelineLongDurationSec: number
   pipelineMergedLongDurationSec: number
+  /**
+   * 未使用（判定ロジックから撤去済み）。
+   * 英日文字比による判定は classifyViolation / reviewDiagnostics から廃止され、
+   * 現在この値を参照する判定は存在しない（CPS・行長のしきい値で制御する）。
+   * PipelineThresholds からも削除済みだが、既存の保存済みプロジェクト JSON に
+   * この値が残っているため、読み込み時に落ちないよう AdminSettings 側にだけ残している。
+   */
   pipelineVerboseEnRatio: number
   pipelineOverCompressedRatio: number
   pipelineOverCompressedJaChars: number

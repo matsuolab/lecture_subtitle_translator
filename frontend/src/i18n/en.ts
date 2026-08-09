@@ -263,7 +263,6 @@ export const en: LocaleStrings = {
   settingsPipelineShortDurationSec: 'Merge subtitles shorter than (sec)',
   settingsPipelineLongDurationSec: 'Split subtitles longer than (sec)',
   settingsPipelineMergedLongDurationSec: 'Max subtitle duration after merge (sec)',
-  settingsPipelineVerboseEnRatio: 'Verbose EN/JA ratio (upper)',
   settingsPipelineOverCompressedRatio: 'Over-compressed EN/JA ratio (lower)',
   settingsPipelineOverCompressedJaChars: 'Min JA chars for over-compressed',
   settingsPipelineSlowCps: 'Slow-speech CPS (lower)',

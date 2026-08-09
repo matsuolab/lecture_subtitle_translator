@@ -81,7 +81,6 @@ const pipelineThresholds: PipelineThresholds = {
   mergedLongDurationSec: 7,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 17,
   maxLineLen: 200, // 行長違反を本テストの関心事から外すため十分大きくする
   slowCps: 3,
