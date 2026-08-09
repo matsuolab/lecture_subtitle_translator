@@ -142,11 +142,19 @@ export async function runPhase2(
   if (options.correctedSegments && options.correctedSegments.length > 0) {
     const segments = options.correctedSegments
     await runNode('sourceTextLexicalOverlap', () => measureSourceTextLexicalOverlap(blocks, segments))
+  }
 
-    // Stage 3: general_repair_agent エスカレーション (low → medium → high)
-    // - block 単位の violation のみを見て修復する（coverage の重なり率は判断材料にしない）
-    // - 3 段階のうち改善した時点で break、最後まで失敗したら manual_review に確定
-    // - PoC 同等プロセス保証: 「PoC でも救えなかった真の難ケース」のみ manual_review
+  // Stage 3: general_repair_agent エスカレーション (low → medium → high)
+  // - block 単位の violation のみを見て修復する（coverage の重なり率は判断材料にしない）
+  // - 3 段階のうち改善した時点で break、最後まで失敗したら manual_review に確定
+  // - PoC 同等プロセス保証: 「PoC でも救えなかった真の難ケース」のみ manual_review
+  //
+  // 注意: sourceTextLexicalOverlap（観測専用・segments 必須）とは独立したブロックにしている。
+  // runGeneralRepairAgent は segments を引数に取らず blocks の violation のみで判断するため、
+  // correctedSegments 未指定の呼び出し経路でも実行されなければならない（以前は
+  // correctedSegments の条件の内側に置かれてしまい、その経路では CPS・行長の最終修復が
+  // 丸ごとスキップされていた。observation ノードと repair ノードを分離して復旧）。
+  {
     const hasResidualViolations = blocks.some((b) => b.violation !== 'ok' && b.violation !== 'slow_speech')
     if (hasResidualViolations && settings.generalRepairEnabled) {
       const generalResult = await runNode('generalRepairAgent', () =>
