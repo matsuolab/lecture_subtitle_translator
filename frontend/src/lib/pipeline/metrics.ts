@@ -52,8 +52,11 @@ export function classifyViolation(
   // line_length_only として一度も出力されていなかった。視聴者が実際に経験する制約は
   // CPS（読める速さ）と行長（画面に収まるか）であり、比は「翻訳が冗長かもしれない」という
   // 推測に過ぎない。そのため比による判定はやめ、CPS 超過を独立コード cps_over として返す。
-  // 比は診断値として computeMetrics には残し、over_compressed（比が小さすぎる＝訳し落とし）
-  // の判定とレビュー表示（reviewDiagnostics の verbose-ratio 項目）では引き続き使う。
+  // 比は診断値として computeMetrics には残し、over_compressed（比が小さすぎる＝訳し落とし）や
+  // isLikelyUnderTranslated（reviewDiagnostics）の判定では引き続き使う。ただし比が大きい
+  // （冗長かもしれない）方向の単独判定は reviewDiagnostics からも撤去済み（2026-08、実害ゼロ・
+  // 指標が不安定なため）。CPS が上限に近いことだけを予兆として見る shouldReportNearCpsLimit
+  // に置き換えた。
   if (metrics.cps > thresholds.verboseCps) {
     return 'cps_over'
   }

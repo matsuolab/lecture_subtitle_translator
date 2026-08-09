@@ -70,11 +70,14 @@ function hasKeepDecisionFromContextMerge(block: EnBlock): boolean {
   )
 }
 
-function shouldReportVerboseRatio(metrics: ReturnType<typeof computeMetrics>, thresholds: PipelineThresholds): boolean {
-  if (metrics.enJaRatio <= thresholds.verboseEnRatio) return false
-  const clearlyVerbose = metrics.enJaRatio >= thresholds.verboseEnRatio * 1.5 && metrics.enChars >= 80
-  const nearCpsLimit = metrics.cps >= thresholds.verboseCps * 0.95
-  return clearlyVerbose || nearCpsLimit
+// 英日文字比が高いことを理由にした発火（旧 clearlyVerbose）は撤去した。実データ847キューで
+// 105件発火したが、実害（CPS超過・行長超過）を伴うものはゼロだった。比の閾値1.5に対し
+// ×1.5=2.25で発火する設計だったが、実測の英日比は中央値1.78・p75 2.11で上位2割強が
+// 該当してしまい、しかも比自体が数え方（句読点を含めるか等）で1.78〜2.21に振れる不安定な
+// 指標だった。CPSが上限に近いこと（nearCpsLimit）だけは視聴者が実際に経験する制約への
+// 接近であり意味のある予兆のため残す（105件 → 42件、2026-08 実測）。
+function shouldReportNearCpsLimit(metrics: ReturnType<typeof computeMetrics>, thresholds: PipelineThresholds): boolean {
+  return metrics.cps >= thresholds.verboseCps * 0.95
 }
 
 function violationTitle(violation: EnBlock['violation']): { title: string; action: string } {
@@ -230,27 +233,28 @@ export function buildReviewItemsForBlock(
     }))
   }
 
-  // 比が高いことは classifyViolation 上は違反ではなくなった（cps_over に分離済み）が、
-  // レビュー時の参考ヒントとしては残したいため、violation への依存はやめて
-  // metrics 由来の値だけで判定する。
-  if (metrics.cps <= thresholds.verboseCps && shouldReportVerboseRatio(metrics, thresholds)) {
-    items.push(baseItem(block, 'verbose-ratio', {
+  // CPS が上限に近づいている（まだ超過はしていない）ことを知らせる予兆シグナル。
+  // classifyViolation 上は違反ではない（cps_over は別項目が担当）が、僅かな編集で
+  // 超過に転じやすいことを伝える価値があるため残す。実害ではなく予兆のため、
+  // should_review ではなく auto_pass（最下位）に位置づける。
+  if (metrics.cps <= thresholds.verboseCps && shouldReportNearCpsLimit(metrics, thresholds)) {
+    items.push(baseItem(block, 'cps-near-limit', {
       nodeId: 'subtitleReview',
-      reason: 'verbose_ratio_over_limit',
+      reason: 'cps_near_limit',
       category: 'readability',
-      priority: 'should_review',
+      priority: 'auto_pass',
       disposition: 'proposed',
-      title: '英文が長すぎる可能性があります',
-      action: 'CPSは上限内です。英日比が高いため、冗長表現の短縮案を確認してください',
+      title: '読む速度が上限に近づいています',
+      action: '現時点では上限内ですが、僅かな調整で超過する可能性があるため様子を見てください',
       details: [
         `CPS ${round1(metrics.cps)} / 上限 ${round1(thresholds.verboseCps)}`,
-        `英日文字比 ${round1(metrics.enJaRatio)} / 上限 ${round1(thresholds.verboseEnRatio)}`,
+        `${metrics.enChars}文字 / ${round1(metrics.duration)}秒`,
       ],
       attempts: block.correctionAttempts,
       proposal: {
         kind: 'replace_text',
-        confidence: 0.6,
-        rationale: '読む速度ではなく、元の日本語に対して英文が相対的に長い可能性があるため',
+        confidence: 0.4,
+        rationale: '現状は上限内だが、後続の編集や再翻訳で超過に転じやすいことを示す予兆のため',
       },
     }))
   }
