@@ -4,6 +4,7 @@ import { reindexContextGroups } from './contextGrouping'
 import { formatLines } from './formatLines'
 import { classifyViolation, computeMetrics } from './metrics'
 import { normalizeSpaces } from './textUtils'
+import { mergeCueSourceRefs } from '@/types/sourceEvidence'
 
 export interface FinalSafeMergeEntry {
   leftId: number
@@ -147,6 +148,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
   }
 
   const mergedText = mergeCandidateText(left, right)
+  const sourceRefs = mergeCueSourceRefs(left.sourceRefs, right.sourceRefs)
   const expectedJaLength = compactLength(left.jaText) + compactLength(right.jaText)
   if (compactLength(mergedText.jaText) < expectedJaLength) {
     return { reason: 'transcript coverage would shrink' }
@@ -162,6 +164,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
     enTextOriginal: undefined,
     merged: true,
     contextGroupSourceIds: [...new Set([...sourceIdsFor(left), ...sourceIdsFor(right)])],
+    ...(sourceRefs ? { sourceRefs } : {}),
   }
   const formatted = formatLines([draft], thresholds)[0]
   const metrics = computeMetrics(formatted)

@@ -10,6 +10,9 @@ import {
   type WorkLogExport,
   type WorkLogHeader,
   type WorkLogMarker,
+  type WorkLogFlushResult,
+  type WorkLogWriteError,
+  type WorkLogWriteResult,
 } from '@/lib/worklog/types'
 import { appendWorkLogLine, getWorkLogDir, readWorkLogSession } from '@/lib/worklog/repository'
 
@@ -19,6 +22,55 @@ export interface StartSessionOptions {
   settingsSnapshot?: Record<string, unknown>
   initialBlocks: SubtitleBlock[]
   transcriptSegments?: TranscriptSegment[]
+  parentSessionId?: string
+}
+
+export function buildWorkLogHeader(
+  opts: StartSessionOptions,
+  sessionId: string,
+  startedAt: string,
+): WorkLogHeader {
+  return {
+    kind: 'header',
+    schemaVersion: WORK_LOG_SCHEMA_VERSION,
+    sessionId,
+    parentSessionId: opts.parentSessionId,
+    startedAt,
+    video: opts.video,
+    settingsSnapshot: opts.settingsSnapshot,
+  }
+}
+
+export interface WorkLogWriteQueue {
+  enqueue(task: () => Promise<WorkLogWriteResult>): void
+  flush(): Promise<WorkLogFlushResult>
+  getLastError(): WorkLogWriteError | null
+}
+
+export function createWorkLogWriteQueue(): WorkLogWriteQueue {
+  let queue: Promise<void> = Promise.resolve()
+  let lastError: WorkLogWriteError | null = null
+  return {
+    enqueue(task) {
+      queue = queue.then(async () => {
+        try {
+          const result = await task()
+          if (!result.ok) lastError = result.error
+        } catch (error) {
+          lastError = error instanceof Error
+            ? { name: error.name || 'Error', message: error.message }
+            : { name: 'Error', message: String(error) }
+        }
+      })
+    },
+    async flush() {
+      await queue
+      return lastError ? { ok: false, error: lastError } : { ok: true }
+    },
+    getLastError() {
+      return lastError
+    },
+  }
 }
 
 export interface RecordEventInput {
@@ -81,11 +133,11 @@ function generateSessionId(): string {
  */
 export function useWorkLog() {
   const sessionRef = useRef<ActiveSession | null>(null)
-  // 追記をシリアライズして書き込み競合を防ぐキュー
-  const queueRef = useRef<Promise<void>>(Promise.resolve())
+  const writeQueueRef = useRef<WorkLogWriteQueue | null>(null)
+  if (writeQueueRef.current === null) writeQueueRef.current = createWorkLogWriteQueue()
 
-  const enqueue = useCallback((task: () => Promise<void>) => {
-    queueRef.current = queueRef.current.catch(() => {}).then(task)
+  const enqueue = useCallback((task: () => Promise<WorkLogWriteResult>) => {
+    writeQueueRef.current?.enqueue(task)
   }, [])
 
   const startSession = useCallback(async (
@@ -95,14 +147,7 @@ export function useWorkLog() {
     const dir = await getWorkLogDir(customDir)
     const sessionId = generateSessionId()
     const now = new Date().toISOString()
-    const header: WorkLogHeader = {
-      kind: 'header',
-      schemaVersion: WORK_LOG_SCHEMA_VERSION,
-      sessionId,
-      startedAt: now,
-      video: opts.video,
-      settingsSnapshot: opts.settingsSnapshot,
-    }
+    const header = buildWorkLogHeader(opts, sessionId, now)
     const baseline: WorkLogBaseline = {
       kind: 'baseline',
       at: now,
@@ -190,6 +235,14 @@ export function useWorkLog() {
     return sessionRef.current?.sessionId ?? null
   }, [])
 
+  const flush = useCallback(async (): Promise<WorkLogFlushResult> => {
+    return writeQueueRef.current?.flush() ?? { ok: true }
+  }, [])
+
+  const getLastError = useCallback((): WorkLogWriteError | null => {
+    return writeQueueRef.current?.getLastError() ?? null
+  }, [])
+
   return {
     startSession,
     resumeSession,
@@ -197,5 +250,7 @@ export function useWorkLog() {
     recordEvent,
     getExport,
     getActiveSessionId,
+    flush,
+    getLastError,
   }
 }

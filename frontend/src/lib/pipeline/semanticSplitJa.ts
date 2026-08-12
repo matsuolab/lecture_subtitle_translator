@@ -13,6 +13,8 @@ import { loadLanguageProfileConfig, type LanguageProfileConfig, type LanguageScr
 import { parseJsonObjectFromLlmContent } from './jsonResponse'
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import { llmCallWithMeta } from './llmCallWithMeta'
+import type { CueSourceRef, CueSourceRelation } from '@/types/sourceEvidence'
+import { cloneCueSourceRefs, mergeCueSourceRefs, withCueSourceRelation } from '@/types/sourceEvidence'
 import {
   alignCuesToAsr,
   buildAsrCharStreamWithRanges,
@@ -53,6 +55,16 @@ interface RawSemanticUnit {
   sourceSegmentId: number
   jaText: string
   canMergeWithNext: boolean
+  sourceRefs?: CueSourceRef[]
+}
+
+function sourceRefsForUnit(unit: RawSemanticUnit, relation?: CueSourceRelation): CueSourceRef[] {
+  const refs = cloneCueSourceRefs(unit.sourceRefs) ?? [{
+    sourceSegmentId: unit.sourceSegmentId,
+    semanticUnitId: unit.unitId,
+    relation: 'semantic_unit' as const,
+  }]
+  return relation ? withCueSourceRelation(refs, relation)! : refs
 }
 
 interface AlignedUnit {
@@ -215,6 +227,7 @@ function splitOverlongUnit(unit: RawSemanticUnit, duration: number, maxDuration:
     unitId: `${unit.unitId}_${index + 1}`,
     jaText: group,
     canMergeWithNext: index < groups.length - 1 || unit.canMergeWithNext,
+    sourceRefs: sourceRefsForUnit(unit, 'overlong_split'),
   }))
 }
 
@@ -657,12 +670,14 @@ function buildCoverageSplitCandidate(
     unitId: `${targetUnit.unitId}_c1`,
     jaText: firstText,
     canMergeWithNext: true,
+    sourceRefs: sourceRefsForUnit(targetUnit, 'coverage_split'),
   }
   const secondUnit: RawSemanticUnit = {
     ...targetUnit,
     unitId: `${targetUnit.unitId}_c2`,
     jaText: secondText,
     canMergeWithNext: targetUnit.canMergeWithNext,
+    sourceRefs: sourceRefsForUnit(targetUnit, 'coverage_split'),
   }
   const candidateUnits = [
     ...units.slice(0, targetIndex),
@@ -996,7 +1011,7 @@ function resolveCollapsedUnits(entries: readonly AlignedUnit[]): CollapsedResolu
 
   // 統合先インデックスごとに、末尾へ追加する断片（前へ統合）／先頭へ追加する断片
   // （後ろへ統合）を読み順で集計する。
-  type Piece = { jaText: string; words: WordTimestamp[] }
+  type Piece = { jaText: string; words: WordTimestamp[]; sourceRefs: CueSourceRef[] }
   const suffixByTarget = new Map<number, Piece[]>()
   const prefixByTarget = new Map<number, Piece[]>()
   const survivedWithoutMerge = new Set<number>()
@@ -1022,7 +1037,11 @@ function resolveCollapsedUnits(entries: readonly AlignedUnit[]): CollapsedResolu
     }
 
     collapsedMerged += 1
-    const piece: Piece = { jaText: entries[i].unit.jaText, words: entries[i].words }
+    const piece: Piece = {
+      jaText: entries[i].unit.jaText,
+      words: entries[i].words,
+      sourceRefs: sourceRefsForUnit(entries[i].unit),
+    }
     if (target === prevIdx) {
       suffixByTarget.set(target, [...(suffixByTarget.get(target) ?? []), piece])
     } else {
@@ -1052,9 +1071,18 @@ function resolveCollapsedUnits(entries: readonly AlignedUnit[]): CollapsedResolu
       ...entries[i].words,
       ...suffixPieces.flatMap(piece => piece.words),
     ].sort((a, b) => a.start - b.start)
+    const sourceRefGroups = [
+      ...prefixPieces.map(piece => piece.sourceRefs),
+      sourceRefsForUnit(entries[i].unit),
+      ...suffixPieces.map(piece => piece.sourceRefs),
+    ]
+    let sourceRefs: CueSourceRef[] | undefined
+    for (const group of sourceRefGroups) {
+      sourceRefs = mergeCueSourceRefs(sourceRefs, group, 'collapsed_merge')
+    }
     units.push({
       ...entries[i],
-      unit: { ...entries[i].unit, jaText },
+      unit: { ...entries[i].unit, jaText, sourceRefs },
       words,
     })
   }
@@ -1469,6 +1497,7 @@ function buildJaBlocks(aligned: readonly AlignedUnit[]): JaBlock[] {
       alignConf: item.alignConf,
       words: item.words,
       alignMatchRate: item.matchRate,
+      sourceRefs: sourceRefsForUnit(item.unit),
     })
     nextId += 1
   }

@@ -46,8 +46,12 @@ function makeBlock(id: number, start: number, end: number, jaChars = 1, extra: P
 describe('mergeShort — 既存の結合戦略（非退行）', () => {
   it('通常の短い cue は従来どおり隣と結合される', () => {
     const blocks = [
-      makeBlock(1, 0, 0.5, 1),
-      makeBlock(2, 0.6, 3.0, 10),
+      makeBlock(1, 0, 0.5, 1, {
+        sourceRefs: [{ sourceSegmentId: 100, semanticUnitId: 'u100', relation: 'semantic_unit' }],
+      }),
+      makeBlock(2, 0.6, 3.0, 10, {
+        sourceRefs: [{ sourceSegmentId: 101, semanticUnitId: 'u101', relation: 'coverage_split' }],
+      }),
     ]
 
     const result = mergeShort(blocks, thresholds)
@@ -57,6 +61,10 @@ describe('mergeShort — 既存の結合戦略（非退行）', () => {
     expect(result[0].start).toBe(0)
     expect(result[0].end).toBe(3.0)
     expect(result[0].jaChars).toBe(11)
+    expect(result[0].sourceRefs).toEqual([
+      { sourceSegmentId: 100, semanticUnitId: 'u100', relation: 'cue_merge' },
+      { sourceSegmentId: 101, semanticUnitId: 'u101', relation: 'cue_merge' },
+    ])
   })
 
   it('SHORT_MERGE_MAX_GAP_SEC(0.8秒)を超える無音は跨がず、独立した cue として残す', () => {

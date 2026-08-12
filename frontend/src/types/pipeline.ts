@@ -1,6 +1,7 @@
 import type { SubtitleBlock } from './subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
 import type { AiGatewayProfileSnapshot } from '@/lib/aiGateway/apiCompatibilityProfile'
+import type { SourceSegmentEvidence } from './sourceEvidence'
 
 export type PipelineStep = 'idle' | 'transcribe' | 'correct' | 'translate' | 'subtitle' | 'done'
 
@@ -62,6 +63,15 @@ export interface PipelineReviewProposal {
 
 export type PipelineSemanticCheckOutcome = 'passed' | 'borderline' | 'failed' | 'unavailable'
 
+export interface PipelineSplitTimingDecision {
+  basis: 'asr_constrained' | 'english_weighted_fallback'
+  fallbackReason?: 'no_words' | 'asr_not_exact' | 'constraints_infeasible'
+  matchRates?: number[]
+  boundaryDeltasSec?: number[]
+  spokenRanges?: Array<{ start: number; end: number }>
+  displayRanges: Array<{ start: number; end: number }>
+}
+
 export interface PipelineCorrectionAttemptSummary {
   strategy: string
   changed: boolean
@@ -79,6 +89,8 @@ export interface PipelineCorrectionAttemptSummary {
   semanticSimilarity?: number
   // 判定（threshold との比較）
   semanticOutcome?: PipelineSemanticCheckOutcome
+  /** split_blockの時刻根拠。本文の採否とは独立した監査情報。 */
+  splitTiming?: PipelineSplitTimingDecision
 }
 
 export interface PipelineReviewItem {
@@ -208,6 +220,7 @@ export interface PipelineRunDebug {
   stageSnapshots?: PipelineStageSnapshot[]
   progressEvents: PipelineProgressEvent[]
   transcriptSegments?: TranscriptSegment[]
+  sourceEvidence?: SourceSegmentEvidence[]
   transcriptMetadata?: Record<string, unknown>
   errorInfo?: PipelineErrorInfo
   /**

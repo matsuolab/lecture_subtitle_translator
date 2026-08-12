@@ -11,6 +11,7 @@ import { createLlmUsageSink, setCurrentLlmUsageSink } from '@/lib/pipeline/llmUs
 import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecord, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
+import type { SourceSegmentEvidence } from '@/types/sourceEvidence'
 import {
   getLocalPipelineDebugFailure,
   runLocalPostPipeline,
@@ -125,6 +126,7 @@ export interface PipelineApiRunResult {
   debug?: {
     transcriptSegments?: TranscriptSegment[]
     transcriptMetadata?: Record<string, unknown>
+    sourceEvidence?: SourceSegmentEvidence[]
     traces?: PipelineNodeTrace[]
     stageSnapshots?: PipelineStageSnapshot[]
     mode: 'managed_service' | 'legacy_pipeline'
@@ -583,6 +585,7 @@ async function runLocalTranscriptPipeline(
       transcriptMetadata: result.metadata,
       traces: [...managedTraces, ...(failure.traces ?? [])],
       stageSnapshots: failure.stageSnapshots,
+      sourceEvidence: failure.sourceEvidence,
       mode: 'legacy_pipeline',
     })
   }
@@ -599,6 +602,7 @@ async function runLocalTranscriptPipeline(
       transcriptSegments,
       transcriptMetadata: result.metadata,
       stageSnapshots: localResult.stageSnapshots,
+      sourceEvidence: localResult.sourceEvidence,
       mode: 'legacy_pipeline',
     },
   }
@@ -722,6 +726,7 @@ async function runManagedPipeline(
         transcriptMetadata: result.metadata,
         traces: [...managedTraces, ...(failure.traces ?? [])],
         stageSnapshots: failure.stageSnapshots,
+        sourceEvidence: failure.sourceEvidence,
         mode: 'managed_service',
       })
     }
@@ -737,6 +742,7 @@ async function runManagedPipeline(
         transcriptSegments,
         transcriptMetadata: result.metadata,
         stageSnapshots: localResult.stageSnapshots,
+        sourceEvidence: localResult.sourceEvidence,
         mode: 'managed_service',
       },
     }

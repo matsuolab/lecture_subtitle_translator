@@ -17,6 +17,8 @@ import { tightenTiming } from './tightenTiming'
 import { closeSubtitleGaps, formatCloseSubtitleGapsSummary } from './closeSubtitleGaps'
 import { normalizeEnBlocks, parseTextNormalizationConfig } from './textNormalization'
 import { buildPartialFailureWarning } from './partialFailureSummary'
+import { analyzeInitialTranslations } from './initialTranslationDiagnostics'
+import { analyzeSplitEvenlyCandidates } from './splitEvenlyDiagnostics'
 
 // summarize は任意。localPipeline.ts の runNode が「成功時のtrace summary」を
 // 結果から抽出するために使う（phase1.ts の RunNode と同じ形。closeSubtitleGaps の
@@ -40,6 +42,8 @@ export async function runPhase2(
   options: Phase2Options = {},
 ): Promise<EnBlock[]> {
   let blocks = await runNode('translateEn', () => translateEn(jaBlocks, settings, glossaryTerms))
+  // 初訳の本文は変えず、決定的差分と source 側risk signalだけをstage snapshotへ記録する。
+  await runNode('initialTranslationDiagnostics', () => analyzeInitialTranslations(blocks, glossaryTerms))
   // 部分失敗の誤報防止: correctJa と同じ仕組み（phase1.ts / partialFailureSummary.ts 参照）で、
   // translateEn が例外を投げずに大量失敗しても trace に件数が残るようにする。
   {
@@ -128,6 +132,8 @@ export async function runPhase2(
     const reliefResult = await runNode('cpsReliefRebalance', () => cpsReliefRebalance(blocks, thresholds))
     blocks = reliefResult.blocks
   }
+  // 旧 split_evenly が作っていた候補は自動適用せず、仮想候補として観測だけを残す。
+  await runNode('splitEvenlyDiagnostics', () => analyzeSplitEvenlyCandidates(blocks, thresholds))
 
   // sourceTextLexicalOverlap: 原文 JA と、時間が重なるブロックの JA との文字レベル重なり率を
   // 観測する（決定的・LCSベース）。correctedSegments が渡された場合のみ動作。

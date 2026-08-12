@@ -160,6 +160,59 @@ describe('splitBlockTool.canApply', () => {
 })
 
 describe('splitBlockTool.execute', () => {
+  it('WhisperXとの一致が高いとき、本文を変えずに子cueを発話境界へ寄せ、wordsを分離する', async () => {
+    const thresholds = makeThresholds()
+    const leftJa = 'これは前半の詳しい説明です。'
+    const rightJa = 'これは後半の詳しい説明です。'
+    const jaText = `${leftJa}${rightJa}`
+    const normalizedChars = Array.from(jaText.replace(/[。\s]/g, ''))
+    const words = normalizedChars.map((word, index) => ({
+      word,
+      start: index * 0.5,
+      end: (index + 1) * 0.5,
+      score: 1,
+    }))
+    const spokenBoundary = leftJa.replace(/[。\s]/g, '').length * 0.5
+    const sourceRefs = [{ sourceSegmentId: 7, semanticUnitId: 'original-unit', relation: 'semantic_unit' as const }]
+    const block = makeBlock({
+      jaText,
+      start: 0,
+      end: normalizedChars.length * 0.5,
+      words,
+      sourceRefs,
+      violation: 'long_segment',
+    })
+
+    llmCallWithMetaMock.mockResolvedValueOnce(llmSuccess(JSON.stringify({
+      units: [{ text: leftJa }, { text: rightJa }],
+    })))
+    checkSeamOnlySplitMock.mockReturnValueOnce(seamOk)
+    callSubtitleLlmMock
+      .mockResolvedValueOnce(translationSuccess('This is a detailed explanation of the first part for the audience.'))
+      .mockResolvedValueOnce(translationSuccess('This explains the second part.'))
+
+    const patch = await splitBlockTool.execute(block, makeCtx(block, thresholds), settings, thresholds)
+
+    expect(patch.changed).toBe(true)
+    expect(patch.replaceBlocks.map(child => child.jaText)).toEqual([leftJa, rightJa])
+    expect(patch.replaceBlocks.map(child => child.enText)).toEqual([
+      'This is a detailed explanation of the first part for the audience.',
+      'This explains the second part.',
+    ])
+    expect(patch.replaceBlocks[0].end).toBeCloseTo(spokenBoundary - 0.08, 3)
+    expect(patch.replaceBlocks[1].start).toBeCloseTo(spokenBoundary, 3)
+    expect(patch.replaceBlocks[0].words?.at(-1)?.end).toBeCloseTo(spokenBoundary, 3)
+    expect(patch.replaceBlocks[1].words?.[0]?.start).toBeCloseTo(spokenBoundary, 3)
+    expect(patch.replaceBlocks[0].words).not.toEqual(block.words)
+    expect(patch.replaceBlocks[1].words).not.toEqual(block.words)
+    expect(patch.replaceBlocks.every(child => child.sourceRefs === sourceRefs)).toBe(false)
+    expect(patch.replaceBlocks.map(child => child.sourceRefs)).toEqual([
+      [{ ...sourceRefs[0], relation: 'correction_split' }],
+      [{ ...sourceRefs[0], relation: 'correction_split' }],
+    ])
+    expect(patch.splitTiming).toEqual(expect.objectContaining({ basis: 'asr_constrained' }))
+  })
+
   it('入力が助詞で終わるブロックを分割したとき、最後のユニットが助詞で終わっていても採用される', async () => {
     const thresholds = makeThresholds()
     const jaText = 'この機能はとても便利で、多くのユーザーに使われているので'

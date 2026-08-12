@@ -1,5 +1,6 @@
 import type { WordTimestamp } from './types'
 import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
+import type { CueSourceRef } from '@/types/sourceEvidence'
 
 export type AlignConf = 'exact' | 'proportional' | 'no_words' | 'merged'
 
@@ -34,6 +35,8 @@ export interface JaBlock {
    */
   alignMatchRate?: number
   words?: WordTimestamp[]
+  /** Lightweight pointers into PipelineRunDebug.sourceEvidence. */
+  sourceRefs?: CueSourceRef[]
   merged?: boolean
   /**
    * 意味・翻訳の文脈単位。表示 cue と同一視しない。

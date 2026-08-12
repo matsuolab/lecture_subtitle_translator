@@ -2,6 +2,7 @@ import type { SubtitleBlock } from '@/types/subtitle'
 import type { EnBlock } from './blockTypes'
 import type { PipelineReviewItem } from '@/types/pipeline'
 import { summarizeFormViolationBadge } from './reviewDiagnostics'
+import { cloneCueSourceRefs } from '@/types/sourceEvidence'
 
 export function toSubtitleBlocks(
   blocks: EnBlock[],
@@ -24,6 +25,7 @@ export function toSubtitleBlocks(
         charCount: block.enChars,
         status: needsManualStop ? 'flagged' as const : 'pending' as const,
         glossaryTerms: [],
+        ...(block.sourceRefs ? { sourceRefs: cloneCueSourceRefs(block.sourceRefs) } : {}),
         reviewSummary: badge?.summary,
         reviewAction: badge?.action,
         reviewPriority: badge?.priority ?? 'auto_pass',

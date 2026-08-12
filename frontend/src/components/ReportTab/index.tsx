@@ -70,6 +70,24 @@ function formatDurationMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`
 }
 
+function snapshotSummary(
+  run: PipelineRunResult | undefined,
+  stage: string,
+): Record<string, unknown> | undefined {
+  return run?.debug?.stageSnapshots
+    ?.find(snapshot => snapshot.stage === stage)
+    ?.items.find(item => item._kind === 'summary')
+}
+
+function snapshotObservations(
+  run: PipelineRunResult | undefined,
+  stage: string,
+): Record<string, unknown>[] {
+  return run?.debug?.stageSnapshots
+    ?.find(snapshot => snapshot.stage === stage)
+    ?.items.filter(item => item._kind === 'observation') ?? []
+}
+
 export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, onSaveProjectJson, maxCharsPerLine }: ReportTabProps) {
   const { theme } = useTheme()
   const { strings: t } = useLocale()
@@ -96,6 +114,13 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, o
       })
       .slice(0, 8)
     : []
+  const initialRiskSummary = snapshotSummary(latestRunWithLogs, 'initialTranslationDiagnostics')
+  const initialRiskObservations = snapshotObservations(latestRunWithLogs, 'initialTranslationDiagnostics')
+  const splitEvenlySummary = snapshotSummary(latestRunWithLogs, 'splitEvenlyDiagnostics')
+  const splitEvenlyObservations = snapshotObservations(latestRunWithLogs, 'splitEvenlyDiagnostics')
+  const riskBandCounts = initialRiskSummary?.riskBandCounts && typeof initialRiskSummary.riskBandCounts === 'object'
+    ? initialRiskSummary.riskBandCounts as Record<string, number>
+    : undefined
 
   const statusLabel = (status: PipelineRunResult['status']) => {
     if (status === 'success') return t.reportStatusSuccess
@@ -253,6 +278,67 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, o
               {latestRunWithLogs.runId && <span>job_id: {latestRunWithLogs.runId}</span>}
               {latestRunWithLogs.finishedAt && <span>完了: {formatFinishedAt(latestRunWithLogs.finishedAt)}</span>}
             </div>
+
+            {(initialRiskSummary || splitEvenlySummary || latestRunWithLogs.debug?.sourceEvidence) && (
+              <div style={{
+                display: 'grid',
+                gap: 6,
+                border: `1px solid ${theme.panelBorder}`,
+                borderRadius: 6,
+                padding: '7px 8px',
+                background: theme.panelBg,
+                color: theme.textSecondary,
+              }}>
+                <div style={{ color: theme.textPrimary, fontWeight: 700 }}>非破壊の観測診断</div>
+                <div style={{ color: theme.textMuted }}>
+                  ここに出る値は自動修復や合否判定には使っていません。人が確認する箇所を絞るための観測値です。
+                </div>
+                {latestRunWithLogs.debug?.sourceEvidence && (
+                  <div>発話根拠カタログ: {latestRunWithLogs.debug.sourceEvidence.length}セグメント</div>
+                )}
+                {initialRiskSummary && (
+                  <details open={(riskBandCounts?.high ?? 0) > 0}>
+                    <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontWeight: 700 }}>
+                      初回翻訳risk — high {riskBandCounts?.high ?? 0} / medium {riskBandCounts?.medium ?? 0}
+                    </summary>
+                    <div style={{ display: 'grid', gap: 4, marginTop: 6 }}>
+                      {initialRiskObservations.length === 0 ? (
+                        <div style={{ color: theme.textMuted }}>観測されたriskはありません。</div>
+                      ) : initialRiskObservations.slice(0, 20).map((observation, index) => {
+                        const differences = Array.isArray(observation.differences) ? observation.differences : []
+                        const signals = Array.isArray(observation.sourceRiskSignals) ? observation.sourceRiskSignals : []
+                        return (
+                          <div key={`${String(observation.blockId)}-${index}`}>
+                            Block {String(observation.blockId)}: {String(observation.riskBand)}
+                            {differences.length > 0 ? ` / 決定的差分 ${differences.length}件` : ''}
+                            {signals.length > 0 ? ` / source signal ${signals.join(', ')}` : ''}
+                          </div>
+                        )
+                      })}
+                      {initialRiskObservations.length > 20 && <div>ほか {initialRiskObservations.length - 20}件</div>}
+                    </div>
+                  </details>
+                )}
+                {splitEvenlySummary && (
+                  <details>
+                    <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontWeight: 700 }}>
+                      旧split-evenly仮想候補 — {Number(splitEvenlySummary.candidateCount ?? 0)}件（未適用）
+                    </summary>
+                    <div style={{ display: 'grid', gap: 4, marginTop: 6 }}>
+                      {splitEvenlyObservations.length === 0 ? (
+                        <div style={{ color: theme.textMuted }}>候補はありません。</div>
+                      ) : splitEvenlyObservations.slice(0, 20).map((observation, index) => (
+                        <div key={`${String(observation.leftId)}-${String(observation.rightId)}-${index}`}>
+                          Block {String(observation.leftId)} + {String(observation.rightId)}
+                          {' / '}境界移動 {Number(observation.boundaryShiftSec ?? 0).toFixed(3)}s
+                        </div>
+                      ))}
+                      {splitEvenlyObservations.length > 20 && <div>ほか {splitEvenlyObservations.length - 20}件</div>}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
 
             <details>
               <summary style={{ cursor: 'pointer', color: theme.textPrimary, fontWeight: 700 }}>

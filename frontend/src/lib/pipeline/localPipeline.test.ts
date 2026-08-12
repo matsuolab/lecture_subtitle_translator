@@ -51,4 +51,47 @@ describe('normalizeSnapshotItems', () => {
       completionTokens: 0,
     })
   })
+
+  it('preserves cue source references in block snapshots', () => {
+    const [item] = normalizeSnapshotItems([{
+      id: 1,
+      jaText: '入力',
+      sourceRefs: [{ sourceSegmentId: 9, semanticUnitId: 'u9', relation: 'semantic_unit' }],
+    }])
+
+    expect(item.sourceRefs).toEqual([
+      { sourceSegmentId: 9, semanticUnitId: 'u9', relation: 'semantic_unit' },
+    ])
+  })
+
+  it('preserves split timing evidence in correction attempt snapshots', () => {
+    const [item] = normalizeSnapshotItems([{
+      id: 2,
+      jaText: '分割後の入力',
+      correctionAttempts: [{
+        strategy: 'split_block',
+        changed: true,
+        beforeChars: 80,
+        afterChars: 75,
+        beforeViolation: 'long_segment',
+        afterViolation: 'ok',
+        splitTiming: {
+          basis: 'asr_constrained',
+          matchRates: [0.95, 0.9],
+          boundaryDeltasSec: [0.08],
+        },
+      }],
+    }])
+
+    expect(item.correctionAttempts).toEqual([
+      expect.objectContaining({
+        strategy: 'split_block',
+        splitTiming: {
+          basis: 'asr_constrained',
+          matchRates: [0.95, 0.9],
+          boundaryDeltasSec: [0.08],
+        },
+      }),
+    ])
+  })
 })

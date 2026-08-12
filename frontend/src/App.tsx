@@ -18,9 +18,10 @@ import {
   loadSessionSnapshotFromLocalStorage,
   saveSessionSnapshotToLocalStorage,
   exportProjectJson,
-  importProjectJson,
+  importProjectDocument,
   importSrt,
   exportSrt,
+  reconcileRestoredPipelineRun,
   type SessionExportData,
   type SrtExportFormat,
 } from '@/api/persistence'
@@ -40,12 +41,14 @@ import { useLocale } from '@/context/LocaleContext'
 import { useGlossary, type GlossaryEntry, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
 import { useToast } from '@/context/ToastContext'
 import { useWorkLog } from '@/hooks/useWorkLog'
-import type { WorkLogBaselineOrigin } from '@/lib/worklog/types'
+import type { WorkLogBaselineOrigin, WorkLogExport } from '@/lib/worklog/types'
 import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
 import { buildAiGatewayProfileSnapshot } from '@/lib/aiGateway/apiCompatibilityProfile'
+import { materializeProjectDocument, mergeImportedAdminSettings } from '@/lib/projectSession'
+import type { SourceSegmentEvidence } from '@/types/sourceEvidence'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
-type SaveStatus = 'saved' | 'saving'
+type SaveStatus = 'saved' | 'saving' | 'error'
 type VideoSource = { name: string; path?: string; file?: File }
 type PendingVideoLoad = { name: string; load: () => void }
 const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi']
@@ -93,9 +96,20 @@ function cloneBlocks(blocks: SubtitleBlock[]): SubtitleBlock[] {
     ignoredTypos: block.ignoredTypos ? [...block.ignoredTypos] : undefined,
     ignoredMissing: block.ignoredMissing ? [...block.ignoredMissing] : undefined,
     contextGroupSourceIds: block.contextGroupSourceIds ? [...block.contextGroupSourceIds] : undefined,
+    sourceRefs: block.sourceRefs?.map((ref) => ({ ...ref })),
     correctionAttempts: block.correctionAttempts ? block.correctionAttempts.map((attempt) => ({ ...attempt })) : undefined,
     editHistory: block.editHistory ? block.editHistory.map((entry) => ({ ...entry })) : undefined,
   }))
+}
+
+function mergeWorkLogLineage(
+  imported: readonly WorkLogExport[],
+  current: WorkLogExport | null,
+): WorkLogExport[] {
+  const bySessionId = new Map<string, WorkLogExport>()
+  for (const log of imported) bySessionId.set(log.header.sessionId, log)
+  if (current) bySessionId.set(current.header.sessionId, current)
+  return [...bySessionId.values()]
 }
 
 function buildPathFlags(path: string) {
@@ -401,6 +415,7 @@ function getPipelineClientDebug(error: unknown): {
   transcriptMetadata?: Record<string, unknown>
   traces?: PipelineNodeTrace[]
   stageSnapshots?: PipelineRunDebug['stageSnapshots']
+  sourceEvidence?: SourceSegmentEvidence[]
   llmErrors?: PipelineLlmErrorRecord[]
   llmUsage?: PipelineLlmUsageRecord[]
 } {
@@ -415,6 +430,7 @@ function getPipelineClientDebug(error: unknown): {
       : undefined,
     traces: Array.isArray(row.traces) ? row.traces as PipelineNodeTrace[] : undefined,
     stageSnapshots: Array.isArray(row.stageSnapshots) ? row.stageSnapshots as PipelineRunDebug['stageSnapshots'] : undefined,
+    sourceEvidence: Array.isArray(row.sourceEvidence) ? row.sourceEvidence as SourceSegmentEvidence[] : undefined,
     llmErrors: Array.isArray(row.llmErrors) ? row.llmErrors as PipelineLlmErrorRecord[] : undefined,
     llmUsage: Array.isArray(row.llmUsage) ? row.llmUsage as PipelineLlmUsageRecord[] : undefined,
   }
@@ -481,7 +497,7 @@ export default function App() {
   const { strings: t } = useLocale()
   const toast = useToast()
   const { glossary, selfMadeGlossary, importEntries } = useGlossary()
-  const restoredSession = loadSessionSnapshotFromLocalStorage()
+  const restoredSession = useMemo(() => loadSessionSnapshotFromLocalStorage(), [])
   const restored = restoredSession?.blocks ?? loadFromLocalStorage()
   const { current: blocks, push, undo, redo, canUndo, canRedo, reset } =
     useHistory<SubtitleBlock[]>(restored ?? [])
@@ -547,11 +563,18 @@ export default function App() {
   })
   const [glossaryGenerationLog, setGlossaryGenerationLog] = useState<string[]>([])
   const [glossaryGenerationBusy, setGlossaryGenerationBusy] = useState(false)
-  const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => loadAdminSettings())
+  const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => (
+    mergeImportedAdminSettings(loadAdminSettings(), restoredSession?.session?.adminSettings)
+  ))
   const latestPipelineDebugRef = useRef<PipelineRunDebug | undefined>(
     restoredSession?.session?.pipelineRun?.debug,
   )
   const workLog = useWorkLog()
+  const [importedWorkLogs, setImportedWorkLogs] = useState<WorkLogExport[]>([])
+  const [projectExtensions, setProjectExtensions] = useState<{
+    document?: Record<string, unknown>
+    session?: Record<string, unknown>
+  }>({})
   const {
     recordEvent: recordWorkLogEvent,
     getActiveSessionId: getWorkLogSessionId,
@@ -968,23 +991,29 @@ export default function App() {
       videoSource?: VideoSource | null
     } = {},
   ) => {
-    saveSessionSnapshotToLocalStorage({
+    const snapshotVideoSource = Object.prototype.hasOwnProperty.call(next, 'videoSource')
+      ? next.videoSource
+      : videoSource
+    const result = saveSessionSnapshotToLocalStorage({
       version: 2,
       savedAt: new Date().toISOString(),
       blocks: cloneBlocks(next.blocks ?? blocks),
       session: {
-        videoSource: (next.videoSource ?? videoSource)
+        videoSource: snapshotVideoSource
           ? {
-              name: (next.videoSource ?? videoSource)!.name,
-              path: (next.videoSource ?? videoSource)!.path,
+              name: snapshotVideoSource.name,
+              path: snapshotVideoSource.path,
             }
           : null,
         adminSettings: sanitizeAdminSettings(adminSettings),
         pipelineRun: next.pipelineRun ?? toUiSafePipelineRun(pipelineRun),
         pipelineHistory: next.pipelineHistory ?? pipelineHistory,
+        activeWorkLogSessionId: getWorkLogSessionId() ?? undefined,
       },
     })
-  }, [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource])
+    setSaveStatus(result.ok ? 'saved' : 'error')
+    return result
+  }, [adminSettings, blocks, getWorkLogSessionId, pipelineHistory, pipelineRun, videoSource])
 
   /** ワークログへ記録済みの editHistory エントリを「既知」として登録（再記録防止） */
   const seedWorkLogSeen = useCallback((source: SubtitleBlock[]) => {
@@ -998,21 +1027,112 @@ export default function App() {
   }, [])
 
   /** 編集対象（ブロック集合）が確定したのでワークログの新セッションを開始する */
-  const beginWorkLogSession = useCallback((
+  const beginWorkLogSession = useCallback(async (
     origin: WorkLogBaselineOrigin,
     initialBlocks: SubtitleBlock[],
-    opts?: { transcriptSegments?: TranscriptSegment[]; video?: VideoSource | null },
+    opts?: {
+      transcriptSegments?: TranscriptSegment[]
+      video?: VideoSource | null
+      parentSessionId?: string
+      settings?: AdminSettings
+    },
   ) => {
     seedWorkLogSeen(initialBlocks)
     const video = opts && 'video' in opts ? opts.video : videoSource
-    void workLog.startSession({
+    const settings = opts?.settings ?? adminSettings
+    return workLog.startSession({
       origin,
       video: video ? { name: video.name, path: video.path } : null,
-      settingsSnapshot: sanitizeAdminSettings(adminSettings),
+      settingsSnapshot: sanitizeAdminSettings(settings),
       initialBlocks: cloneBlocks(initialBlocks),
       transcriptSegments: opts?.transcriptSegments,
-    }, adminSettings.workLogDir)
+      parentSessionId: opts?.parentSessionId,
+    }, settings.workLogDir)
   }, [adminSettings, videoSource, workLog, seedWorkLogSeen])
+
+  /**
+   * 3つのJSON入力経路が共有するProject Session hydration。
+   * decodeが完了するまでは現在の画面を一切変更せず、成功時だけ同じhandlerで全状態を置換する。
+   */
+  const importProjectFile = useCallback(async (file: File): Promise<boolean> => {
+    const decoded = await importProjectDocument(file)
+    if (decoded.status === 'unsupported_newer') {
+      toast.error('projectVersionTooNew', {
+        found: decoded.foundVersion,
+        supported: decoded.supportedVersion,
+      })
+      return false
+    }
+    if (decoded.status === 'invalid') {
+      toast.error('projectImportError', { error: decoded.error })
+      return false
+    }
+
+    const imported = materializeProjectDocument(decoded.document)
+    const importedBlocks = cloneBlocks(imported.blocks)
+    const importedVideo = imported.videoSource
+      ? { name: imported.videoSource.name, path: imported.videoSource.path }
+      : null
+    const importedSettings = mergeImportedAdminSettings(adminSettings, imported.adminSettings)
+    const importedRun = reconcileRestoredPipelineRun(imported.pipelineRun) ?? {
+      status: 'idle' as const,
+      step: 'idle' as const,
+      message: 'レポートタブからパイプラインを開始できます',
+    }
+    const importedHistory = imported.pipelineHistory ?? []
+    const importedLogs = imported.workLogs ?? []
+    const parentSessionId = imported.activeWorkLogSessionId
+      ?? importedLogs.at(-1)?.header.sessionId
+
+    reset(importedBlocks)
+    setAdminSettings(importedSettings)
+    saveAdminSettings(importedSettings)
+    setPipelineRun(importedRun)
+    setPipelineHistory(importedHistory)
+    latestPipelineDebugRef.current = importedRun.debug
+    setImportedWorkLogs(importedLogs)
+    setProjectExtensions({
+      document: imported.extensions,
+      session: imported.sessionExtensions,
+    })
+    setVideoDiagnostic(null)
+    setVideoUrl((previous) => {
+      if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous)
+      return null
+    })
+    if (importedVideo?.path && isTauri()) {
+      void loadVideoPath(importedVideo.path)
+    } else {
+      setVideoSource(importedVideo)
+    }
+
+    let activeWorkLogSessionId = parentSessionId
+    try {
+      activeWorkLogSessionId = await beginWorkLogSession('json_import', importedBlocks, {
+        video: importedVideo,
+        parentSessionId,
+        settings: importedSettings,
+      })
+    } catch (error) {
+      toast.info('workLogWriteWarning', { error: describeError(error) })
+    }
+
+    const recoveryResult = saveSessionSnapshotToLocalStorage({
+      version: 3,
+      savedAt: new Date().toISOString(),
+      blocks: importedBlocks,
+      session: {
+        videoSource: importedVideo,
+        adminSettings: sanitizeAdminSettings(importedSettings),
+        pipelineRun: importedRun,
+        pipelineHistory: importedHistory,
+        activeWorkLogSessionId,
+      },
+    })
+    setSaveStatus(recoveryResult.ok ? 'saved' : 'error')
+    toast.success('importProjectJson')
+    return true
+  }, [adminSettings, beginWorkLogSession, loadVideoPath, reset, toast])
 
   const runDropPipeline = useCallback(async (source: VideoSource) => {
     const sourceName = source.name
@@ -1024,6 +1144,7 @@ export default function App() {
     let transcriptSegments: TranscriptSegment[] | undefined = undefined
     let transcriptMetadata: Record<string, unknown> | undefined = undefined
     let stageSnapshots: PipelineRunDebug['stageSnapshots'] | undefined = undefined
+    let sourceEvidence: SourceSegmentEvidence[] | undefined = undefined
     let llmErrors: PipelineLlmErrorRecord[] | undefined = undefined
     let llmUsage: PipelineLlmUsageRecord[] | undefined = undefined
 
@@ -1154,12 +1275,13 @@ export default function App() {
         transcriptSegments = apiResult.debug?.transcriptSegments
         transcriptMetadata = apiResult.debug?.transcriptMetadata
         stageSnapshots = apiResult.debug?.stageSnapshots
+        sourceEvidence = apiResult.debug?.sourceEvidence
         llmErrors = apiResult.debug?.llmErrors
         llmUsage = apiResult.debug?.llmUsage
       }
 
       reset(generated)
-      beginWorkLogSession('transcription', generated, { transcriptSegments, video: source })
+      void beginWorkLogSession('transcription', generated, { transcriptSegments, video: source })
 
       const finishedAt = Date.now()
       const metrics = calcPipelineMetrics(generated, startedAt, finishedAt)
@@ -1185,6 +1307,7 @@ export default function App() {
           finalBlocks: cloneBlocks(generated),
           progressEvents,
           stageSnapshots,
+          sourceEvidence,
           transcriptSegments,
           transcriptMetadata,
           llmErrors,
@@ -1229,6 +1352,7 @@ export default function App() {
       transcriptSegments = transcriptSegments ?? pipelineDebug.transcriptSegments
       transcriptMetadata = transcriptMetadata ?? pipelineDebug.transcriptMetadata
       stageSnapshots = stageSnapshots ?? pipelineDebug.stageSnapshots
+      sourceEvidence = sourceEvidence ?? pipelineDebug.sourceEvidence
       llmErrors = llmErrors ?? pipelineDebug.llmErrors
       llmUsage = llmUsage ?? pipelineDebug.llmUsage
       progressEvents.push({
@@ -1275,6 +1399,7 @@ export default function App() {
           finalBlocks: cloneBlocks(blocks),
           progressEvents,
           stageSnapshots,
+          sourceEvidence,
           transcriptSegments,
           transcriptMetadata,
           llmErrors,
@@ -1299,6 +1424,7 @@ export default function App() {
     version: 2,
     savedAt: new Date().toISOString(),
     blocks: cloneBlocks(blocks),
+    extensions: projectExtensions.document,
     session: {
       videoSource: videoSource
         ? {
@@ -1315,8 +1441,11 @@ export default function App() {
         : pipelineRun,
       pipelineHistory,
       workLog: getWorkLogExport() ?? undefined,
+      workLogs: mergeWorkLogLineage(importedWorkLogs, getWorkLogExport()),
+      activeWorkLogSessionId: getWorkLogSessionId() ?? undefined,
+      extensions: projectExtensions.session,
     },
-  }), [adminSettings, blocks, pipelineHistory, pipelineRun, videoSource, getWorkLogExport])
+  }), [adminSettings, blocks, getWorkLogExport, getWorkLogSessionId, importedWorkLogs, pipelineHistory, pipelineRun, projectExtensions, videoSource])
 
   // ── 字幕スペル校正（docs/adr/0003-subtitle-spellcheck.md） ──────────────
   const glossaryEnTerms = useMemo(
@@ -1364,10 +1493,19 @@ export default function App() {
     }
   }, [])
 
-  const handleExportProjectJson = useCallback(() => {
-    exportProjectJson(buildSessionExport())
-    toast.success('saveProjectJson')
-  }, [buildSessionExport, toast])
+  const handleExportProjectJson = useCallback(async () => {
+    const flushResult = await workLog.flush()
+    if (!flushResult.ok) {
+      // Project JSONにはメモリ上のWorkLogを含められるので、外部jsonlの失敗だけで報告手段を塞がない。
+      toast.info('workLogWriteWarning', { error: flushResult.error.message })
+    }
+    try {
+      exportProjectJson(buildSessionExport())
+      toast.success('saveProjectJson')
+    } catch (error) {
+      toast.error('projectExportError', { error: describeError(error) })
+    }
+  }, [buildSessionExport, toast, workLog])
 
   const confirmAndLoadVideo = useCallback((name: string, doLoad: () => void) => {
     if (blocks.length > 0) {
@@ -1441,18 +1579,14 @@ export default function App() {
       try {
         const imported = await importSrt(file)
         reset(imported)
-        beginWorkLogSession('srt_import', imported)
+        setImportedWorkLogs([])
+        setProjectExtensions({})
+        void beginWorkLogSession('srt_import', imported)
       } catch {
         alert(t.importSrtError)
       }
     } else if (name.endsWith('.json')) {
-      try {
-        const imported = await importProjectJson(file)
-        reset(imported)
-        beginWorkLogSession('json_import', imported)
-      } catch {
-        alert(t.importError)
-      }
+      await importProjectFile(file)
     } else if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
       // 用語辞書タブへ自動切り替えしてインポート
       setActiveTab('dictionary')
@@ -1472,7 +1606,7 @@ export default function App() {
     } else {
       alert(`非対応のファイル形式です: ${file.name}\n対応形式: .srt, .txt, .json, .csv, .xlsx`)
     }
-  }, [reset, beginWorkLogSession, t.importSrtError, t.importError, importEntries])
+  }, [reset, beginWorkLogSession, t.importSrtError, importEntries, importProjectFile])
 
   // Tauri: ネイティブDrag&Dropのフォールバック（WindowsビルドでHTML5 D&Dが効かない対策）
   //
@@ -1492,13 +1626,13 @@ export default function App() {
       if (name.endsWith('.srt') || name.endsWith('.txt')) {
         const imported = await importSrt(await readTextFileAsFile(path))
         reset(imported)
-        beginWorkLogSession('srt_import', imported)
+        setImportedWorkLogs([])
+        setProjectExtensions({})
+        void beginWorkLogSession('srt_import', imported)
         return
       }
       if (name.endsWith('.json')) {
-        const imported = await importProjectJson(await readTextFileAsFile(path))
-        reset(imported)
-        beginWorkLogSession('json_import', imported)
+        await importProjectFile(await readTextFileAsFile(path))
         return
       }
       if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
@@ -1600,8 +1734,8 @@ export default function App() {
   useEffect(() => {
     setSaveStatus('saving')
     const timerId = setTimeout(() => {
-      saveToLocalStorage(blocks)
-      setSaveStatus('saved')
+      const result = saveToLocalStorage(blocks)
+      setSaveStatus(result.ok ? 'saved' : 'error')
     }, 1000)
     return () => clearTimeout(timerId)
   }, [blocks])
@@ -1682,15 +1816,9 @@ export default function App() {
   const handleImportJson = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-    try {
-      const imported = await importProjectJson(file)
-      reset(imported)
-      beginWorkLogSession('json_import', imported)
-    } catch {
-      alert(t.importError)
-    }
+    await importProjectFile(file)
     e.target.value = ''
-  }, [reset, beginWorkLogSession, t.importError])
+  }, [importProjectFile])
 
   const handleImportSrt = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -1698,7 +1826,9 @@ export default function App() {
     try {
       const imported = await importSrt(file)
       reset(imported)
-      beginWorkLogSession('srt_import', imported)
+      setImportedWorkLogs([])
+      setProjectExtensions({})
+      void beginWorkLogSession('srt_import', imported)
     } catch {
       alert(t.importSrtError)
     }
@@ -2382,8 +2512,8 @@ export default function App() {
                 style={{ fontSize: 13, padding: '2px 6px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, color: canUndo ? theme.textSecondary : theme.textDisabled, cursor: canUndo ? 'pointer' : 'not-allowed', lineHeight: 1 }}>↩</button>
               <button onClick={redo} disabled={!canRedo} title="やり直し (Ctrl+Shift+Z)"
                 style={{ fontSize: 13, padding: '2px 6px', borderRadius: 5, border: `1px solid ${theme.panelBorder}`, background: theme.btnBg, color: canRedo ? theme.textSecondary : theme.textDisabled, cursor: canRedo ? 'pointer' : 'not-allowed', lineHeight: 1 }}>↪</button>
-              <span style={{ fontSize: 10, color: saveStatus === 'saving' ? theme.savingColor : theme.savedColor, transition: 'color 0.3s', whiteSpace: 'nowrap', padding: '0 4px' }}>
-                {saveStatus === 'saving' ? t.saving : t.saved}
+              <span style={{ fontSize: 10, color: saveStatus === 'saving' ? theme.savingColor : saveStatus === 'error' ? '#ef4444' : theme.savedColor, transition: 'color 0.3s', whiteSpace: 'nowrap', padding: '0 4px' }}>
+                {saveStatus === 'saving' ? t.saving : saveStatus === 'error' ? t.saveFailed : t.saved}
               </span>
               <button onClick={() => setActiveTab('settings')} title="設定"
                 style={{ padding: '8px 10px', background: 'none', border: 'none', borderBottom: `2px solid ${activeTab === 'settings' ? theme.accent : 'transparent'}`, color: activeTab === 'settings' ? theme.accent : theme.textSecondary, cursor: 'pointer', marginBottom: -1, display: 'flex', alignItems: 'center' }}>

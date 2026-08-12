@@ -8,6 +8,11 @@ export interface LocaleStrings {
   toast: {
     exportSrt: ToastMessage
     saveProjectJson: ToastMessage
+    importProjectJson: ToastMessage
+    projectImportError: ToastMessage
+    projectVersionTooNew: ToastMessage
+    projectExportError: ToastMessage
+    workLogWriteWarning: ToastMessage
     exportCsv: ToastMessage
     exportJson: ToastMessage
     exportAdminSettings: ToastMessage
@@ -35,6 +40,7 @@ export interface LocaleStrings {
   tabReport: string
   saving: string
   saved: string
+  saveFailed: string
   loadProject: string
   saveProject: string
   exportSrt: string

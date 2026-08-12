@@ -1,4 +1,5 @@
 import type { JaBlock, PipelineThresholds } from './blockTypes'
+import { mergeCueSourceRefs } from '@/types/sourceEvidence'
 
 /**
  * 短い cue を隣接 cue と結合する際に「無音吸収して良い」最大 gap（秒）。
@@ -39,6 +40,7 @@ function mergePair(left: JaBlock, right: JaBlock): JaBlock {
     ]),
   ]
   const jaText = `${left.jaText} ${right.jaText}`.trim()
+  const sourceRefs = mergeCueSourceRefs(left.sourceRefs, right.sourceRefs)
   return {
     id: left.id,
     start: left.start,
@@ -48,6 +50,7 @@ function mergePair(left: JaBlock, right: JaBlock): JaBlock {
     alignConf: 'merged',
     words: [...(left.words ?? []), ...(right.words ?? [])],
     merged: true,
+    ...(sourceRefs ? { sourceRefs } : {}),
     contextGroupId: sameContextGroup
       ? left.contextGroupId
       : `cg-short-${contextGroupSourceIds.join('-')}`,

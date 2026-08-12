@@ -34,6 +34,8 @@ const mocks = vi.hoisted(() => ({
   formatCloseSubtitleGapsSummary: vi.fn(() => undefined),
   normalizeEnBlocks: vi.fn((blocks: unknown) => blocks),
   parseTextNormalizationConfig: vi.fn(() => ({})),
+  analyzeInitialTranslations: vi.fn(),
+  analyzeSplitEvenlyCandidates: vi.fn(),
 }))
 
 vi.mock('./translateEn', () => ({ translateEn: mocks.translateEn }))
@@ -64,6 +66,12 @@ vi.mock('./textNormalization', async (importOriginal) => {
     parseTextNormalizationConfig: mocks.parseTextNormalizationConfig,
   }
 })
+vi.mock('./initialTranslationDiagnostics', () => ({
+  analyzeInitialTranslations: mocks.analyzeInitialTranslations,
+}))
+vi.mock('./splitEvenlyDiagnostics', () => ({
+  analyzeSplitEvenlyCandidates: mocks.analyzeSplitEvenlyCandidates,
+}))
 
 // vi.mock はホイストされるため、モック対象を import する側は必ずこの後に置く。
 const { runPhase2 } = await import('./phase2')
@@ -137,6 +145,8 @@ beforeEach(() => {
   mocks.closeSubtitleGaps.mockImplementation((blocks: unknown) => ({ blocks, closedCount: 0 }))
   mocks.runGeneralRepairAgent.mockImplementation((blocks: unknown) => Promise.resolve({ blocks }))
   mocks.measureSourceTextLexicalOverlap.mockReturnValue({ observations: [] })
+  mocks.analyzeInitialTranslations.mockReturnValue({ totalBlocks: 1, observedBlockCount: 0, observations: [] })
+  mocks.analyzeSplitEvenlyCandidates.mockReturnValue({ consideredPairCount: 0, candidateCount: 0, observations: [] })
 })
 
 describe('runPhase2 — generalRepairAgent は correctedSegments の有無に依存しない（不整合修正の回帰テスト）', () => {
@@ -186,5 +196,23 @@ describe('runPhase2 — generalRepairAgent は correctedSegments の有無に依
     await runPhase2(jaBlocks, settings(), thresholds, runNode, undefined, [], {})
 
     expect(mocks.runGeneralRepairAgent).not.toHaveBeenCalled()
+  })
+
+  it('初訳直後とretime-only後の診断を観測nodeとして記録する', async () => {
+    mocks.translateEn.mockImplementation((jaBlocks: JaBlock[]) =>
+      jaBlocks.map((b) => ({ ...makeEnBlock(b.id), violation: 'ok' as const })),
+    )
+    const nodeIds: string[] = []
+    const recordingRunNode = async <T>(nodeId: string, run: () => Promise<T> | T): Promise<T> => {
+      nodeIds.push(nodeId)
+      return run()
+    }
+
+    await runPhase2([makeJaBlock(1)], settings(), thresholds, recordingRunNode, undefined, ['用語 => term'])
+
+    expect(mocks.analyzeInitialTranslations).toHaveBeenCalledWith(expect.any(Array), ['用語 => term'])
+    expect(mocks.analyzeSplitEvenlyCandidates).toHaveBeenCalledWith(expect.any(Array), thresholds)
+    expect(nodeIds.indexOf('initialTranslationDiagnostics')).toBeGreaterThan(nodeIds.indexOf('translateEn'))
+    expect(nodeIds.indexOf('splitEvenlyDiagnostics')).toBeGreaterThan(nodeIds.indexOf('cpsReliefRebalance'))
   })
 })

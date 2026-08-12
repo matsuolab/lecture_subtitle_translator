@@ -9,6 +9,7 @@ import { runPhase1 } from './phase1'
 import { runPhase2 } from './phase2'
 import { runPhase3 } from './phase3'
 import { runNodeWithHeartbeat, type LocalPipelineProgressDetail } from './runNodeWithHeartbeat'
+import { buildSourceSegmentEvidence, type SourceSegmentEvidence } from '@/types/sourceEvidence'
 
 export type { LocalPipelineProgressDetail } from './runNodeWithHeartbeat'
 
@@ -17,6 +18,7 @@ export interface LocalPipelineResult {
   traces: PipelineNodeTrace[]
   audit: PipelineAuditReport
   stageSnapshots: PipelineStageSnapshot[]
+  sourceEvidence: SourceSegmentEvidence[]
 }
 
 export interface LocalPipelineGlossary {
@@ -27,6 +29,7 @@ export interface LocalPipelineGlossary {
 export interface LocalPipelineDebugFailure {
   traces?: PipelineNodeTrace[]
   stageSnapshots?: PipelineStageSnapshot[]
+  sourceEvidence?: SourceSegmentEvidence[]
 }
 
 export function getLocalPipelineDebugFailure(error: unknown): LocalPipelineDebugFailure {
@@ -35,6 +38,7 @@ export function getLocalPipelineDebugFailure(error: unknown): LocalPipelineDebug
   return {
     traces: Array.isArray(row.localPipelineTraces) ? row.localPipelineTraces as PipelineNodeTrace[] : undefined,
     stageSnapshots: Array.isArray(row.localPipelineStageSnapshots) ? row.localPipelineStageSnapshots as PipelineStageSnapshot[] : undefined,
+    sourceEvidence: Array.isArray(row.localPipelineSourceEvidence) ? row.localPipelineSourceEvidence as SourceSegmentEvidence[] : undefined,
   }
 }
 
@@ -42,11 +46,13 @@ function attachLocalPipelineDebugFailure(
   error: unknown,
   traces: PipelineNodeTrace[],
   stageSnapshots: PipelineStageSnapshot[],
+  sourceEvidence: SourceSegmentEvidence[] = [],
 ): Error {
   const err = error instanceof Error ? error : new Error(String(error))
   Object.assign(err, {
     localPipelineTraces: traces,
     localPipelineStageSnapshots: stageSnapshots,
+    localPipelineSourceEvidence: sourceEvidence,
   })
   return err
 }
@@ -94,6 +100,7 @@ function normalizeSnapshotItem(item: unknown): Record<string, unknown> {
     contextGroupReason: compactText(row.contextGroupReason),
     contextGroupText: compactText(row.contextGroupText),
     contextGroupSourceIds: Array.isArray(row.contextGroupSourceIds) ? row.contextGroupSourceIds : undefined,
+    sourceRefs: Array.isArray(row.sourceRefs) ? row.sourceRefs : undefined,
     reviewPriority: compactText(row.reviewPriority),
     reviewDisposition: compactText(row.reviewDisposition),
     correctionDistance: compactNumber(row.correctionDistance) ?? compactNumber(row.correction_distance),
@@ -178,6 +185,7 @@ export async function runLocalPostPipeline(
   const traces: PipelineNodeTrace[] = []
   const stageSnapshots: PipelineStageSnapshot[] = []
   const thresholds = buildPipelineThresholdsFromSettings(settings)
+  let sourceEvidence: SourceSegmentEvidence[] = []
 
   const recordStageSnapshot = (stage: string, result: unknown): void => {
     const items = normalizeSnapshotItems(result)
@@ -238,6 +246,7 @@ export async function runLocalPostPipeline(
         glossaryTerms: glossary.correctionTerms,
       },
     )
+    sourceEvidence = buildSourceSegmentEvidence(phase1Result.correctedSegments)
     const enBlocks = await runPhase2(
       phase1Result.blocks,
       settings,
@@ -271,6 +280,7 @@ export async function runLocalPostPipeline(
       blocks: phase3.blocks,
       traces,
       stageSnapshots,
+      sourceEvidence,
       audit: {
         mustReviewCount,
         shouldReviewCount,
@@ -280,6 +290,6 @@ export async function runLocalPostPipeline(
       },
     }
   } catch (error) {
-    throw attachLocalPipelineDebugFailure(error, traces, stageSnapshots)
+    throw attachLocalPipelineDebugFailure(error, traces, stageSnapshots, sourceEvidence)
   }
 }

@@ -101,7 +101,7 @@ describe('cpsReliefRebalance', () => {
     expect(right.alignConf).toBe('merged')
   })
 
-  it('falls back to approach C (split evenly) when approach A would create awkward short-text display', () => {
+  it('does not mutate text when retime-only cannot safely solve the pair', () => {
     // id 16+17 type: left has dense text (47 chars), right has tiny text ("so") with 7.99s
     // A would leave "so" displayed for 7.7s — awkward
     // C splits combined text at a natural boundary
@@ -129,24 +129,19 @@ describe('cpsReliefRebalance', () => {
     const result = cpsReliefRebalance(blocks, thresholds)
 
     expect(result.entries).toHaveLength(1)
-    expect(result.entries[0].strategy).toBe('split_evenly')
-    expect(result.entries[0].status).toBe('applied')
+    expect(result.entries[0].strategy).toBe('none')
+    expect(result.entries[0].status).toBe('skipped')
 
     const left = result.blocks.find(b => b.id === 16)!
     const right = result.blocks.find(b => b.id === 17)!
-    // both should now have OK CPS
-    expect(left.cps).toBeLessThanOrEqual(thresholds.verboseCps)
-    expect(right.cps).toBeLessThanOrEqual(thresholds.verboseCps)
-    // text should be redistributed (left text should grow, right text should grow)
-    expect(left.enText.length).toBeGreaterThan(10)
-    expect(right.enText.length).toBeGreaterThan(5)
-    // total content preserved (no character loss)
-    const combinedBefore = 'We need the input and output dimensions of the function, so'
-    const combinedAfter = `${left.enText} ${right.enText}`.replace(/\s+/g, ' ').trim()
-    expect(combinedAfter).toBe(combinedBefore)
-    // alignConf upgraded
-    expect(left.alignConf).toBe('merged')
-    expect(right.alignConf).toBe('merged')
+    expect(left.enText).toBe('We need the input and output dimensions of the function,')
+    expect(right.enText).toBe('so')
+    expect(left.start).toBe(73.696)
+    expect(left.end).toBe(76.18)
+    expect(right.start).toBe(76.26)
+    expect(right.end).toBe(84.252)
+    expect(left.alignConf).toBe('proportional')
+    expect(right.alignConf).toBe('proportional')
   })
 
   it('skips pairs where the combined CPS would still exceed the threshold', () => {

@@ -13,6 +13,8 @@ import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
 import { llmCallWithMeta } from '../../llmCallWithMeta'
 import { checkSeamOnlySplit } from '../../seamOnlySplitCheck'
 import { callSubtitleLlm } from './callSubtitleLlm'
+import { allocateSplitTiming } from './splitTimingAllocator'
+import { withCueSourceRelation } from '@/types/sourceEvidence'
 
 interface SplitResult {
   units: SplitUnit[]
@@ -284,10 +286,6 @@ async function translateSingle(
   return { text: result.text, errorMessage: result.errorMessage }
 }
 
-function clampMs(ms: number, minMs: number): number {
-  return Math.max(ms, minMs)
-}
-
 function buildFailurePatch(block: EnBlock, warning: string): TimelinePatch {
   return {
     replaceBlocks: [block],
@@ -295,23 +293,6 @@ function buildFailurePatch(block: EnBlock, warning: string): TimelinePatch {
     changed: false,
     warning,
   }
-}
-
-function allocateDurationsMs(weights: number[], availableMs: number, minDurationMs: number): number[] | null {
-  if (weights.length === 0) return []
-  if (availableMs < minDurationMs * weights.length) return null
-
-  const remainingMs = availableMs - minDurationMs * weights.length
-  const totalWeight = weights.reduce((sum, weight) => sum + Math.max(1, weight), 0)
-  const durations = weights.map((weight) => minDurationMs + Math.floor(remainingMs * Math.max(1, weight) / totalWeight))
-  let remainder = availableMs - durations.reduce((sum, duration) => sum + duration, 0)
-  let index = 0
-  while (remainder > 0) {
-    durations[index % durations.length] += 1
-    index += 1
-    remainder -= 1
-  }
-  return durations
 }
 
 function validateSplitCandidates(
@@ -468,24 +449,26 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, `split_block: rejected fragment-like English unit: ${badEn}`)
     }
 
-    const totalDurationMs = Math.round((block.end - block.start) * 1000)
     const gapMs = thresholds.minInterSubtitleGapMs
-    const availableMs = totalDurationMs - gapMs * (cleanUnits.length - 1)
-    const minDurationMs = Math.round(thresholds.subtitleMinDurationSec * 1000)
-
-    const durationsMs = allocateDurationsMs(translated.map(en => countCpsChars(en)), availableMs, minDurationMs)
-    if (!durationsMs) {
+    const languages = loadLanguageProfileConfig(settings)
+    const timing = allocateSplitTiming({
+      parent: block,
+      units: cleanUnits.map((unit, index) => ({ jaText: unit.text, enText: translated[index] })),
+      script: languages.transcript.script,
+      gapMs,
+      maxClosableGapSec: settings.subtitleMaxGapSec,
+      subtitleMinDurationSec: thresholds.subtitleMinDurationSec,
+      shortDurationSec: thresholds.shortDurationSec,
+      verboseCps: thresholds.verboseCps,
+    })
+    if (!timing) {
       return buildFailurePatch(block, 'split_block: rejected split because total duration cannot satisfy minimum display time')
     }
 
     const prevSplitDepth = (block as { splitDepth?: number }).splitDepth ?? 0
-    let cursor = block.start
     const replaceBlocks = cleanUnits.map((unit, index): EnBlock => {
-      const start = cursor
-      const end = index === cleanUnits.length - 1
-        ? block.end
-        : start + clampMs(durationsMs[index], minDurationMs) / 1000
-      cursor = end + gapMs / 1000
+      const start = timing.units[index].start
+      const end = timing.units[index].end
       const enText = translated[index]
       const enChars = countCpsChars(enText)
       const nextId = index === 0 ? block.id : block.id * 1000 + index + 1
@@ -522,6 +505,10 @@ export const splitBlockTool: Tool = {
         contextGroupReason: 'split_block_singleton',
         contextGroupText: unit.text,
         contextGroupSourceIds: [nextId],
+        words: timing.units[index].words?.map(word => ({ ...word })),
+        alignConf: timing.units[index].alignConf,
+        alignMatchRate: timing.units[index].alignMatchRate,
+        sourceRefs: withCueSourceRelation(block.sourceRefs, 'correction_split'),
       }
       ;(nextBlock as unknown as Record<string, unknown>).splitDepth = prevSplitDepth + 1
       ;(nextBlock as unknown as Record<string, unknown>).splitFrom = block.id
@@ -539,6 +526,7 @@ export const splitBlockTool: Tool = {
       dirtyBlockIds: validated.blocks.map(nextBlock => String(nextBlock.id)),
       changed: true,
       warning: splitWarning,
+      splitTiming: timing.decision,
     }
   },
 }

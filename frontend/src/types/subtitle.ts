@@ -1,3 +1,6 @@
+import type { CueSourceRef } from './sourceEvidence'
+import type { PipelineCorrectionAttemptSummary } from './pipeline'
+
 export type BlockStatus = 'pending' | 'approved' | 'flagged'
 
 export type SubtitleField = 'subtitle' | 'transcript'
@@ -33,6 +36,8 @@ export interface SubtitleBlock {
   charCount: number
   status: BlockStatus
   glossaryTerms: GlossaryTerm[]
+  /** Lightweight pointers into the run-level source evidence catalog. */
+  sourceRefs?: CueSourceRef[]
   /** 無視するタイポ候補のキー: "${found}::${entry.en}" */
   ignoredTypos?: string[]
   /** 無視する用語漏れ候補のキー: entry.id */
@@ -53,19 +58,7 @@ export interface SubtitleBlock {
    * 翻訳者のリリース画面ではプロセス詳細を見せない方針のため、字幕エディタには表示しない。
    * 詳細は CONTEXT.md「正式リリース画面 / 診断設定」を参照。
    */
-  correctionAttempts?: Array<{
-    strategy: string
-    changed: boolean
-    beforeChars: number
-    afterChars: number
-    beforeViolation: string
-    afterViolation: string
-    beforeTranscriptText?: string
-    beforeSubtitleText?: string
-    afterTranscriptText?: string
-    afterSubtitleText?: string
-    rationale?: string
-  }>
+  correctionAttempts?: PipelineCorrectionAttemptSummary[]
   editHistory?: Array<{
     at: string
     type:

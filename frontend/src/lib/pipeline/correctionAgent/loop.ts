@@ -107,6 +107,7 @@ export async function correctionEngine(
     rationale: attempt.rationale,
     semanticSimilarity: attempt.semanticSimilarity,
     semanticOutcome: attempt.semanticOutcome,
+    splitTiming: attempt.splitTiming,
   })
 
   // セマンティックチェックが利用可能か（API キーや local_openai 等で判定）
@@ -265,6 +266,7 @@ export async function correctionEngine(
       afterTranscriptText,
       afterSubtitleText,
       rationale: patch.warning,
+      splitTiming: patch.splitTiming,
     }
 
     // セマンティックチェック（log_only / enforce 共通でスコアを取得）

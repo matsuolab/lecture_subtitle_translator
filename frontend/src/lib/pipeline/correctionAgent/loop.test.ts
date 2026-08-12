@@ -302,6 +302,12 @@ describe('correctionEngine', () => {
       replaceBlocks: [childA, childB],
       dirtyBlockIds: [String(childA.id), String(childB.id)],
       changed: true,
+      splitTiming: {
+        basis: 'asr_constrained',
+        matchRates: [0.95, 0.9],
+        boundaryDeltasSec: [0.08],
+        displayRanges: [{ start: 0, end: 2.42 }, { start: 2.5, end: 5 }],
+      },
     } satisfies TimelinePatch)
 
     const result = await correctionEngine([block], [0], decisionNode, settings, thresholds)
@@ -311,6 +317,12 @@ describe('correctionEngine', () => {
     const first = result.find((b) => b.id === block.id)
     expect(first?.correctionAttempts).toHaveLength(1)
     expect(first?.correctionAttempts?.[0].strategy).toBe('split_block')
+    expect(first?.correctionAttempts?.[0].splitTiming).toEqual({
+      basis: 'asr_constrained',
+      matchRates: [0.95, 0.9],
+      boundaryDeltasSec: [0.08],
+      displayRanges: [{ start: 0, end: 2.42 }, { start: 2.5, end: 5 }],
+    })
 
     // 2個目のユニット（splitFrom !== 自分の id）は親の履歴を正しく1回だけ引き継ぐ。
     const second = result.find((b) => b.id === block.id * 1000 + 2)

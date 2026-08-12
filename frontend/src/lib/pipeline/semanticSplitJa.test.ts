@@ -115,6 +115,15 @@ describe('semanticSplitJa 統合: セグメント跨ぎのアライメント（�
     expect(blocks).toHaveLength(6)
   })
 
+  it('各新規cueが由来segmentとsemantic unitを指すsourceRefsを持つ', () => {
+    expect(blocks[0].sourceRefs).toEqual([
+      { sourceSegmentId: 6, semanticUnitId: 'u1', relation: 'semantic_unit' },
+    ])
+    expect(blocks[4].sourceRefs).toEqual([
+      { sourceSegmentId: 7, semanticUnitId: 'u5', relation: 'semantic_unit' },
+    ])
+  })
+
   it('融合ユニット（4件目）の start が163.5-163.9に入る（旧実装のバグ値174.913ではない）', () => {
     expect(blocks[3].start).toBeGreaterThanOrEqual(163.5)
     expect(blocks[3].start).toBeLessThanOrEqual(163.9)
@@ -182,6 +191,14 @@ describe('semanticSplitJa 統合: オーバーロングユニットの分割が�
     // 分割前後でテキストが失われていないこと（結合すれば元の4ユニットの原文と一致）。
     const concatenated = blocks.map(block => block.jaText).join('')
     expect(concatenated).toBe(units.map(unit => unit.jaText).join(''))
+
+    const fragments = blocks.filter(block => block.sourceRefs?.[0]?.semanticUnitId === 'u3')
+    expect(fragments.length).toBeGreaterThan(1)
+    for (const fragment of fragments) {
+      expect(fragment.sourceRefs).toEqual([
+        { sourceSegmentId: 6, semanticUnitId: 'u3', relation: 'overlong_split' },
+      ])
+    }
   })
 
   it('分割断片は分割前の親スパン内に収まる（分割前の親スパンより長くならない）', () => {
@@ -493,6 +510,10 @@ describe('resolveCollapsedUnits: 潰れたキューを隣へ統合する', () =>
     const mergedPrev = units.find(u => u.unit.unitId === 'prev')!
     // 前へ統合する場合は本文の末尾に追加する。
     expect(mergedPrev.unit.jaText).toBe(prev.unit.jaText + collapsed.unit.jaText)
+    expect(mergedPrev.unit.sourceRefs).toEqual([
+      { sourceSegmentId: 1, semanticUnitId: 'prev', relation: 'collapsed_merge' },
+      { sourceSegmentId: 1, semanticUnitId: 'collapsed', relation: 'collapsed_merge' },
+    ])
     // 時刻は統合先（prev）のものをそのまま使う。
     expect(mergedPrev.start).toBe(prev.start)
     expect(mergedPrev.end).toBe(prev.end)
@@ -761,6 +782,11 @@ describe('semanticSplitJa: 無音を跨ぐユニットは切り詰めず分割�
     expect(seg182Units.length).toBeGreaterThanOrEqual(2)
     const joined = seg182Units.map(unit => unit.unit.jaText).join('')
     expect(joined).toBe(fixture.segments.find(segment => segment.id === 182)!.correctedText)
+    for (const unit of seg182Units) {
+      expect(unit.unit.sourceRefs).toEqual([
+        { sourceSegmentId: 182, semanticUnitId: 'u_fallback_182', relation: 'coverage_split' },
+      ])
+    }
   })
 
   it('分割後のどのキューも無音区間を跨がない（既存の不変条件を壊さない）', () => {
