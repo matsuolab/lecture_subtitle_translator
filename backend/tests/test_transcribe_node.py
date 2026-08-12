@@ -75,14 +75,16 @@ def test_resolve_device_normalizes_and_defaults_to_cuda() -> None:
     assert _resolve_device("") == "cuda"
 
 
-def test_resolve_compute_type_falls_back_to_int8_on_cpu() -> None:
+def test_resolve_compute_type_falls_back_to_float32_on_cpu() -> None:
     from backend.pipeline.nodes.transcribe import _resolve_compute_type
 
-    # CTranslate2 の CPU バックエンドは float16 を扱えない
-    assert _resolve_compute_type("cpu", "float16") == "int8"
-    assert _resolve_compute_type("cpu", "FP16") == "int8"
-    # CPU でも扱える型はそのまま
+    # CTranslate2 の CPU バックエンドは float16 を扱えず ValueError で落ちる。
+    # 丸め先は WhisperX 自身の CPU 既定と同じ float32（精度を落とさない）。
+    assert _resolve_compute_type("cpu", "float16") == "float32"
+    assert _resolve_compute_type("cpu", "FP16") == "float32"
+    # 利用者が明示指定した型はそのまま尊重する（速度優先で int8 を選ぶ余地を残す）
     assert _resolve_compute_type("cpu", "int8") == "int8"
+    assert _resolve_compute_type("cpu", "float32") == "float32"
     # GPU 実行時は指定どおり
     assert _resolve_compute_type("cuda", "float16") == "float16"
 
@@ -122,7 +124,7 @@ def test_docker_command_omits_gpus_flag_on_cpu(monkeypatch, tmp_path) -> None:
         cmd = captured["cmd"]
         assert ("--gpus" in cmd) is expect_gpus, f"device={device}"
         assert cmd[cmd.index("--device") + 1] == device
-        expected_compute = "int8" if device == "cpu" else "float16"
+        expected_compute = "float32" if device == "cpu" else "float16"
         assert cmd[cmd.index("--compute_type") + 1] == expected_compute
 
 

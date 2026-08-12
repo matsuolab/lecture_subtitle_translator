@@ -101,11 +101,6 @@ fn whisperx_image(language: &str, model: &str) -> Result<String, String> {
 /// jim60105/docker-whisperX がビルドしているモデルサイズ。
 const WHISPERX_MODELS: &[&str] = &["large-v3", "medium", "small", "base", "tiny"];
 
-/// CTranslate2 の CPU バックエンドは float16 を扱えないため、CPU 実行では int8 を使う。
-fn whisperx_compute_type(device: &str) -> &'static str {
-    if device == "cpu" { "int8" } else { "float16" }
-}
-
 #[derive(Default)]
 struct LocalBackendState {
     child: Mutex<Option<Child>>,
@@ -485,10 +480,10 @@ fn run_whisperx_cli(
         "/audio/input.wav",
         "--output_format", "json",
         "--output_dir", "/output",
-        // 言語はイメージタグが表す（ENTRYPOINT が --language ${LANG} を渡す）ため明示しない。
-        // 明示するとイメージと食い違う値を渡せてしまい、後勝ちで誤った言語になる。
-        "--device", device,
-        "--compute_type", whisperx_compute_type(device),
+        // 言語・device・compute_type はいずれも明示しない。
+        // 言語はイメージタグが表す（ENTRYPOINT が --language ${LANG} を渡す）。
+        // device は WhisperX が実行環境から自動判定し、compute_type の既定 'default' が
+        // GPU なら float16 / CPU なら float32 を選ぶ。明示すると既定より精度を落とす恐れがある。
     ]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
@@ -893,7 +888,7 @@ fn resolve_repo_root() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{whisperx_compute_type, whisperx_image};
+    use super::whisperx_image;
 
     #[test]
     fn whisperx_image_returns_expected_tag_for_ja() {
@@ -945,10 +940,4 @@ mod tests {
         assert!(whisperx_image("en", "; rm -rf").is_err());
     }
 
-    #[test]
-    fn whisperx_compute_type_falls_back_to_int8_on_cpu() {
-        // CTranslate2 の CPU バックエンドは float16 を扱えない
-        assert_eq!(whisperx_compute_type("cpu"), "int8");
-        assert_eq!(whisperx_compute_type("cuda"), "float16");
-    }
 }

@@ -233,13 +233,18 @@ def _resolve_compute_type(device: str, compute_type: str) -> str:
     """
     device に対して成立する compute_type へ丸める。
 
-    CTranslate2 の CPU バックエンドは float16 を扱えないため、CPU 実行で float16 が
-    指定されていた場合は int8 へ落とす（既定の float16 のまま CPU へ渡すと実行時に落ちる）。
+    CTranslate2 の CPU バックエンドは float16 を扱えず、そのまま渡すと
+    `ValueError: Requested float16 compute type, but the target device or backend
+    do not support efficient float16 computation.` で落ちる（自動フォールバックはしない）。
+
+    丸め先は **float32**。WhisperX 自身が compute_type 未指定時に CPU へ選ぶ既定と同じ値で、
+    精度を落とさない。int8 は速度は出るが量子化により認識精度が下がるため既定にはしない
+    （利用者が明示的に int8 を指定した場合はその指定を尊重する）。
     """
     normalized = (compute_type or "").strip().lower()
     if device == "cpu" and normalized in _CUDA_ONLY_COMPUTE_TYPES:
-        log.info("[transcribe] compute_type=%s は CPU で使えないため int8 を使用します", normalized)
-        return "int8"
+        log.info("[transcribe] compute_type=%s は CPU で使えないため float32 を使用します", normalized)
+        return "float32"
     return normalized or "float16"
 
 
