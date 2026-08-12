@@ -40,4 +40,19 @@ describe('analyzeInitialTranslations', () => {
     expect(result.observations[0]).toMatchObject({ blockId: 1, riskBand: 'high' })
     expect(result).not.toHaveProperty('ok')
   })
+
+  it('does not inflate review counts with identity glossary entries or English ordinals', () => {
+    const blocks = [
+      block(1, '学習を行います。', 'We train the model.'),
+      block(2, '第7章です。', 'This is the seventh chapter.'),
+    ]
+
+    const result = analyzeInitialTranslations(blocks, ['学習 => 学習'])
+
+    expect(result).toMatchObject({
+      totalBlocks: 2,
+      observedBlockCount: 0,
+      riskBandCounts: { none: 2, low: 0, medium: 0, high: 0 },
+    })
+  })
 })

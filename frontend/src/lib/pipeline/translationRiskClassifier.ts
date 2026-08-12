@@ -1,6 +1,8 @@
+import { extractEnglishNumberExpressions } from './englishNumberParser'
+
 export type TranslationRiskBand = 'none' | 'low' | 'medium' | 'high'
 
-export type TranslationDifferenceKind = 'number' | 'unit' | 'url' | 'code_identifier' | 'glossary_term'
+export type TranslationDifferenceKind = 'number' | 'number_form' | 'unit' | 'url' | 'code_identifier' | 'glossary_term'
 
 export interface TranslationDeterministicDifference {
   kind: TranslationDifferenceKind
@@ -28,6 +30,36 @@ function normalizeDigits(text: string): string {
 
 function uniqueMatches(text: string, pattern: RegExp): string[] {
   return [...new Set(text.match(pattern) ?? [])]
+}
+
+function canonicalizeNumericLiteral(value: string): string {
+  const normalized = value.replaceAll(',', '')
+  const negative = normalized.startsWith('-')
+  const unsigned = normalized.replace(/^[+-]/, '')
+  const [integerPart = '0', fractionPart] = unsigned.split('.')
+  const integer = integerPart.replace(/^0+(?=\d)/, '') || '0'
+  const fraction = fractionPart?.replace(/0+$/, '')
+  const magnitude = fraction ? `${integer}.${fraction}` : integer
+  return negative && magnitude !== '0' ? `-${magnitude}` : magnitude
+}
+
+function isExplicitSourceOrdinal(sourceText: string, sourceValue: string): boolean {
+  const escapedValue = escapeRegExp(sourceValue)
+  const ordinalCounter = '(?:番|個|つ|回|人|台|本|枚|日|年|章|節|軸|段階|ステップ|チャンク)目'
+  return new RegExp(`(?:第\\s*${escapedValue}|${escapedValue}\\s*(?:位|${ordinalCounter}))`).test(sourceText)
+}
+
+type NumberComparison = 'preserved' | 'form_changed' | 'missing'
+
+function compareNumber(sourceValue: string, sourceText: string, translatedText: string): NumberComparison {
+  const expected = canonicalizeNumericLiteral(sourceValue)
+  if (uniqueMatches(translatedText, /[+-]?\d[\d,]*(?:\.\d+)?/g)
+    .some(value => canonicalizeNumericLiteral(value) === expected)) return 'preserved'
+  const sourceIsOrdinal = isExplicitSourceOrdinal(sourceText, sourceValue)
+  const matchingExpressions = extractEnglishNumberExpressions(translatedText)
+    .filter(expression => expression.value === expected)
+  if (matchingExpressions.some(expression => sourceIsOrdinal || expression.form === 'cardinal')) return 'preserved'
+  return matchingExpressions.length > 0 ? 'form_changed' : 'missing'
 }
 
 const UNIT_ALIASES: ReadonlyArray<{ source: string; aliases: readonly string[] }> = [
@@ -75,6 +107,7 @@ function extractGlossaryDifferences(
   translatedText: string,
   glossaryTerms: string[],
 ): TranslationDeterministicDifference[] {
+  const japaneseLexicalPattern = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u
   const translatedLower = translatedText.toLowerCase()
   const differences: TranslationDeterministicDifference[] = []
   for (const rawTerm of glossaryTerms) {
@@ -82,6 +115,9 @@ function extractGlossaryDifferences(
     const sourceValue = sourcePart?.trim()
     const expectedValue = (expectedParts.length > 0 ? expectedParts.join(' => ') : sourcePart)?.trim()
     if (!sourceValue || !expectedValue) continue
+    // Japanese identity entries describe source-side lexical normalization, while
+    // Latin identity entries such as softmax=>softmax are literal preservation contracts.
+    if (sourceValue === expectedValue && japaneseLexicalPattern.test(sourceValue)) continue
     if (!sourceText.toLowerCase().includes(sourceValue.toLowerCase())) continue
     if (translatedLower.includes(expectedValue.toLowerCase())) continue
     differences.push({ kind: 'glossary_term', sourceValue, expectedValue })
@@ -116,15 +152,19 @@ export function classifyTranslationRisk(
   differences.push(...extractCodeIdentifiers(sourceWithoutUrls)
     .filter(value => !normalizedTranslation.includes(value))
     .map(sourceValue => ({ kind: 'code_identifier' as const, sourceValue })))
-  differences.push(...uniqueMatches(sourceWithoutUrls, /\d+(?:[.,]\d+)*/g)
-    .filter(value => !normalizedTranslation.includes(value))
-    .map(sourceValue => ({ kind: 'number' as const, sourceValue })))
+  differences.push(...uniqueMatches(sourceWithoutUrls, /[+-]?\d[\d,]*(?:\.\d+)?/g)
+    .flatMap((sourceValue) => {
+      const comparison = compareNumber(sourceValue, sourceWithoutUrls, normalizedTranslation)
+      if (comparison === 'preserved') return []
+      return [{ kind: comparison === 'form_changed' ? 'number_form' as const : 'number' as const, sourceValue }]
+    }))
   differences.push(...extractUnitDifferences(normalizedSource, normalizedTranslation))
   differences.push(...extractGlossaryDifferences(normalizedSource, normalizedTranslation, glossaryTerms))
   const sourceRiskSignals = detectSourceRiskSignals(normalizedSource)
 
+  const hasHighRiskDifference = differences.some(difference => difference.kind !== 'number_form')
   return {
-    riskBand: differences.length > 0 ? 'high' : sourceRiskSignals.length > 0 ? 'medium' : 'none',
+    riskBand: hasHighRiskDifference ? 'high' : differences.length > 0 || sourceRiskSignals.length > 0 ? 'medium' : 'none',
     differences,
     sourceRiskSignals,
   }

@@ -124,6 +124,7 @@ export interface LocaleStrings {
   reportColDuration: string
   reportColQuality: string
   reportStatusSuccess: string
+  reportStatusWarning: string
   reportStatusError: string
   reportStatusRunning: string
   reportStatusIdle: string

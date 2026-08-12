@@ -124,6 +124,7 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, o
 
   const statusLabel = (status: PipelineRunResult['status']) => {
     if (status === 'success') return t.reportStatusSuccess
+    if (status === 'warning') return t.reportStatusWarning
     if (status === 'error') return t.reportStatusError
     if (status === 'queued') return '待機中'
     if (status === 'running') return t.reportStatusRunning
@@ -182,12 +183,14 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, o
                 background:
                   pipelineRun.status === 'queued' || pipelineRun.status === 'running' ? '#f59e0b'
                   : pipelineRun.status === 'success' ? '#22c55e'
+                  : pipelineRun.status === 'warning' ? '#f59e0b'
                   : '#ef4444',
               }} />
               <span style={{ color: theme.textSecondary, fontWeight: 600 }}>
                 {pipelineRun.status === 'queued' ? '待機中'
                   : pipelineRun.status === 'running' ? '実行中'
                   : pipelineRun.status === 'success' ? '完了'
+                  : pipelineRun.status === 'warning' ? t.reportStatusWarning
                   : '失敗'}
               </span>
               <span style={{ color: theme.textMuted }}>{pipelineRun.message}</span>
@@ -201,6 +204,8 @@ export function ReportTab({ runs, pipelineRun, videoSourceName, onRunPipeline, o
               <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 10, color: theme.textSecondary }}>
                 <span>CPS違反率: {(pipelineRun.metrics.quality.cpsViolationRate * 100).toFixed(1)}%</span>
                 <span>{maxCharsPerLine}文字超過率: {(pipelineRun.metrics.quality.overLengthRate * 100).toFixed(1)}%</span>
+                <span>入力トークン: {pipelineRun.metrics.cost.inputTokens.toLocaleString()}</span>
+                <span>出力トークン: {pipelineRun.metrics.cost.outputTokens.toLocaleString()}</span>
                 <span>処理時間: {(pipelineRun.metrics.cost.durationMs / 1000).toFixed(2)}s</span>
               </div>
             )}

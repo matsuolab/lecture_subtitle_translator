@@ -233,6 +233,7 @@ export const ja: LocaleStrings = {
   reportColDuration: '処理時間',
   reportColQuality: '品質指標',
   reportStatusSuccess: '完了',
+  reportStatusWarning: '一部完了・要確認',
   reportStatusError: '失敗',
   reportStatusRunning: '実行中',
   reportStatusIdle: '待機',

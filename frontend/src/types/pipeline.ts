@@ -11,7 +11,7 @@ export type PipelineStep = 'idle' | 'transcribe' | 'correct' | 'translate' | 'su
  *   - 実行中のまま保存されたセッションを復元した（新しい画面プロセスでは実行継続がありえないため）
  * いずれも異常ではないので 'error' とは区別する。
  */
-export type PipelineStatus = 'idle' | 'queued' | 'running' | 'success' | 'error' | 'cancelled'
+export type PipelineStatus = 'idle' | 'queued' | 'running' | 'success' | 'warning' | 'error' | 'cancelled'
 
 export interface PipelineQualityMetrics {
   totalBlocks: number
@@ -23,7 +23,10 @@ export interface PipelineQualityMetrics {
 export interface PipelineCostMetrics {
   inputTokens: number
   outputTokens: number
-  estimatedUsd: number
+  reasoningTokens?: number
+  cachedInputTokens?: number
+  /** 価格表を持たないモデルでは推測せずnullにする。 */
+  estimatedUsd: number | null
   durationMs: number
 }
 

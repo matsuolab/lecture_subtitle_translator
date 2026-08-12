@@ -32,7 +32,7 @@ import { describeError } from '@/lib/describeError'
 import { buildMacAssetUrl } from '@/lib/video/macAssetUrl'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
-import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecord, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunMetrics, PipelineRunResult } from '@/types/pipeline'
+import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecord, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunResult } from '@/types/pipeline'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
 import { useSpellChecker, type SpellIssue } from '@/lib/pipeline/spellCheck'
 import type { LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
@@ -46,6 +46,7 @@ import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
 import { buildAiGatewayProfileSnapshot } from '@/lib/aiGateway/apiCompatibilityProfile'
 import { materializeProjectDocument, mergeImportedAdminSettings } from '@/lib/projectSession'
 import type { SourceSegmentEvidence } from '@/types/sourceEvidence'
+import { summarizeCompletedPipelineRun } from '@/lib/pipeline/runCompletion'
 
 type Tab = 'subtitles' | 'dictionary' | 'help' | 'report' | 'settings'
 type SaveStatus = 'saved' | 'saving' | 'error'
@@ -900,31 +901,6 @@ export default function App() {
     setServiceCheck({ status: 'idle', message: 'サービス接続は未確認です' })
   }, [adminSettings.serviceMode, adminSettings.serviceUrl, adminSettings.serviceAuthToken])
 
-  const calcPipelineMetrics = useCallback((generated: SubtitleBlock[], startedAt: number, finishedAt: number): PipelineRunMetrics => {
-    const totalBlocks = Math.max(1, generated.length)
-    const cpsViolationCount = generated.filter(b => b.cps > adminSettings.enMaxCps).length
-    const overLengthCount = generated.filter(b => b.subtitle.split('\n').some(line => line.length > adminSettings.enMaxCharsPerLine)).length
-    const flaggedCount = generated.filter(b => b.status === 'flagged').length
-
-    // NOTE: トークン数・コスト推定は誤った文字数ベース計算を停止中（2026-05-27）。
-    // 実際のトークン捕捉は llmCallWithMeta / llmUsageSink で部分実装済み。
-    // 続き: docs/research/20260527_cost_display_continuation.md 参照
-    return {
-      quality: {
-        totalBlocks,
-        cpsViolationRate: cpsViolationCount / totalBlocks,
-        overLengthRate: overLengthCount / totalBlocks,
-        flaggedCount,
-      },
-      cost: {
-        inputTokens: 0,
-        outputTokens: 0,
-        estimatedUsd: 0,
-        durationMs: Math.max(0, finishedAt - startedAt),
-      },
-    }
-  }, [adminSettings.enMaxCharsPerLine, adminSettings.enMaxCps])
-
   const buildAuditReport = useCallback((generated: SubtitleBlock[], traces: PipelineNodeTrace[]): PipelineAuditReport => {
     const items: PipelineReviewItem[] = []
 
@@ -1284,16 +1260,24 @@ export default function App() {
       void beginWorkLogSession('transcription', generated, { transcriptSegments, video: source })
 
       const finishedAt = Date.now()
-      const metrics = calcPipelineMetrics(generated, startedAt, finishedAt)
+      const completion = summarizeCompletedPipelineRun({
+        blocks: generated,
+        startedAt,
+        finishedAt,
+        maxCps: adminSettings.enMaxCps,
+        maxCharsPerLine: adminSettings.enMaxCharsPerLine,
+        llmUsage,
+        llmErrors,
+      })
       const result: PipelineRunResult = {
-        status: 'success',
+        status: completion.status,
         step: 'done',
-        message: `パイプライン完了（${generated.length}ブロック）`,
+        message: completion.message,
         runId: managedRunId,
         sourceName,
         startedAt,
         finishedAt,
-        metrics,
+        metrics: completion.metrics,
         audit,
         debug: {
           sourceMedia: {
@@ -1316,7 +1300,7 @@ export default function App() {
       }
       progressEvents.push({
         at: finishedAt,
-        status: 'success',
+        status: completion.status,
         step: 'done',
         message: result.message,
         runId: managedRunId,
@@ -1418,7 +1402,7 @@ export default function App() {
         videoSource: source,
       })
     }
-  }, [adminSettings, beginWorkLogSession, blocks, buildAuditReport, calcPipelineMetrics, glossary, persistSessionSnapshot, pipelineHistory, reset, selfMadeGlossary])
+  }, [adminSettings, beginWorkLogSession, blocks, buildAuditReport, glossary, persistSessionSnapshot, pipelineHistory, reset, selfMadeGlossary])
 
   const buildSessionExport = useCallback((): SessionExportData => ({
     version: 2,
@@ -2589,6 +2573,8 @@ export default function App() {
                         ? '#f59e0b'
                         : pipelineRun.status === 'success'
                           ? '#22c55e'
+                          : pipelineRun.status === 'warning'
+                            ? '#f59e0b'
                           : pipelineRun.status === 'error'
                             ? '#ef4444'
                             : pipelineRun.status === 'cancelled'
@@ -2603,6 +2589,7 @@ export default function App() {
                       : pipelineRun.status === 'queued' ? '待機中'
                         : pipelineRun.status === 'running' ? '実行中'
                           : pipelineRun.status === 'success' ? '完了'
+                            : pipelineRun.status === 'warning' ? t.reportStatusWarning
                             : pipelineRun.status === 'error' ? '失敗'
                               : pipelineRun.status === 'cancelled' ? '中断'
                                 : '待機中'
@@ -2715,7 +2702,7 @@ export default function App() {
                   最近の実行履歴:
                   {pipelineHistory.slice(0, 3).map((run, idx) => (
                     <div key={`${run.startedAt ?? 0}-${idx}`} style={{ marginTop: 2 }}>
-                      - {run.sourceName ?? 'unknown'} / {run.status === 'success' ? '完了' : run.status === 'error' ? '失敗' : run.status}
+                      - {run.sourceName ?? 'unknown'} / {run.status === 'success' ? '完了' : run.status === 'warning' ? t.reportStatusWarning : run.status === 'error' ? '失敗' : run.status}
                       {run.metrics ? ` / ${(run.metrics.cost.durationMs / 1000).toFixed(2)}s` : ''}
                     </div>
                   ))}

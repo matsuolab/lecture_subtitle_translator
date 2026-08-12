@@ -52,7 +52,7 @@ describe('reconcileRestoredPipelineRun', () => {
   })
 
   it('終端状態はそのまま返す', () => {
-    for (const status of ['success', 'error', 'idle', 'cancelled'] as const) {
+    for (const status of ['success', 'warning', 'error', 'idle', 'cancelled'] as const) {
       const run: PipelineRunResult = { status, step: 'done', message: 'x' }
       expect(reconcileRestoredPipelineRun(run)).toBe(run)
     }

@@ -232,6 +232,7 @@ export const en: LocaleStrings = {
   reportColDuration: 'Duration',
   reportColQuality: 'Quality',
   reportStatusSuccess: 'Success',
+  reportStatusWarning: 'Partial completion — review required',
   reportStatusError: 'Error',
   reportStatusRunning: 'Running',
   reportStatusIdle: 'Idle',

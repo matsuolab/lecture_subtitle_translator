@@ -232,6 +232,7 @@ export const zh: LocaleStrings = {
   reportColDuration: '耗时',
   reportColQuality: '质量指标',
   reportStatusSuccess: '完成',
+  reportStatusWarning: '部分完成・需要确认',
   reportStatusError: '失败',
   reportStatusRunning: '运行中',
   reportStatusIdle: '待机',
