@@ -14,6 +14,7 @@ import {
   loadLanguageProfileConfig,
   type LanguageProfileConfig,
 } from './languageProfileConfig'
+import { mergeCueSourceRefs } from '@/types/sourceEvidence'
 
 type MergeDecisionKind = 'merge_prev' | 'merge_next' | 'keep'
 
@@ -342,6 +343,9 @@ function buildMergedBlock(
     return { ok: false, warning: roleError }
   }
 
+  const sourceRefs = host.start <= fragment.start
+    ? mergeCueSourceRefs(host.sourceRefs, fragment.sourceRefs)
+    : mergeCueSourceRefs(fragment.sourceRefs, host.sourceRefs)
   const rawBlock: EnBlock = {
     ...host,
     start,
@@ -351,6 +355,7 @@ function buildMergedBlock(
     jaText,
     jaChars: jaText.replace(/\s/g, '').length,
     merged: true,
+    ...(sourceRefs ? { sourceRefs } : {}),
   }
   const formatted = formatLines([rawBlock], thresholds)[0]
   const metrics = computeMetrics(formatted)

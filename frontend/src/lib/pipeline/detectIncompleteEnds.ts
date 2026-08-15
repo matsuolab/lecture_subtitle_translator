@@ -47,6 +47,19 @@ import { hasSentenceEnd, loadLanguageProfileConfig, type LanguageRoleProfile } f
  *   同様の理由で、thinking 系モデル解決時はバッチサイズ自体も実行時にクランプする
  *   （設定値の incompleteEndDetectionBatchSize 自体は書き換えない）。
  *
+ *   【2026-08 追記】上記の見積り（withReasoningHeadroom の戻り値）が実際に API へ渡る
+ *   max_tokens / max_completion_tokens として使われるのは local_openai 経路のみになった。
+ *   openai / gemini 経路では、この見積りが原因で 796 ブロック中 226 件（うち 212 件が
+ *   truncated）の判定失敗を引き起こしていたことが実測で判明した。バッチ件数から見積もった
+ *   376 のときだけ finishReason=length で本文 0 文字のまま切断され、1200 / 4096 / 送らない の
+ *   いずれでも消費量は 450 前後で安定して完走した。上限は消費量を左右せず成功可否だけを
+ *   左右しており、しかも truncated 時の半割リトライはバッチ件数から予算を再計算するため、
+ *   割るほど予算も一緒に減って逆効果だった（212 件が一度も救済されなかった原因）。この事実を
+ *   受け、adaptChatCompletionRequest（modelProfile.ts）が openai / gemini 向けには
+ *   max_tokens / max_completion_tokens を丸ごと送らなくなった（stripTokenLimitFields 参照）。
+ *   このファイルの見積りロジック自体は変更していない（local_openai 向けの見積りとして
+ *   引き続き必要なため）。
+ *
  * 入力配列と出力 flags の長さ・順序は完全一致する。
  */
 
@@ -149,6 +162,37 @@ interface BatchItem {
   text: string
 }
 
+/**
+ * LLM 判定が失敗した理由の分類。BatchOutcome の kind と対応する。
+ * config_error は常に abortedOutcome（全体 abort）経由でのみ発生し、残り3種は
+ * giveUpBatch（該当バッチだけ諦めて決定的フォールバックへ倒す）経由で発生する。
+ *
+ * 背景（本番事故）: 実行ログには「308 of 823 blocks fell back to singleton context groups」
+ * という集計1行しか残らず、308件のうち timeout が何件で truncated が何件かが後から分からなかった。
+ * 実際には「存在しないモデルを指していて404で全滅」（= config_error）していたケースがあったが、
+ * 集計メッセージからはそれが読み取れなかった。種別ごとに数えて trace に残す。
+ */
+export type IncompleteEndsFailureKind = 'abortable' | 'retryable' | 'truncated' | 'config_error'
+
+export type FailureKindCounts = Record<IncompleteEndsFailureKind, number>
+
+function emptyFailureKindCounts(): FailureKindCounts {
+  return { abortable: 0, retryable: 0, truncated: 0, config_error: 0 }
+}
+
+function singleFailureKindCount(kind: IncompleteEndsFailureKind, count: number): FailureKindCounts {
+  return { ...emptyFailureKindCounts(), [kind]: count }
+}
+
+function mergeFailureKindCounts(a: FailureKindCounts, b: FailureKindCounts): FailureKindCounts {
+  return {
+    abortable: a.abortable + b.abortable,
+    retryable: a.retryable + b.retryable,
+    truncated: a.truncated + b.truncated,
+    config_error: a.config_error + b.config_error,
+  }
+}
+
 export interface DetectionResult {
   /** texts と同じ長さ・順序の boolean 配列。失敗ブロックは決定的フォールバックの判定値 */
   flags: boolean[]
@@ -162,6 +206,11 @@ export interface DetectionResult {
    * 「何件が LLM 判定で、何件が決定的フォールバックか」を呼出元が区別できるよう独立したフィールドとして残す。
    */
   deterministicFallbackCount: number
+  /**
+   * failed の内訳（種別ごとの件数）。合計は failed と一致する。
+   * 既存の failed / deterministicFallbackCount は後方互換のため残し、これは追加フィールドとする。
+   */
+  failureKindCounts: FailureKindCounts
   /** 早期 abort 発生時の理由（config_error 等）。継続実行時は undefined */
   abortReason?: string
 }
@@ -185,6 +234,8 @@ interface ProcessOutcome {
   failedCount: number
   /** failedCount のうち決定的フォールバックで判定した件数 */
   fallbackCount: number
+  /** failedCount の内訳（種別ごとの件数）。合計は failedCount と一致する。 */
+  failureKindCounts: FailureKindCounts
 }
 
 function buildBatchUserContent(items: BatchItem[]): string {
@@ -277,7 +328,7 @@ async function detectBatchOnce(items: BatchItem[], settings: AdminSettings): Pro
   }
 
   const profile = resolveModelProfile(settings, model)
-  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(items.length), profile)
+  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(items.length), profile, settings.llmReasoningBudgetTokens)
 
   const call = await llmCallWithMeta(
     {
@@ -310,13 +361,18 @@ async function detectBatchOnce(items: BatchItem[], settings: AdminSettings): Pro
   }
 }
 
-function giveUpBatch(items: BatchItem[], transcriptProfile: LanguageRoleProfile): ProcessOutcome {
+function giveUpBatch(
+  items: BatchItem[],
+  transcriptProfile: LanguageRoleProfile,
+  kind: IncompleteEndsFailureKind,
+): ProcessOutcome {
   return {
     aborted: false,
     items: items.map(({ id, text }) => ({ id, incomplete: deterministicIncompleteFlag(text, transcriptProfile) })),
     successCount: 0,
     failedCount: items.length,
     fallbackCount: items.length,
+    failureKindCounts: singleFailureKindCount(kind, items.length),
   }
 }
 
@@ -328,6 +384,7 @@ function abortedOutcome(items: BatchItem[], reason: string, transcriptProfile: L
     successCount: 0,
     failedCount: items.length,
     fallbackCount: items.length,
+    failureKindCounts: singleFailureKindCount('config_error', items.length),
   }
 }
 
@@ -350,6 +407,7 @@ async function processBatch(
       successCount: outcome.items.length,
       failedCount: 0,
       fallbackCount: 0,
+      failureKindCounts: emptyFailureKindCounts(),
     }
   }
 
@@ -364,12 +422,14 @@ async function processBatch(
       processBatch(items.slice(0, mid), settings, transcriptProfile, depth + 1),
       processBatch(items.slice(mid), settings, transcriptProfile, depth + 1),
     ])
+    const combinedFailureKindCounts = mergeFailureKindCounts(left.failureKindCounts, right.failureKindCounts)
     if (left.aborted) {
       return {
         ...left,
         items: [...left.items, ...right.items],
         failedCount: left.failedCount + right.failedCount,
         fallbackCount: left.fallbackCount + right.fallbackCount,
+        failureKindCounts: combinedFailureKindCounts,
       }
     }
     if (right.aborted) {
@@ -378,6 +438,7 @@ async function processBatch(
         items: [...left.items, ...right.items],
         failedCount: left.failedCount + right.failedCount,
         fallbackCount: left.fallbackCount + right.fallbackCount,
+        failureKindCounts: combinedFailureKindCounts,
       }
     }
     return {
@@ -386,6 +447,7 @@ async function processBatch(
       successCount: left.successCount + right.successCount,
       failedCount: left.failedCount + right.failedCount,
       fallbackCount: left.fallbackCount + right.fallbackCount,
+      failureKindCounts: combinedFailureKindCounts,
     }
   }
 
@@ -399,22 +461,29 @@ async function processBatch(
         successCount: retry.items.length,
         failedCount: 0,
         fallbackCount: 0,
+        failureKindCounts: emptyFailureKindCounts(),
       }
     }
     if (retry.kind === 'config_error') {
       return abortedOutcome(items, retry.message, transcriptProfile)
     }
+    // リトライしても駄目だった場合は、リトライ後に実際に返ってきた種別で数える
+    // （最初は retryable でも、リトライ結果が truncated / abortable に変わることがある）。
+    return giveUpBatch(items, transcriptProfile, retry.kind)
   }
 
-  // それ以外（abortable / リトライしても駄目 / depth超過）はバッチ諦め → 決定的フォールバック
-  return giveUpBatch(items, transcriptProfile)
+  // それ以外（abortable / truncated が depth超過で諦め / retryable が再帰中で抑止）は
+  // バッチ諦め → 決定的フォールバック。outcome.kind をそのまま失敗種別として数える。
+  return giveUpBatch(items, transcriptProfile, outcome.kind)
 }
 
 export async function detectIncompleteEnds(
   texts: string[],
   settings: AdminSettings,
 ): Promise<DetectionResult> {
-  if (texts.length === 0) return { flags: [], success: 0, failed: 0, deterministicFallbackCount: 0 }
+  if (texts.length === 0) {
+    return { flags: [], success: 0, failed: 0, deterministicFallbackCount: 0, failureKindCounts: emptyFailureKindCounts() }
+  }
 
   const transcriptProfile = loadLanguageProfileConfig(settings).transcript
   const batchSize = resolveEffectiveBatchSize(settings)
@@ -436,6 +505,8 @@ export async function detectIncompleteEnds(
   if (probe.aborted) {
     // 残バッチは LLM 呼出こそ行わないが（config_error 起因の無駄な API call を避けるため）、
     // 決定的フォールバックは正規表現のみで完結するのでここでも適用する。
+    // 残バッチは LLM を一度も呼んでいないが、呼ばなかった理由は最初のバッチと同じ
+    // config_error（設定を直さない限り呼んでも失敗するため）なので、内訳にも config_error として計上する。
     const remainder: BatchItem[] = texts
       .slice(batches[0].length)
       .map((text, j) => ({ id: batches[0].length + j, text }))
@@ -447,6 +518,10 @@ export async function detectIncompleteEnds(
       success: probe.successCount,
       failed: probe.failedCount + remainder.length,
       deterministicFallbackCount: probe.fallbackCount + remainder.length,
+      failureKindCounts: mergeFailureKindCounts(
+        probe.failureKindCounts,
+        singleFailureKindCount('config_error', remainder.length),
+      ),
       abortReason: probe.abortReason,
     }
   }
@@ -454,9 +529,10 @@ export async function detectIncompleteEnds(
   let success = probe.successCount
   let failed = probe.failedCount
   let deterministicFallbackCount = probe.fallbackCount
+  let failureKindCounts = probe.failureKindCounts
 
   if (batches.length === 1) {
-    return { flags, success, failed, deterministicFallbackCount }
+    return { flags, success, failed, deterministicFallbackCount, failureKindCounts }
   }
 
   const restBatches = batches.slice(1)
@@ -473,14 +549,15 @@ export async function detectIncompleteEnds(
     success += r.successCount
     failed += r.failedCount
     deterministicFallbackCount += r.fallbackCount
+    failureKindCounts = mergeFailureKindCounts(failureKindCounts, r.failureKindCounts)
   }
 
   // 並列実行中にどこかが abort 状態になった場合は理由を残す（rare: probeを通過しても
   // モデル一時障害等で個別バッチが認証類エラーを返す可能性に備える）
   const lateAbort = restResults.find((r) => r.aborted)
   if (lateAbort) {
-    return { flags, success, failed, deterministicFallbackCount, abortReason: lateAbort.abortReason }
+    return { flags, success, failed, deterministicFallbackCount, failureKindCounts, abortReason: lateAbort.abortReason }
   }
 
-  return { flags, success, failed, deterministicFallbackCount }
+  return { flags, success, failed, deterministicFallbackCount, failureKindCounts }
 }

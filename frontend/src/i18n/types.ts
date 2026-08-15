@@ -8,6 +8,11 @@ export interface LocaleStrings {
   toast: {
     exportSrt: ToastMessage
     saveProjectJson: ToastMessage
+    importProjectJson: ToastMessage
+    projectImportError: ToastMessage
+    projectVersionTooNew: ToastMessage
+    projectExportError: ToastMessage
+    workLogWriteWarning: ToastMessage
     exportCsv: ToastMessage
     exportJson: ToastMessage
     exportAdminSettings: ToastMessage
@@ -35,6 +40,7 @@ export interface LocaleStrings {
   tabReport: string
   saving: string
   saved: string
+  saveFailed: string
   loadProject: string
   saveProject: string
   exportSrt: string
@@ -118,6 +124,7 @@ export interface LocaleStrings {
   reportColDuration: string
   reportColQuality: string
   reportStatusSuccess: string
+  reportStatusWarning: string
   reportStatusError: string
   reportStatusRunning: string
   reportStatusIdle: string
@@ -147,12 +154,13 @@ export interface LocaleStrings {
   settingsEnMaxLines: string
   settingsEnMaxCps: string
   settingsSubtitleMinDuration: string
+  settingsSubtitleMaxGapSec: string
+  settingsSubtitleMaxGapSecHint: string
   settingsQualityCorrectionThreshold: string
   settingsPipelineThresholdsTitle: string
   settingsPipelineShortDurationSec: string
   settingsPipelineLongDurationSec: string
   settingsPipelineMergedLongDurationSec: string
-  settingsPipelineVerboseEnRatio: string
   settingsPipelineOverCompressedRatio: string
   settingsPipelineOverCompressedJaChars: string
   settingsPipelineSlowCps: string
@@ -164,6 +172,7 @@ export interface LocaleStrings {
   settingsPipelineMergeContinuationMaxTranscriptChars: string
   settingsIncompleteEndDetectionModel: string
   settingsIncompleteEndDetectionBatchSize: string
+  settingsLlmReasoningBudgetTokens: string
   settingsLlmRequestTimeoutSec: string
   settingsCompressModel: string
   settingsMicroModel: string

@@ -2,7 +2,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
-import { loadLanguageProfileConfig } from '../../languageProfileConfig'
+import { loadLanguageProfileConfig, type LanguageProfileConfig } from '../../languageProfileConfig'
 import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
 import { requireChatModelForProvider } from '../../aiProvider'
@@ -11,7 +11,10 @@ import { countCpsChars } from '@/lib/subtitleMetrics'
 import { buildMetrics } from '../metrics'
 import { parseJsonObjectFromLlmContent } from '../../jsonResponse'
 import { llmCallWithMeta } from '../../llmCallWithMeta'
+import { checkSeamOnlySplit } from '../../seamOnlySplitCheck'
 import { callSubtitleLlm } from './callSubtitleLlm'
+import { allocateSplitTiming } from './splitTimingAllocator'
+import { withCueSourceRelation } from '@/types/sourceEvidence'
 
 interface SplitResult {
   units: SplitUnit[]
@@ -72,14 +75,35 @@ function normalizeJaUnit(text: string): string {
   return normalizeSpaces(text).replace(/\s/g, '')
 }
 
-function endsWithIncompleteJapanese(text: string): boolean {
+/**
+ * 日本語テキストが文の途中で終わっているか（助詞・接続・読点で終わる）。
+ * scripts/auditOutput.ts も同じ判定を使うため export している。判定を二重実装すると
+ * 監査結果と実際の挙動がずれるので、必ずこれを使うこと。
+ */
+export function endsWithIncompleteJapanese(text: string): boolean {
   const normalized = normalizeJaUnit(text)
   return /([、,]|の|と|を|に|が|は|で|て|から|ため|として|について|には|では|ので|し|か|点で)$/.test(normalized)
 }
 
-function isBadJapaneseUnit(text: string): boolean {
+// exemptTrailingParticle: true の場合、「末尾が助詞・接続で終わっていないか」の判定を免除する。
+// 最小文字数（6文字未満）の判定は免除しない — 短すぎる断片は分割そのものが生んだ問題であり、
+// 入力が不完全だったかどうかとは無関係に弾くべきなため。
+function isBadJapaneseUnit(text: string, opts: { exemptTrailingParticle?: boolean } = {}): boolean {
   const normalized = normalizeJaUnit(text)
-  return normalized.length < 6 || endsWithIncompleteJapanese(normalized)
+  if (normalized.length < 6) return true
+  if (opts.exemptTrailingParticle) return false
+  return endsWithIncompleteJapanese(normalized)
+}
+
+// isBadJapaneseUnit は末尾しか見ていないため、「ということを紹介したいと思います。」のように
+// 継ぎ目の言い切り修正としては正しくても、2個目以降のユニットが接続表現で始まって
+// 前のユニットに文脈依存する断片になるケースを捕捉できない。過剰に弾かないよう、
+// 計測中に実際に見つかった3パターンに限定した独立の判定として実装する。
+const CONNECTIVE_UNIT_START_PATTERNS = ['という', 'といった', 'ということ'] as const
+
+function startsWithConnectiveExpression(text: string): boolean {
+  const normalized = normalizeJaUnit(text)
+  return CONNECTIVE_UNIT_START_PATTERNS.some((pattern) => normalized.startsWith(pattern))
 }
 
 function isBadEnglishUnit(text: string): boolean {
@@ -148,18 +172,45 @@ function parseSplitUnits(content: string): { units: SplitUnit[]; warning?: strin
   return { units: [], warning: content ? `LLM returned unexpected format: ${content.slice(0, 400)}` : 'LLM returned empty content' }
 }
 
-// transcript（元言語）のラベルをプロンプトへ注入する。
-// 既定構成（transcript=Japanese）では従来のハードコード文字列とバイト一致する。
+// 日本語 transcript 向けの分割プロンプト。scripts/measureSeamOnlySplit.ts で実データ183件を
+// 計測し、80.3%が「継ぎ目（ユニットの末尾）だけの言い切り修正」で安全に分割できることを
+// 実証済み。本文の言い換え・要約・圧縮を許すと分割を拒否される率が跳ね上がるため、
+// 計測時のプロンプトを一字一句そのまま使う（変更すると計測結果が効かなくなる）。
+const JAPANESE_SPLIT_SYSTEM_PROMPT = `この日本語の講義書き起こしを、2〜3個の字幕単位に分割してください。
+
+厳守事項:
+- 各単位は原文の文字列をそのまま使うこと。語順の変更・言い換え・要約・語句の追加は禁止。
+- 唯一許される変更は、各単位の末尾を完結した文にするための最小限の修正のみ。
+  例: 「〜しておりますので、」→「〜しております。」
+      「〜を理解し、」→「〜を理解します。」
+- 本文の圧縮やフィラーの削除は禁止。原文の情報を落とさないこと。
+- 各単位は文として完結していること（助詞や接続助詞で終わらない）。
+- 安全に分割できない場合は {"cannot_split": true, "units": []} を返すこと。
+
+出力はJSONのみ: {"units":[{"text":"..."}]}`
+
+// 非日本語 transcript 向けの分割プロンプト。日本語版と同じ「継ぎ目のみ書き換え可」の
+// 方針を英語で表現したもの（計測は日本語データでのみ行っているが、本文を書き換えさせず
+// コード側の checkSeamOnlySplit で機械検査する設計自体は言語に依存しないため踏襲する）。
 function buildSplitSystemPrompt(transcriptLabel: string): string {
   return (
-    `Resegment this ${transcriptLabel} academic lecture subtitle into 1 to 3 subtitle units. ` +
-    'Use 1 unit if splitting would be unnatural. Use 2 or 3 units only at clear semantic boundaries. ' +
-    'Each unit must make sense independently and must not end with a particle, conjunction, or unfinished clause. ' +
-    'Preserve technical terms, numbers, formulas, definitions, negations, conditions, and causal relations. ' +
-    'You may remove filler, repeated setup phrases, and redundant lecture asides if no information is lost. ' +
-    'If the text cannot be split safely, return {"cannot_split": true, "units": [], "warnings": ["reason"]}. ' +
-    'Respond only with JSON: {"units":[{"text":"...","reason":"...","confidence":0.0}],"warnings":[]}'
+    `Resegment this ${transcriptLabel} academic lecture transcript into 2 or 3 subtitle units. ` +
+    'Each unit must reuse the source wording verbatim: no reordering, paraphrasing, summarizing, or added words. ' +
+    'The only edit allowed is a minimal fix at the end of a unit so it reads as a complete sentence ' +
+    '(for example, turning a trailing conjunction or connector into a period). ' +
+    'Do not compress the text or drop filler; keep all information from the source. ' +
+    'Each unit must be a complete sentence and must not end with a particle or conjunction. ' +
+    'If the text cannot be split safely, return {"cannot_split": true, "units": []}. ' +
+    'Respond only with JSON: {"units":[{"text":"..."}]}'
   )
+}
+
+// correct.ts の pickCorrectionBasePrompt と同じパターン。日本語 transcript には計測で
+// 実証済みの日本語プロンプトをそのまま使い、それ以外は同じ趣旨の英語版にフォールバックする。
+function pickSplitSystemPrompt(languages: LanguageProfileConfig): string {
+  return languages.transcript.script === 'japanese'
+    ? JAPANESE_SPLIT_SYSTEM_PROMPT
+    : buildSplitSystemPrompt(languages.transcript.label)
 }
 
 async function splitJaText(
@@ -167,12 +218,12 @@ async function splitJaText(
   settings: AdminSettings,
 ): Promise<SplitResult> {  // warning フィールドが設定される場合がある
   const model = requireChatModelForProvider(settings, settings.correctionModel || settings.translationModel, 'split block')
-  const transcriptLabel = loadLanguageProfileConfig(settings).transcript.label
+  const languages = loadLanguageProfileConfig(settings)
 
   const callResult = await llmCallWithMeta(
     {
       model,
-      systemPrompt: buildSplitSystemPrompt(transcriptLabel),
+      systemPrompt: pickSplitSystemPrompt(languages),
       userContent: jaText,
       temperature: 0.0,
       nodeName: 'split_block',
@@ -235,10 +286,6 @@ async function translateSingle(
   return { text: result.text, errorMessage: result.errorMessage }
 }
 
-function clampMs(ms: number, minMs: number): number {
-  return Math.max(ms, minMs)
-}
-
 function buildFailurePatch(block: EnBlock, warning: string): TimelinePatch {
   return {
     replaceBlocks: [block],
@@ -246,23 +293,6 @@ function buildFailurePatch(block: EnBlock, warning: string): TimelinePatch {
     changed: false,
     warning,
   }
-}
-
-function allocateDurationsMs(weights: number[], availableMs: number, minDurationMs: number): number[] | null {
-  if (weights.length === 0) return []
-  if (availableMs < minDurationMs * weights.length) return null
-
-  const remainingMs = availableMs - minDurationMs * weights.length
-  const totalWeight = weights.reduce((sum, weight) => sum + Math.max(1, weight), 0)
-  const durations = weights.map((weight) => minDurationMs + Math.floor(remainingMs * Math.max(1, weight) / totalWeight))
-  let remainder = availableMs - durations.reduce((sum, duration) => sum + duration, 0)
-  let index = 0
-  while (remainder > 0) {
-    durations[index % durations.length] += 1
-    index += 1
-    remainder -= 1
-  }
-  return durations
 }
 
 function validateSplitCandidates(
@@ -328,19 +358,29 @@ export const splitBlockTool: Tool = {
     if (!m.splitViable) return false
     if (ctx.attemptHistory.some(a => a.strategy === 'split_block')) return false
 
-    // Phase1 detectIncompleteEnds で「末尾 mid-sentence」と判定済の場合は分割しない。
-    // この種ブロックは LLM が「2 unit に分けられない」と返すのが既定で、無駄な API コール
-    // を避けつつログのノイズを減らす（Day4 ログでは 305件 / 752件試行で発生）。
     const block = ctx.block as { endsIncomplete?: boolean; jaText: string }
-    if (block.endsIncomplete === true) return false
+    const isDurationViolation =
+      ctx.block.violation === 'long_segment' || ctx.block.violation === 'merged_long'
+
+    // Phase1 detectIncompleteEnds で「末尾 mid-sentence」と判定済の場合、元々はここで
+    // 一律に分割を止めていた（この種ブロックは LLM が「2 unit に分けられない」と返すのが既定で、
+    // 無駄な API コールを避けつつログのノイズを減らす狙い。Day4 ログでは 305件 / 752件試行で発生）。
+    // しかしこの前提はプロンプトが本文の書き換えを一切禁じていた頃のもので、継ぎ目（各ユニットの
+    // 末尾）だけの言い切り修正を許した現在は成り立たない: 末尾が不完全なのは入力時点からであり、
+    // 分割自体はそれを悪化させない（execute 側 checkSeamOnlySplit が継ぎ目以外の書き換えを検査する）。
+    // 実際、このガードを外さないまま canApply を修復ループに繋いだ結果、実パイプライン再実行
+    // （117分・839キュー）で尺違反56件中11件（最長35.1秒など、出力中で最も長い字幕群）が
+    // 一度も分割を試みられなくなる退行を起こした。
+    // 尺違反（long_segment/merged_long）は分割以外に手段がないため、endsIncomplete でも
+    // 分割を試す。尺違反以外（cps_over/line_length_only の extreme tier）には引き続きガードを
+    // 効かせる: そちらは圧縮という代替手段があり、無駄な API コールを避ける元の意図が今も有効。
+    if (block.endsIncomplete === true && !isDurationViolation) return false
 
     // JA が短すぎる場合も同様。2 分割すると各 unit が 12 文字程度になり成立しない。
     if (normalizeForLengthCheck(block.jaText).length < SPLIT_BLOCK_MIN_TRANSCRIPT_CHARS) return false
 
-    const isDurationViolation =
-      ctx.block.violation === 'long_segment' || ctx.block.violation === 'merged_long'
     const isExtremeReadabilityViolation =
-      (ctx.block.violation === 'verbose_en' || ctx.block.violation === 'line_length_only') &&
+      (ctx.block.violation === 'cps_over' || ctx.block.violation === 'line_length_only') &&
       m.tier === 'extreme' &&
       normalizeForLengthCheck(block.jaText).length >= 45
     if (!isDurationViolation && !isExtremeReadabilityViolation) return false
@@ -366,9 +406,36 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, 'split_block: rejected low-confidence split unit')
     }
 
-    const badJa = cleanUnits.find(unit => isBadJapaneseUnit(unit.text))
+    // 元のブロックの jaText が既に不完全な終わり方をしていた場合（助詞・接続表現で終わる等）、
+    // 分割後の最後のユニットは必ず原文の末尾まで到達する（checkSeamOnlySplit が「最後のユニットが
+    // tail_dropped でないこと」＝原文末尾に到達していることを保証している）。つまり最後のユニットの
+    // 末尾の不完全さは分割が生んだものではなく入力から引き継いだものであり、分割を拒否しても
+    // 不完全さは解消せず「長すぎる字幕が1枚残る」だけ悪化する。そのため最後のユニットに限り、
+    // 「末尾が助詞・接続で終わる」判定を免除する（最小文字数の判定は免除しない）。
+    // 最後のユニット以外は従来どおり全ての判定を適用する。
+    const originalWasIncomplete = endsWithIncompleteJapanese(block.jaText)
+    const badJa = cleanUnits.find((unit, index) => {
+      const isLastUnit = index === cleanUnits.length - 1
+      return isBadJapaneseUnit(unit.text, { exemptTrailingParticle: isLastUnit && originalWasIncomplete })
+    })
     if (badJa) {
       return buildFailurePatch(block, `split_block: rejected incomplete or too-short Japanese unit: ${badJa.text}`)
+    }
+
+    // 2個目以降のユニットが接続表現で始まると、前のユニットに文脈依存する断片になる
+    // （例:「ということを紹介したいと思います。」）。翻訳する前に弾いて無駄なAPI呼び出しを避ける。
+    const connectiveStart = cleanUnits.find((unit, index) => index > 0 && startsWithConnectiveExpression(unit.text))
+    if (connectiveStart) {
+      return buildFailurePatch(block, `split_block: rejected unit starting with connective expression: ${connectiveStart.text}`)
+    }
+
+    // 継ぎ目（各ユニットの末尾）以外を書き換えていないかをコード側で機械的に検査する。
+    // プロンプトで「本文を書き換えるな」と頼むだけでは守られないことが計測でわかっているため、
+    // ここで不採用にする（scripts/measureSeamOnlySplit.ts で実データ183件を計測済み）。
+    const seamCheck = checkSeamOnlySplit(block.jaText, cleanUnits.map(unit => unit.text))
+    if (seamCheck.classification !== 'split_ok') {
+      const detail = seamCheck.detail ? `: ${seamCheck.detail}` : ''
+      return buildFailurePatch(block, `split_block: rejected non-seam-only split (${seamCheck.classification}${detail})`)
     }
 
     const translatedResults = await Promise.all(cleanUnits.map(unit => translateSingle(unit.text, settings)))
@@ -382,29 +449,32 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, `split_block: rejected fragment-like English unit: ${badEn}`)
     }
 
-    const totalDurationMs = Math.round((block.end - block.start) * 1000)
     const gapMs = thresholds.minInterSubtitleGapMs
-    const availableMs = totalDurationMs - gapMs * (cleanUnits.length - 1)
-    const minDurationMs = Math.round(thresholds.subtitleMinDurationSec * 1000)
-
-    const durationsMs = allocateDurationsMs(translated.map(en => countCpsChars(en)), availableMs, minDurationMs)
-    if (!durationsMs) {
+    const languages = loadLanguageProfileConfig(settings)
+    const timing = allocateSplitTiming({
+      parent: block,
+      units: cleanUnits.map((unit, index) => ({ jaText: unit.text, enText: translated[index] })),
+      script: languages.transcript.script,
+      gapMs,
+      maxClosableGapSec: settings.subtitleMaxGapSec,
+      subtitleMinDurationSec: thresholds.subtitleMinDurationSec,
+      shortDurationSec: thresholds.shortDurationSec,
+      verboseCps: thresholds.verboseCps,
+    })
+    if (!timing) {
       return buildFailurePatch(block, 'split_block: rejected split because total duration cannot satisfy minimum display time')
     }
 
     const prevSplitDepth = (block as { splitDepth?: number }).splitDepth ?? 0
-    let cursor = block.start
     const replaceBlocks = cleanUnits.map((unit, index): EnBlock => {
-      const start = cursor
-      const end = index === cleanUnits.length - 1
-        ? block.end
-        : start + clampMs(durationsMs[index], minDurationMs) / 1000
-      cursor = end + gapMs / 1000
+      const start = timing.units[index].start
+      const end = timing.units[index].end
       const enText = translated[index]
       const enChars = countCpsChars(enText)
+      const nextId = index === 0 ? block.id : block.id * 1000 + index + 1
       const nextBlock: EnBlock = {
         ...block,
-        id: index === 0 ? block.id : block.id * 1000 + index + 1,
+        id: nextId,
         start,
         end,
         jaText: unit.text,
@@ -417,6 +487,28 @@ export const splitBlockTool: Tool = {
         compressCount: 0,
         expandCount: 0,
         enTextOriginal: block.enTextOriginal ?? block.enText,
+        // 上の `...block` スプレッドで contextGroupId 等を親からそのまま引き継いでいた（元々は
+        // id・start・end 等だけを上書きするつもりで、文脈グループ情報は素通りしていた）。
+        // 親が単独の singleton グループならたまたま無害だったが、親が
+        // incomplete_end_context_group 等で複数キューのグループだった場合、子が親の
+        // contextGroupId とグループサイズ(>1)をそのまま引き継いでしまう。finalSafeMerge
+        // (finalSafeMerge.ts) は sameContextGroup && contextGroupSize>1 を結合条件にしているため、
+        // 「意図して分割した子」が直後に再結合されてしまう退行に繋がる
+        // （実測: 拒否48件中3件は singleton 化という偶然だけで結合を免れていた＝設計として
+        // 防げていなかった）。分割で生まれた子キューは実データ上も独立した文脈単位なので、
+        // contextGrouping.ts の single_cue_context_group と同じ形（size=1, role='single'）で
+        // 自分自身だけの新しい singleton グループを割り当てる。
+        contextGroupId: `cg-${nextId}`,
+        contextGroupIndex: 0,
+        contextGroupSize: 1,
+        contextGroupRole: 'single',
+        contextGroupReason: 'split_block_singleton',
+        contextGroupText: unit.text,
+        contextGroupSourceIds: [nextId],
+        words: timing.units[index].words?.map(word => ({ ...word })),
+        alignConf: timing.units[index].alignConf,
+        alignMatchRate: timing.units[index].alignMatchRate,
+        sourceRefs: withCueSourceRelation(block.sourceRefs, 'correction_split'),
       }
       ;(nextBlock as unknown as Record<string, unknown>).splitDepth = prevSplitDepth + 1
       ;(nextBlock as unknown as Record<string, unknown>).splitFrom = block.id
@@ -434,6 +526,7 @@ export const splitBlockTool: Tool = {
       dirtyBlockIds: validated.blocks.map(nextBlock => String(nextBlock.id)),
       changed: true,
       warning: splitWarning,
+      splitTiming: timing.decision,
     }
   },
 }
@@ -441,4 +534,6 @@ export const splitBlockTool: Tool = {
 export const __testing = {
   buildSplitSystemPrompt,
   buildSingleTranslateSystem,
+  pickSplitSystemPrompt,
+  JAPANESE_SPLIT_SYSTEM_PROMPT,
 }

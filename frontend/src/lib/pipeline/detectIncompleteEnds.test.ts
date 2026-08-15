@@ -148,6 +148,8 @@ describe('detectIncompleteEnds', () => {
     expect(result.deterministicFallbackCount).toBe(4)
     // 全て「。」終わりなので決定的フォールバックでも incomplete=false
     expect(result.flags).toEqual([false, false, false, false])
+    // 失敗の内訳: 4件とも truncated が depth 超過で諦めた結果（他の種別は発生していない）
+    expect(result.failureKindCounts).toEqual({ abortable: 0, retryable: 0, truncated: 4, config_error: 0 })
   })
 
   it('aborts immediately on a config-origin failure (HTTP 401) and never calls the remaining batches', async () => {
@@ -167,6 +169,8 @@ describe('detectIncompleteEnds', () => {
     expect(result.abortReason).toBeDefined()
     expect(result.abortReason).toContain('401')
     expect(result.failed).toBe(6)
+    // config_error は呼んでいない残りバッチ分も含めて内訳に計上される
+    expect(result.failureKindCounts).toEqual({ abortable: 0, retryable: 0, truncated: 0, config_error: 6 })
   })
 
   it('aborts immediately on quota_exhausted (HTTP 429 insufficient_quota) and never calls the remaining batches or retries with backoff', async () => {
@@ -190,6 +194,7 @@ describe('detectIncompleteEnds', () => {
     // buildLlmFailureCode() の短い分類コードのみで、プロバイダの生応答本文（billing 文言等）は含まない。
     expect(result.abortReason).not.toContain('billing')
     expect(result.failed).toBe(6)
+    expect(result.failureKindCounts).toEqual({ abortable: 0, retryable: 0, truncated: 0, config_error: 6 })
   })
 
   it('aborts immediately on connection_failed (missing API key) and never calls fetch at all', async () => {
@@ -210,6 +215,7 @@ describe('detectIncompleteEnds', () => {
     expect(calls).toHaveLength(0)
     expect(result.abortReason).toBeDefined()
     expect(result.failed).toBe(6)
+    expect(result.failureKindCounts).toEqual({ abortable: 0, retryable: 0, truncated: 0, config_error: 6 })
   })
 
   it('does not abort early on a transient fetch failure (errorCode=fetch_failed) and continues to remaining batches', async () => {
@@ -243,8 +249,41 @@ describe('detectIncompleteEnds', () => {
     expect(result.flags).toEqual([true, false])
     expect(result.failed).toBe(2)
     expect(result.deterministicFallbackCount).toBe(2)
+    expect(result.failureKindCounts).toEqual({ abortable: 2, retryable: 0, truncated: 0, config_error: 0 })
     // content_filter は abortable であり config_error ではないため、全体 abort はしない
     expect(result.abortReason).toBeUndefined()
+  })
+
+  it('counts failures by kind (abortable / retryable / truncated) across independently-failing batches', async () => {
+    // 背景（本番事故）: 実行ログは「308 of 823 blocks fell back to singleton context groups」という
+    // 集計1行しか残さず、308件のうち何が原因で失敗したか（timeout か truncated か等）が後から
+    // 分からなかった。実際には「存在しないモデルを指していて404で全滅」（config_error）していた
+    // ケースもログからは読み取れなかった。本テストは種別ごとの内訳が正しく積み上がることを確認する。
+    // apiRequestConcurrency=1 で残りバッチを厳密に順番どおり処理させ、fetch 呼び出し順を固定する。
+    const texts = ['一つ目。', '二つ目。', '三つ目。', '四つ目。', '五つ目。', '六つ目。']
+    const { fn, calls } = createGatewayFetchMock({
+      queue: [
+        contentFilterHandler, // batch1 (probe, 2件): abortable → 即諦め
+        networkThrowHandler,  // batch2 (2件) 1回目: fetch_failed → retryable
+        networkThrowHandler,  // batch2 リトライ: 再度 fetch_failed → リトライしても駄目で諦め
+        truncatedHandler,     // batch3 (2件) depth0: truncated → 半割で再帰
+        truncatedHandler,     // batch3 depth1 左(1件): truncated だがこれ以上割れず諦め
+        truncatedHandler,     // batch3 depth1 右(1件): 同上
+      ],
+      fallback: () => { throw new Error('unexpected extra fetch call') },
+    })
+    vi.stubGlobal('fetch', fn)
+
+    const result = await detectIncompleteEnds(
+      texts,
+      settings({ incompleteEndDetectionBatchSize: 2, apiRequestConcurrency: 1 }),
+    )
+
+    expect(calls).toHaveLength(6)
+    expect(result.success).toBe(0)
+    expect(result.failed).toBe(6)
+    expect(result.deterministicFallbackCount).toBe(6)
+    expect(result.failureKindCounts).toEqual({ abortable: 2, retryable: 2, truncated: 2, config_error: 0 })
   })
 
   it('never throws when languageProfileConfigJson contains an invalid regex, and defaults to incomplete=true', async () => {

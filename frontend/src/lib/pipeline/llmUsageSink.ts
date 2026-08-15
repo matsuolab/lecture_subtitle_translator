@@ -31,7 +31,7 @@ export function createLlmUsageSink(): LlmUsageSink {
 /**
  * パイプライン実行中の現在の usage sink（module-level）。
  *
- * 設計判断: 各 LLM 呼出ヘルパー（translateEn / coverageRepairAgent / etc.）に sink を引数として
+ * 設計判断: 各 LLM 呼出ヘルパー（translateEn / generalRepairAgent / etc.）に sink を引数として
  * 渡すと 18 ファイルのシグネチャ変更が必要になり、テスト・将来の拡張が重くなる。
  * 一方でこのアプリは local desktop で 1 パイプライン同時実行のみ（React app の特性）なので、
  * module-level の current sink で十分安全に運用できる。

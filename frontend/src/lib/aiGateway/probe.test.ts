@@ -78,7 +78,8 @@ describe('AI Gateway probeAll', () => {
     expect(visionBody.messages[0].content[1].type).toBe('image_url')
     expect(visionBody.messages[0].content[1].image_url.url).toContain('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAY')
     expect(visionBody.messages[0].content[0].text).toContain('Return JSON only')
-    expect(visionBody.max_completion_tokens).toBe(256)
+    // provider が openai なので、chatVision 経路でもトークン上限は送らない。
+    expect(visionBody.max_completion_tokens).toBeUndefined()
     expect(visionBody.max_tokens).toBeUndefined()
   })
 
@@ -168,9 +169,18 @@ describe('AI Gateway probeAll', () => {
     const visionBody = JSON.parse(String(calls[4].init.body))
     expect(chatBody.response_format).toEqual({ type: 'text' })
     expect(visionBody.response_format).toEqual({ type: 'text' })
-    expect(chatBody.max_tokens).toBe(32)
+    // Chat Text (chatText.ts 経由) は translationProvider: 'openai' に基づく provider で判定される。
+    // apiCompatibilityProfilePreset: 'lmstudio' は endpoint/tokenLimitParam/responseFormat の
+    // 「方言」だけを切り替えるものであり、adaptChatCompletionRequest が参照する provider
+    // （resolveAiProvider(settings) 由来）には影響しない。provider が openai である以上、
+    // トークン上限フィールドは方言に関わらず送らない（modelProfile.ts の
+    // stripTokenLimitFields 参照）。
+    expect(chatBody.max_tokens).toBeUndefined()
     expect(chatBody.max_completion_tokens).toBeUndefined()
-    expect(visionBody.max_tokens).toBe(256)
+    // Chat Vision (chatVision.ts) は adaptChatCompletionRequest を通らないが、トークン上限を
+    // 送るかどうかの provider 分岐だけは同じ規則で適用している。方言が lmstudio でも
+    // provider が openai である以上、上限は送らない。
+    expect(visionBody.max_tokens).toBeUndefined()
     expect(visionBody.max_completion_tokens).toBeUndefined()
   })
 

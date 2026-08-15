@@ -11,7 +11,6 @@ import { __testing as semanticSplitTesting } from './semanticSplitJa'
 import { __testing as decisionTesting } from './correctionAgent/decisionNode'
 import { __testing as translateTesting } from './translate'
 import { __testing as generalRepairTesting } from './generalRepairAgent'
-import { __testing as coverageRepairTesting } from './coverageRepairAgent'
 import { buildReviewItemsForBlock } from './reviewDiagnostics'
 import type { AgentThresholds, CorrectionStrategy, DecisionContext } from './correctionAgent/types'
 
@@ -43,15 +42,23 @@ describe('compress 系 user content（subtitleEditPrompt）', () => {
 })
 
 describe('split_block プロンプト', () => {
-  it('既定構成では従来文字列とバイト一致する', () => {
-    expect(splitBlockTesting.buildSplitSystemPrompt('Japanese')).toBe(
-      'Resegment this Japanese academic lecture subtitle into 1 to 3 subtitle units. ' +
-      'Use 1 unit if splitting would be unnatural. Use 2 or 3 units only at clear semantic boundaries. ' +
-      'Each unit must make sense independently and must not end with a particle, conjunction, or unfinished clause. ' +
-      'Preserve technical terms, numbers, formulas, definitions, negations, conditions, and causal relations. ' +
-      'You may remove filler, repeated setup phrases, and redundant lecture asides if no information is lost. ' +
-      'If the text cannot be split safely, return {"cannot_split": true, "units": [], "warnings": ["reason"]}. ' +
-      'Respond only with JSON: {"units":[{"text":"...","reason":"...","confidence":0.0}],"warnings":[]}',
+  it('日本語 transcript では計測済みの「継ぎ目のみ書き換え可」プロンプトをそのまま使う', () => {
+    expect(splitBlockTesting.pickSplitSystemPrompt(DEFAULT_LANGUAGE_PROFILE_CONFIG)).toBe(
+      splitBlockTesting.JAPANESE_SPLIT_SYSTEM_PROMPT,
+    )
+    expect(splitBlockTesting.JAPANESE_SPLIT_SYSTEM_PROMPT).toBe(
+      'この日本語の講義書き起こしを、2〜3個の字幕単位に分割してください。\n' +
+      '\n' +
+      '厳守事項:\n' +
+      '- 各単位は原文の文字列をそのまま使うこと。語順の変更・言い換え・要約・語句の追加は禁止。\n' +
+      '- 唯一許される変更は、各単位の末尾を完結した文にするための最小限の修正のみ。\n' +
+      '  例: 「〜しておりますので、」→「〜しております。」\n' +
+      '      「〜を理解し、」→「〜を理解します。」\n' +
+      '- 本文の圧縮やフィラーの削除は禁止。原文の情報を落とさないこと。\n' +
+      '- 各単位は文として完結していること（助詞や接続助詞で終わらない）。\n' +
+      '- 安全に分割できない場合は {"cannot_split": true, "units": []} を返すこと。\n' +
+      '\n' +
+      '出力はJSONのみ: {"units":[{"text":"..."}]}',
     )
     expect(splitBlockTesting.buildSingleTranslateSystem('Japanese', 'English')).toBe(
       'Translate this Japanese subtitle text into natural English. ' +
@@ -63,8 +70,16 @@ describe('split_block プロンプト', () => {
     )
   })
 
+  it('非日本語 transcript では継ぎ目のみ書き換え可の英語版プロンプトを使う', () => {
+    const prompt = splitBlockTesting.pickSplitSystemPrompt(FRENCH_GERMAN_PROFILE)
+    expect(prompt).toBe(splitBlockTesting.buildSplitSystemPrompt('German'))
+    expect(prompt).toContain('Resegment this German academic lecture transcript')
+    expect(prompt).toContain('reuse the source wording verbatim')
+    expect(prompt).not.toBe(splitBlockTesting.JAPANESE_SPLIT_SYSTEM_PROMPT)
+  })
+
   it('言語ラベルが注入される', () => {
-    expect(splitBlockTesting.buildSplitSystemPrompt('German')).toContain('Resegment this German academic lecture subtitle')
+    expect(splitBlockTesting.buildSplitSystemPrompt('German')).toContain('Resegment this German academic lecture transcript')
     expect(splitBlockTesting.buildSingleTranslateSystem('German', 'French')).toContain('Translate this German subtitle text into natural French.')
   })
 })
@@ -131,22 +146,22 @@ describe('translate（レガシー）システムプロンプト', () => {
 
 const LEGACY_GENERAL_REPAIR_PROMPT = `You are GeneralRepairAgent — the LAST repair pass for academic lecture subtitles.
 
-The pipeline has already tried rule-based corrections and a coverage-focused repair agent.
-What remains are the hardest cases. You get one more chance per effort level (low → medium → high).
-If you cannot fix it, the block goes to manual_review.
+The pipeline has already tried rule-based corrections. What remains are the hardest cases.
+You get one more chance per effort level (low → medium → high). If you cannot fix it, the block
+goes to manual_review.
 
 You will be given:
 - chunk_blocks: all blocks for the current chunk, in time order, with current violations and correction history.
-- residual_violations: per-block violations (cps_over, line_length_only, long_segment, etc.) + chunk-level coverage gaps.
+- residual_violations: per-block violations (cps_over, line_length_only, long_segment, etc.).
 - constraints: hard limits (max_cps, max_chars_per_line, max_segment_chars, min_duration, etc.). MUST respect.
-- source_segments: original Japanese corrected text (post-correctJa) for coverage reference.
 
-Your job: rewrite the affected cues to resolve as many violations as possible.
+Your job: rewrite the affected cues' en text to resolve as many violations as possible.
 
 Rules:
-- Return JSON only: { "rationale": "...", "rewrites": [{ "block_id": N, "ja_span": "...", "en": "..." }] }
+- Return JSON only: { "rationale": "...", "rewrites": [{ "block_id": N, "en": "..." }] }
 - Only return rewrites for the cues you want to change. Other cues stay as-is.
-- You may modify both ja_span (to expand/shift source coverage) and en (to fix CPS/line/length).
+- You may modify en ONLY (to fix CPS/line/length). The ja_span (source Japanese) is fixed
+  and must NOT be changed — it is shown to you only as translation context.
 - Preserve the cue's start/end timing (you do NOT modify timing).
 - Compute allowed en chars as floor(duration_sec × max_cps). Stay within this budget.
 - Respect max_chars_per_line per line and max_segment_chars total.
@@ -154,55 +169,17 @@ Rules:
 - Preserve technical terms / formulas exactly (post-correctJa form).
 - Do not invent proper nouns (person names, organization names) that are not in source.
 - Use correction_attempts history to AVOID repeating strategies that already failed.
-- If you cannot repair a cue without violating constraints, leave it out of rewrites and explain in rationale.
-- For coverage gaps: prefer rephrasing existing en to absorb missing content, rather than fabricating.`
-
-const LEGACY_COVERAGE_REPAIR_PROMPT = `You are CoverageRepairAgent for academic lecture subtitles.
-
-A chunk of subtitles has a source-coverage problem: the union of all cue Japanese spans
-does not fully represent the source Japanese segment. Some content from the source
-Japanese is missing from the cues' ja_span and / or en text.
-
-Your job: rewrite the affected cues so that the source Japanese is fully represented.
-
-You will be given:
-- source_segment: the full corrected Japanese with original (pre-correctJa) and correction_distance.
-  If correction_distance is large, technical terms or formulas were rewritten by correctJa — preserve them carefully.
-- constraints: hard limits (max_cps, max_chars_per_line, max_segment_chars). Your output MUST respect these.
-- affected_cues_to_repair: each cue includes current state AND correction_attempts history (strategies already tried).
-  Use the history to avoid repeating failed strategies.
-- context_cues_before / after: neighbor cues for coherent flow.
-
-Rules:
-- Return JSON only: { "rationale": "...", "rewrites": [{ "block_id": N, "ja_span": "...", "en": "..." }] }
-- Only return rewrites for the cues you want to change. Other cues stay as-is.
-- Preserve the cue's start/end timing (you do NOT modify timing).
-- Extend or shift each ja_span to claim more of the source Japanese where appropriate.
-- Rewrite the en text so it expresses the new content compactly.
-- Compute allowed en chars as floor(duration_sec * max_cps). Stay within this budget.
-- Do not exceed max_chars_per_line per line, max_segment_chars total.
-- Do not add content not present in the source Japanese.
-- Preserve technical terms / formulas exactly as written in the source (especially the post-correctJa form).
-- Do not invent proper nouns (person names, organization names) that are not in source.
-- If correction_attempts shows compress_micro / compress_rephrase already failed, do not just shorten — restructure.
-- If you cannot repair without violating constraints, return empty rewrites array with a rationale explaining why.`
+- If you cannot repair a cue without violating constraints, leave it out of rewrites and explain in rationale.`
 
 describe('repair agent システムプロンプト', () => {
   it('既定構成では従来の日本語前提プロンプトとバイト一致する', () => {
     expect(generalRepairTesting.buildSystemPrompt('Japanese')).toBe(LEGACY_GENERAL_REPAIR_PROMPT)
-    expect(coverageRepairTesting.buildSystemPrompt('Japanese')).toBe(LEGACY_COVERAGE_REPAIR_PROMPT)
   })
 
   it('transcript ラベルが注入され Japanese が残らない', () => {
     const general = generalRepairTesting.buildSystemPrompt('German')
-    expect(general).toContain('original German corrected text')
     expect(general).toContain('Do not add content not in the source German.')
     expect(general).not.toContain('Japanese')
-
-    const coverage = coverageRepairTesting.buildSystemPrompt('German')
-    expect(coverage).toContain('the union of all cue German spans')
-    expect(coverage).toContain('the source German is fully represented')
-    expect(coverage).not.toContain('Japanese')
   })
 })
 
@@ -212,7 +189,6 @@ const thresholds: PipelineThresholds & AgentThresholds = {
   mergedLongDurationSec: 7,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 16.9,
   maxLineLen: 42,
   slowCps: 3,
@@ -253,7 +229,7 @@ function makeDecisionContext(settings: AdminSettings): DecisionContext {
     enChars: 21,
     cps: 5,
     maxLineLen: 21,
-    violation: 'verbose_en',
+    violation: 'cps_over',
     alignConf: 'exact',
     merged: false,
     expandCount: 0,

@@ -259,13 +259,13 @@ export function SettingsTab({
       openaiCompatibleBaseUrl: '',
       translationModel: DEFAULT_OPENAI_CHAT_MODEL,
       correctionModel: DEFAULT_OPENAI_CHAT_MODEL,
-      pdfExtractionVisionModel: 'gpt-5.4-nano',
+      pdfExtractionVisionModel: DEFAULT_OPENAI_CHAT_MODEL,
       pdfFormulaMiniModel: DEFAULT_OPENAI_CHAT_MODEL,
       compressModel: DEFAULT_OPENAI_CHAT_MODEL,
-      microModel: 'gpt-5.4-nano',
+      microModel: DEFAULT_OPENAI_CHAT_MODEL,
       expandModel: DEFAULT_OPENAI_CHAT_MODEL,
       contextMergeModel: DEFAULT_OPENAI_CHAT_MODEL,
-      splitJaModel: 'gpt-5.4-nano',
+      splitJaModel: DEFAULT_OPENAI_CHAT_MODEL,
     })
   }
 
@@ -837,6 +837,14 @@ export function SettingsTab({
                   onChange={(value) => onAdminSettingsChange({ embeddingProfilePreset: value })}
                 />
               </div>
+              <NumberField
+                theme={theme}
+                label={t.settingsLlmReasoningBudgetTokens}
+                value={adminSettings.llmReasoningBudgetTokens}
+                min={0}
+                hint="0 で自動（モデルプロファイルの推論特性から推定）。0より大きい値を入れると、プロファイルの推定に関係なく必ずその分だけ出力トークン上限を割り増します。効くのはローカルLLM（LM Studio/Ollama等）経路のみで、OpenAI/Gemini API経路では出力上限自体を送らないためこの設定は反映されません。"
+                onChange={(value) => onAdminSettingsChange({ llmReasoningBudgetTokens: value })}
+              />
               <TextareaField
                 theme={theme}
                 label="Chat Text カスタムプロファイルJSON"
@@ -1099,16 +1107,16 @@ export function SettingsTab({
             theme={theme}
             label={t.settingsMicroModel}
             value={adminSettings.microModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="1単語ずつ削るマイクロ圧縮用。処理が極めて単純なので、軽量・低コストのモデルで十分です（default: gpt-5.4-nano）。空欄 = 圧縮モデルと同じにフォールバック"
+            hint="1単語ずつ削るマイクロ圧縮用。処理が極めて単純なので、軽量・低コストのモデルでも十分です（default: gpt-5.6-luna）。空欄 = 圧縮モデルと同じにフォールバック"
             onChange={(value) => onAdminSettingsChange({ microModel: value })}
           />
           <ComboField
             theme={theme}
             label="文脈統合モデル (Context Merge)"
             value={adminSettings.contextMergeModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-mini')}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
             hint="文脈依存の短い断片を前後どちらに統合するか判断するモデル。前/後の二択なので、軽量なモデルで十分です"
             onChange={(value) => onAdminSettingsChange({ contextMergeModel: value })}
@@ -1117,9 +1125,9 @@ export function SettingsTab({
             theme={theme}
             label="日本語分割モデル (splitJa)"
             value={adminSettings.splitJaModel}
-            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder('gpt-5.4-nano')}
+            placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="日本語を意味単位に分割する用途。翻訳生成は不要なので、軽量・小型のモデルで十分です（default: gpt-5.4-nano）。空欄 = マイクロ圧縮モデルと同じ"
+            hint="日本語を意味単位に分割する用途。翻訳生成は不要なので、軽量・小型のモデルでも十分です（default: gpt-5.6-luna）。空欄 = マイクロ圧縮モデルと同じ"
             onChange={(value) => onAdminSettingsChange({ splitJaModel: value })}
           />
 
@@ -1224,6 +1232,22 @@ export function SettingsTab({
             placeholder="Japanese"
             onChange={(value) => onAdminSettingsChange({ transcriptLanguageLabel: value })}
           />
+          <SelectField
+            theme={theme}
+            label="書きおこしトークン単位"
+            value={adminSettings.alignTokenMode}
+            onChange={(value) => onAdminSettingsChange({ alignTokenMode: value })}
+            options={[
+              { value: 'auto', label: '自動判定（推奨）' },
+              { value: 'char', label: '文字単位（日本語・中国語）' },
+              { value: 'word', label: '単語単位（英語など）' },
+            ]}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            通常は自動判定のままで構いません。WhisperXの出力から判定します。
+            {/* 実行先（ローカル/AWS）に関係なく意味を持つ設定。書きおこしの単位はASR出力の
+                性質（words[] の平均トークン長）で決まり、接続先設定では左右されないため。 */}
+          </div>
           <details style={{
             border: `1px solid ${theme.panelBorder}`,
             borderRadius: 8,
@@ -1287,6 +1311,17 @@ export function SettingsTab({
             step={0.001}
             onChange={(value) => onAdminSettingsChange({ subtitleMinDurationSec: value })}
           />
+          <NumberField
+            theme={theme}
+            label={t.settingsSubtitleMaxGapSec}
+            value={adminSettings.subtitleMaxGapSec}
+            min={0}
+            step={0.1}
+            onChange={(value) => onAdminSettingsChange({ subtitleMaxGapSec: value })}
+          />
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            {t.settingsSubtitleMaxGapSecHint}
+          </div>
         </FieldCard>
 
         <FieldCard theme={theme}>
@@ -1328,55 +1363,6 @@ export function SettingsTab({
         </FieldCard>
 
         <FieldCard theme={theme}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>カバレッジ修復エージェント</div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={adminSettings.coverageRepairEnabled}
-              onChange={(e) => onAdminSettingsChange({ coverageRepairEnabled: e.target.checked })}
-            />
-            <span style={{ fontSize: 12, color: theme.textPrimary }}>
-              coverage_repair_agent を有効化
-            </span>
-          </label>
-          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-            ON: ルールベース後の coverage 違反（source_text_undercovered）を mini + reasoning で自動修復。
-            1 chunk あたり 1 回・改善しない場合は revert（コスト 0.02 USD 程度／発動）。
-            OFF: coverage 違反は次段 general_repair か manual_review に流れる（API 呼出なし）。
-          </div>
-          <ComboField
-            theme={theme}
-            label="coverage_repair モデル"
-            value={adminSettings.coverageRepairModel}
-            placeholder={getChatModelPlaceholder('gpt-5.4-mini')}
-            listId="available-models-list"
-            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.4-mini"
-            onChange={(value) => onAdminSettingsChange({ coverageRepairModel: value })}
-          />
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>coverage_repair reasoning effort</span>
-            <select
-              value={adminSettings.coverageRepairEffort}
-              onChange={(e) => onAdminSettingsChange({ coverageRepairEffort: e.target.value as 'minimal' | 'low' | 'medium' | 'high' })}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                borderRadius: 8,
-                border: `1px solid ${theme.panelBorder}`,
-                background: theme.panelBg,
-                color: theme.textPrimary,
-                fontSize: 12,
-              }}
-            >
-              <option value="minimal">minimal（最小）</option>
-              <option value="low">low（推奨・default）</option>
-              <option value="medium">medium</option>
-              <option value="high">high（高コスト）</option>
-            </select>
-          </label>
-        </FieldCard>
-
-        <FieldCard theme={theme}>
           <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>汎用修復エージェント（最終救済）</div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
@@ -1398,9 +1384,9 @@ export function SettingsTab({
             theme={theme}
             label="general_repair モデル"
             value={adminSettings.generalRepairModel}
-            placeholder={getChatModelPlaceholder('gpt-5.4-mini')}
+            placeholder={getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.4-mini"
+            hint="空欄 = 圧縮モデルにフォールバック。default: gpt-5.6-luna"
             onChange={(value) => onAdminSettingsChange({ generalRepairModel: value })}
           />
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1660,17 +1646,9 @@ export function SettingsTab({
         <SettingsGroupLabel
           theme={theme}
           title="字幕の自動調整（文字量・速度）"
-          hint="英訳の文字量や読む速さを判定し、短縮・展開する基準です。英日文字比やCPSのしきい値で制御します。"
+          hint="英訳の文字量や読む速さを判定し、短縮・展開する基準です。CPSと行長のしきい値で制御します。"
         />
         <FieldCard theme={theme}>
-          <NumberField
-            theme={theme}
-            label={t.settingsPipelineVerboseEnRatio}
-            value={adminSettings.pipelineVerboseEnRatio}
-            min={0.5}
-            step={0.1}
-            onChange={(value) => onAdminSettingsChange({ pipelineVerboseEnRatio: value })}
-          />
           <NumberField
             theme={theme}
             label={t.settingsPipelineOverCompressedRatio}
@@ -1764,9 +1742,9 @@ export function SettingsTab({
             theme={theme}
             label={t.settingsIncompleteEndDetectionModel}
             value={adminSettings.incompleteEndDetectionModel}
-            placeholder={getChatModelPlaceholder('gpt-5.4-nano')}
+            placeholder={getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
-            hint="未完結末尾の判定モデル。バッチ + 並列で高速判定。default: gpt-5.4-nano"
+            hint="未完結末尾の判定モデル。バッチ + 並列で高速判定。default: gpt-5.6-luna"
             onChange={(value) => onAdminSettingsChange({ incompleteEndDetectionModel: value })}
           />
           <NumberField
@@ -2081,6 +2059,7 @@ function NumberField({
   value,
   min,
   step = 1,
+  hint,
   onChange,
 }: {
   theme: Theme
@@ -2088,6 +2067,7 @@ function NumberField({
   value: number
   min?: number
   step?: number
+  hint?: string
   onChange: (value: number) => void
 }) {
   const [display, setDisplay] = React.useState(() => String(value))
@@ -2123,6 +2103,9 @@ function NumberField({
           fontSize: 12,
         }}
       />
+      {hint && (
+        <span style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5 }}>{hint}</span>
+      )}
     </label>
   )
 }

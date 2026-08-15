@@ -1,7 +1,7 @@
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { TranscriptSegment } from '@/lib/pipeline/types'
 
-export const WORK_LOG_SCHEMA_VERSION = 1
+export const WORK_LOG_SCHEMA_VERSION = 2
 
 /** ワークログのファイル拡張子（1行1イベントの JSON Lines） */
 export const WORK_LOG_FILE_EXT = '.jsonl'
@@ -20,6 +20,8 @@ export interface WorkLogHeader {
   kind: 'header'
   schemaVersion: number
   sessionId: string
+  /** インポートした作業を継続する場合の元セッション */
+  parentSessionId?: string
   startedAt: string
   video: { name: string; path?: string } | null
   settingsSnapshot?: Record<string, unknown>
@@ -69,3 +71,14 @@ export interface WorkLogExport {
   baseline?: WorkLogBaseline
   events: Array<WorkLogEvent | WorkLogMarker>
 }
+
+export interface WorkLogWriteError {
+  name: string
+  message: string
+}
+
+export type WorkLogWriteResult =
+  | { ok: true }
+  | { ok: false; error: WorkLogWriteError }
+
+export type WorkLogFlushResult = WorkLogWriteResult

@@ -163,15 +163,28 @@ export async function contextGroupCueBlocks(
     detectionSuccess = detection.success
     detectionFailed = detection.failed
     abortReason = detection.abortReason
+    // 失敗の内訳（種別ごとの件数）。実行ログの集計1行だけでは「308件のうち何が原因で
+    // 失敗したか」が後から分からず、実際には「存在しないモデルを指していて404で全滅」
+    // （= config_error）していたケースがあってもログからは読み取れなかった。
+    const breakdown =
+      `abortable=${detection.failureKindCounts.abortable}, ` +
+      `retryable=${detection.failureKindCounts.retryable}, ` +
+      `truncated=${detection.failureKindCounts.truncated}, ` +
+      `config_error=${detection.failureKindCounts.config_error}`
     if (detection.abortReason) {
       onWarning?.(
         'contextGroupCueBlocks',
-        `detection aborted: ${detection.abortReason} (skipped ${detection.failed} of ${blocks.length}; singleton groups will be used where unknown)`,
+        `detection aborted: ${detection.abortReason} (skipped ${detection.failed} of ${blocks.length}; ` +
+          `deterministic sentence-end check will be used instead where unknown; breakdown: ${breakdown})`,
       )
     } else if (detection.failed > 0) {
+      // 「singleton context groups にフォールバックした」は誤り: LLM 判定が失敗しても
+      // 決定的フォールバック（正規表現ベースの endsIncomplete 判定）を通るだけで、
+      // その判定結果次第では複数キューのグループに入ることもある（assignContextGroupsFromFlags 参照）。
       onWarning?.(
         'contextGroupCueBlocks',
-        `detection partial failure: ${detection.failed} of ${blocks.length} blocks fell back to singleton context groups`,
+        `detection partial failure: ${detection.failed} of ${blocks.length} blocks had their LLM detection ` +
+          `fail and fell back to the deterministic sentence-end check (breakdown: ${breakdown})`,
       )
     }
   }

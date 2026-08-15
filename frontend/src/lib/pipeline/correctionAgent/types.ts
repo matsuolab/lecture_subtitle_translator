@@ -1,4 +1,5 @@
 import type { AdminSettings } from '@/types/adminSettings'
+import type { PipelineSplitTimingDecision } from '@/types/pipeline'
 import type { EnBlock, PipelineThresholds, ViolationCode } from '../blockTypes'
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,8 @@ export interface DecisionMetrics {
 
 export type SemanticCheckOutcome = 'passed' | 'borderline' | 'failed' | 'unavailable'
 
+export type SplitTimingDecision = PipelineSplitTimingDecision
+
 export interface CorrectionAttempt {
   strategy: CorrectionStrategy
   changed: boolean
@@ -68,6 +71,7 @@ export interface CorrectionAttempt {
   rationale?: string
   semanticSimilarity?: number
   semanticOutcome?: SemanticCheckOutcome
+  splitTiming?: SplitTimingDecision
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +87,7 @@ export interface TimelinePatch {
   }
   dirtyBlockIds: string[]
   warning?: string  // ツールが期待外の動作をした際の診断情報（LLM 実レスポンス等）
+  splitTiming?: SplitTimingDecision
   changed: boolean
 }
 

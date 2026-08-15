@@ -4,11 +4,12 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
 import { resetLlmActivity } from '@/lib/aiGateway/llmActivity'
 
-import type { PipelineThresholds } from './blockTypes'
+import { buildPipelineThresholdsFromSettings } from './pipelineThresholdFields'
 import { runPhase1 } from './phase1'
 import { runPhase2 } from './phase2'
 import { runPhase3 } from './phase3'
 import { runNodeWithHeartbeat, type LocalPipelineProgressDetail } from './runNodeWithHeartbeat'
+import { buildSourceSegmentEvidence, type SourceSegmentEvidence } from '@/types/sourceEvidence'
 
 export type { LocalPipelineProgressDetail } from './runNodeWithHeartbeat'
 
@@ -17,6 +18,7 @@ export interface LocalPipelineResult {
   traces: PipelineNodeTrace[]
   audit: PipelineAuditReport
   stageSnapshots: PipelineStageSnapshot[]
+  sourceEvidence: SourceSegmentEvidence[]
 }
 
 export interface LocalPipelineGlossary {
@@ -27,6 +29,7 @@ export interface LocalPipelineGlossary {
 export interface LocalPipelineDebugFailure {
   traces?: PipelineNodeTrace[]
   stageSnapshots?: PipelineStageSnapshot[]
+  sourceEvidence?: SourceSegmentEvidence[]
 }
 
 export function getLocalPipelineDebugFailure(error: unknown): LocalPipelineDebugFailure {
@@ -35,6 +38,7 @@ export function getLocalPipelineDebugFailure(error: unknown): LocalPipelineDebug
   return {
     traces: Array.isArray(row.localPipelineTraces) ? row.localPipelineTraces as PipelineNodeTrace[] : undefined,
     stageSnapshots: Array.isArray(row.localPipelineStageSnapshots) ? row.localPipelineStageSnapshots as PipelineStageSnapshot[] : undefined,
+    sourceEvidence: Array.isArray(row.localPipelineSourceEvidence) ? row.localPipelineSourceEvidence as SourceSegmentEvidence[] : undefined,
   }
 }
 
@@ -42,11 +46,13 @@ function attachLocalPipelineDebugFailure(
   error: unknown,
   traces: PipelineNodeTrace[],
   stageSnapshots: PipelineStageSnapshot[],
+  sourceEvidence: SourceSegmentEvidence[] = [],
 ): Error {
   const err = error instanceof Error ? error : new Error(String(error))
   Object.assign(err, {
     localPipelineTraces: traces,
     localPipelineStageSnapshots: stageSnapshots,
+    localPipelineSourceEvidence: sourceEvidence,
   })
   return err
 }
@@ -94,6 +100,7 @@ function normalizeSnapshotItem(item: unknown): Record<string, unknown> {
     contextGroupReason: compactText(row.contextGroupReason),
     contextGroupText: compactText(row.contextGroupText),
     contextGroupSourceIds: Array.isArray(row.contextGroupSourceIds) ? row.contextGroupSourceIds : undefined,
+    sourceRefs: Array.isArray(row.sourceRefs) ? row.sourceRefs : undefined,
     reviewPriority: compactText(row.reviewPriority),
     reviewDisposition: compactText(row.reviewDisposition),
     correctionDistance: compactNumber(row.correctionDistance) ?? compactNumber(row.correction_distance),
@@ -120,9 +127,10 @@ export function normalizeSnapshotItems(result: unknown): Record<string, unknown>
     if (Array.isArray(row.misses)) {
       return row.misses.map((miss, index) => ({ id: index + 1, miss }))
     }
-    // Validator 系（coverageValidator）: summary を1番目に + 各 issue を続けて記録
-    if (Array.isArray(row.issues)) {
-      return [buildSnapshotSummary(row, 'issues'), ...buildSnapshotDetailItems(row.issues, 'issue')]
+    // 観測系（sourceTextLexicalOverlap）: summary を1番目に + 各 observation を続けて記録。
+    // 合否を持たない観測専用ノードのため、閾値で絞らず全件をそのまま残す。
+    if (Array.isArray(row.observations)) {
+      return [buildSnapshotSummary(row, 'observations'), ...buildSnapshotDetailItems(row.observations, 'observation')]
     }
     // デバッグ計測（correctionDebug など）: summary を1番目に + 各 entry を続けて
     // agent 系 result は entries と blocks の両方を持つため、blocks より先にここで扱う。
@@ -165,22 +173,6 @@ function buildSnapshotDetailItems(items: unknown[], kind: string): Record<string
   })
 }
 
-function buildPipelineThresholds(settings: AdminSettings): PipelineThresholds {
-  return {
-    shortDurationSec: settings.pipelineShortDurationSec,
-    longDurationSec: settings.pipelineLongDurationSec,
-    mergedLongDurationSec: settings.pipelineMergedLongDurationSec,
-    overCompressedRatio: settings.pipelineOverCompressedRatio,
-    overCompressedJaChars: settings.pipelineOverCompressedJaChars,
-    verboseEnRatio: settings.pipelineVerboseEnRatio,
-    verboseCps: settings.enMaxCps,
-    maxLineLen: settings.enMaxCharsPerLine,
-    slowCps: settings.pipelineSlowCps,
-    maxExpandPerBlock: settings.pipelineMaxExpandPerBlock,
-    maxCompressPerBlock: settings.pipelineMaxCompressPerBlock,
-  }
-}
-
 export async function runLocalPostPipeline(
   transcriptSegments: TranscriptSegment[],
   settings: AdminSettings,
@@ -192,7 +184,8 @@ export async function runLocalPostPipeline(
 
   const traces: PipelineNodeTrace[] = []
   const stageSnapshots: PipelineStageSnapshot[] = []
-  const thresholds = buildPipelineThresholds(settings)
+  const thresholds = buildPipelineThresholdsFromSettings(settings)
+  let sourceEvidence: SourceSegmentEvidence[] = []
 
   const recordStageSnapshot = (stage: string, result: unknown): void => {
     const items = normalizeSnapshotItems(result)
@@ -213,11 +206,18 @@ export async function runLocalPostPipeline(
     traces.push({ nodeId, status, attempt: 1, durationMs, provider: 'local-ts', model: 'local', summary })
   }
 
-  const runNode = async <T>(nodeId: string, run: () => Promise<T> | T): Promise<T> => {
+  // summarize は任意。ノードの実行結果から「成功時のtrace summary」を取り出すための
+  // フック（例: semanticSplitJa のトークン単位判定結果を人が読める形でtraceへ残す。
+  // phase1.ts の RunNode 参照）。既存の呼び出し側の大半は summary 不要のため省略可能。
+  const runNode = async <T>(
+    nodeId: string,
+    run: () => Promise<T> | T,
+    summarize?: (result: T) => string | undefined,
+  ): Promise<T> => {
     const startedAt = Date.now()
     try {
       const result = await runNodeWithHeartbeat(nodeId, run, onStep)
-      record(nodeId, 'success', Date.now() - startedAt)
+      record(nodeId, 'success', Date.now() - startedAt, summarize?.(result))
       recordStageSnapshot(nodeId, result)
       return result
     } catch (error) {
@@ -246,6 +246,7 @@ export async function runLocalPostPipeline(
         glossaryTerms: glossary.correctionTerms,
       },
     )
+    sourceEvidence = buildSourceSegmentEvidence(phase1Result.correctedSegments)
     const enBlocks = await runPhase2(
       phase1Result.blocks,
       settings,
@@ -279,6 +280,7 @@ export async function runLocalPostPipeline(
       blocks: phase3.blocks,
       traces,
       stageSnapshots,
+      sourceEvidence,
       audit: {
         mustReviewCount,
         shouldReviewCount,
@@ -288,6 +290,6 @@ export async function runLocalPostPipeline(
       },
     }
   } catch (error) {
-    throw attachLocalPipelineDebugFailure(error, traces, stageSnapshots)
+    throw attachLocalPipelineDebugFailure(error, traces, stageSnapshots, sourceEvidence)
   }
 }

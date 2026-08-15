@@ -152,7 +152,9 @@ describe('translateEn — F: バッチがJSONラッパー無しの素テキス�
   it('通常成功（救済経路を通らない）ブロックには translationRescued が付かない', async () => {
     const { calls } = stubFetch(() => jsonChatResponse({ translations: ['The weather is nice today.'] }))
 
-    const blocks = [makeBlock(1, '今日は良い天気です。')]
+    const blocks = [makeBlock(1, '今日は良い天気です。', {
+      sourceRefs: [{ sourceSegmentId: 4, semanticUnitId: 'u4', relation: 'semantic_unit' }],
+    })]
     const result = await translateEn(blocks, settings(), [])
 
     expect(result).toHaveLength(1)
@@ -161,6 +163,9 @@ describe('translateEn — F: バッチがJSONラッパー無しの素テキス�
     // 正規の JSON ラッパー経由で成功しているため救済フラグは立たない
     expect(result[0].translationRescued).toBeUndefined()
     expect(result[0].translationRetryAttempts).toBeUndefined()
+    expect(result[0].sourceRefs).toEqual([
+      { sourceSegmentId: 4, semanticUnitId: 'u4', relation: 'semantic_unit' },
+    ])
     expect(calls).toHaveLength(1)
   })
 

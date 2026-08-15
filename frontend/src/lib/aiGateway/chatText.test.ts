@@ -4,6 +4,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { TauriFetchOptions } from '@/lib/tauriFetch'
 import { setCurrentPipelineAbortController } from '@/lib/pipeline/pipelineAbort'
 import { createAiGateway } from './index'
+import { BUILTIN_API_COMPATIBILITY_PROFILES } from './apiCompatibilityProfile'
 import { getLlmActivitySnapshot, resetLlmActivity } from './llmActivity'
 import { getLlmConcurrencyState, resetLlmConcurrency, setLlmConcurrencyLimit } from './llmConcurrency'
 import { resetLmStudioContextLengthCache } from './lmStudioContextLength'
@@ -75,6 +76,9 @@ describe('AI Gateway chatText', () => {
       'Content-Type': 'application/json',
       Authorization: 'Bearer sk-test',
     })
+    // max_completion_tokens は送らない: openai / gemini では、上限を送っても消費量は変わらず
+    // 成功可否だけが左右される実測結果を受けて、adaptChatCompletionRequest がトークン上限
+    // フィールドを丸ごと取り除くようになった（modelProfile.ts の stripTokenLimitFields 参照）。
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
       model: 'gpt-4.1-mini',
       messages: [
@@ -82,7 +86,6 @@ describe('AI Gateway chatText', () => {
         { role: 'user', content: 'Say ok.' },
       ],
       temperature: 0.2,
-      max_completion_tokens: 2048,
       response_format: { type: 'json_object' },
     })
   })
@@ -238,6 +241,7 @@ describe('AI Gateway chatText', () => {
     const gateway = createAiGateway(settings({ translationProvider: 'openai' }), {
       fetch: async () => new Response(JSON.stringify({
         choices: [{ finish_reason: 'length', message: { content: 'partial output', refusal: null } }],
+        usage: { prompt_tokens: 10, completion_tokens: 16, completion_tokens_details: { reasoning_tokens: 16 } },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
     })
 
@@ -249,7 +253,79 @@ describe('AI Gateway chatText', () => {
     })
 
     expect(result.errorCode).toBe('truncated')
-    expect(result.errorMessage?.startsWith('truncated_at_length_limit (content_preview=')).toBe(true)
+    // 分岐判定には使われない表示用メッセージだが（errorCode で分岐すること。detectIncompleteEnds.ts
+    // 冒頭 JSDoc 参照）、原因究明に必要な情報（上限の有無・消費内訳・本文長）を含んでいることを確認する。
+    // provider が openai のため、maxTokens: 16 を渡しても実際には上限を送らない
+    // （modelProfile.ts の stripTokenLimitFields 参照）。
+    expect(result.errorMessage?.startsWith('truncated_at_length_limit:')).toBe(true)
+    expect(result.errorMessage).toContain('上限は送っていない')
+    expect(result.errorMessage).toContain('消費 completion=16（うち推論16）')
+    expect(result.errorMessage).toContain(`本文${'partial output'.length}文字`)
+  })
+
+  it('includes the actual sent token limit param/value in the truncated errorMessage for the local_openai path', async () => {
+    const gateway = createAiGateway(settings({
+      translationProvider: 'local_openai',
+      openaiCompatibleBaseUrl: 'http://127.0.0.1:1234/v1',
+    }), {
+      fetch: async () => new Response(JSON.stringify({
+        choices: [{ finish_reason: 'length', message: { content: 'partial output', refusal: null } }],
+        usage: { prompt_tokens: 10, completion_tokens: 376, completion_tokens_details: { reasoning_tokens: 376 } },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    })
+
+    const result = await gateway.chatText({
+      nodeName: 'truncated-local-regression',
+      model: 'google/gemma-4-12b',
+      messages: [{ role: 'user', content: 'Say ok.' }],
+      maxTokens: 376,
+    })
+
+    expect(result.errorCode).toBe('truncated')
+    expect(result.errorMessage).toContain('max_tokens')
+    expect(result.errorMessage).toContain('消費 completion=376（うち推論376）')
+    // 上限を送っていた場合は、確認すべき設定名のヒントを含む。
+    expect(result.errorMessage).toContain('llmReasoningBudgetTokens')
+  })
+
+  it('reports the custom tokenLimitParam name in the truncated errorMessage for user-defined profiles', async () => {
+    // ユーザー定義プロファイルは任意のパラメータ名を指定できる。メッセージ側が組み込みの
+    // 2つに決め打ちしていると、上限を送っているのに「送っていない」と報告してしまい、
+    // このメッセージの目的（切断原因が一目で分かること）そのものが壊れる。
+    const gateway = createAiGateway(settings({
+      translationProvider: 'local_openai',
+      openaiCompatibleBaseUrl: 'http://127.0.0.1:1234/v1',
+      apiCompatibilityProfilePreset: 'user',
+      apiCompatibilityProfileJson: JSON.stringify({
+        ...BUILTIN_API_COMPATIBILITY_PROFILES.lmStudio,
+        id: 'custom-runtime',
+        label: 'Custom runtime',
+        requestDialect: {
+          ...BUILTIN_API_COMPATIBILITY_PROFILES.lmStudio.requestDialect,
+          chat: {
+            ...BUILTIN_API_COMPATIBILITY_PROFILES.lmStudio.requestDialect.chat,
+            tokenLimitParam: 'num_predict',
+          },
+        },
+      }),
+    }), {
+      fetch: async () => new Response(JSON.stringify({
+        choices: [{ finish_reason: 'length', message: { content: '', refusal: null } }],
+        usage: { prompt_tokens: 10, completion_tokens: 999, completion_tokens_details: { reasoning_tokens: 900 } },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    })
+
+    const result = await gateway.chatText({
+      nodeName: 'truncated-custom-param-regression',
+      model: 'some-local-model',
+      messages: [{ role: 'user', content: 'Say ok.' }],
+      maxTokens: 999,
+    })
+
+    expect(result.errorCode).toBe('truncated')
+    expect(result.errorMessage).toContain('num_predict')
+    expect(result.errorMessage).not.toContain('上限は送っていない')
+    expect(result.errorMessage).toContain('llmReasoningBudgetTokens')
   })
 
   it('reports errorCode=fetch_failed when the network request throws', async () => {
@@ -1071,6 +1147,80 @@ describe('AI Gateway chatText', () => {
       expect(callCount).toBe(1)
       expect(result.errorCode).toBe('http_error')
       expect(result.httpStatus).toBe(400)
+    })
+  })
+
+  describe('user-defined tokenLimitParam (implementation 4 integration: stripTokenLimitFields must strip whatever name is actually configured)', () => {
+    function userApiCompatibilityProfileJson(tokenLimitParam: string): string {
+      return JSON.stringify({
+        id: 'user:api:custom',
+        label: 'Custom Server',
+        schemaVersion: 1,
+        profileVersion: 'user',
+        origin: 'user',
+        requestDialect: {
+          chat: { endpoint: '/chat/completions', tokenLimitParam, responseFormat: 'json_object' },
+          embeddings: { endpoint: '/embeddings' },
+          vision: { endpoint: '/chat/completions', supportsDataUrl: true, supportsRemoteUrl: false },
+        },
+      })
+    }
+
+    it('strips a custom tokenLimitParam name for the openai provider (the field must not leak into the request body)', async () => {
+      const calls: Array<{ init: TauriFetchOptions }> = []
+      const gateway = createAiGateway(settings({
+        translationProvider: 'openai',
+        apiCompatibilityProfilePreset: 'user',
+        apiCompatibilityProfileJson: userApiCompatibilityProfileJson('num_predict'),
+      }), {
+        fetch: async (_url, init) => {
+          calls.push({ init: init ?? {} })
+          return new Response(JSON.stringify({
+            choices: [{ finish_reason: 'stop', message: { content: 'ok', refusal: null } }],
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        },
+      })
+
+      await gateway.chatText({
+        nodeName: 'custom-token-limit-param-openai-regression',
+        model: 'gpt-4.1-mini',
+        messages: [{ role: 'user', content: 'hello' }],
+        maxTokens: 999,
+      })
+
+      const body = JSON.parse(String(calls[0].init.body)) as Record<string, unknown>
+      expect('num_predict' in body).toBe(false)
+      expect('max_tokens' in body).toBe(false)
+      expect('max_completion_tokens' in body).toBe(false)
+    })
+
+    it('keeps a custom tokenLimitParam name for the local_openai provider (unaffected by the openai/gemini stripping rule)', async () => {
+      const calls: Array<{ init: TauriFetchOptions }> = []
+      const gateway = createAiGateway(settings({
+        translationProvider: 'local_openai',
+        openaiCompatibleBaseUrl: 'http://127.0.0.1:1234/v1',
+        apiCompatibilityProfilePreset: 'user',
+        apiCompatibilityProfileJson: userApiCompatibilityProfileJson('num_predict'),
+      }), {
+        fetch: async (_url, init) => {
+          calls.push({ init: init ?? {} })
+          return new Response(JSON.stringify({
+            choices: [{ finish_reason: 'stop', message: { content: 'ok', refusal: null } }],
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        },
+      })
+
+      await gateway.chatText({
+        nodeName: 'custom-token-limit-param-local-regression',
+        // gemma/qwen プリセットに一致しないモデル名にする: モデルプロファイルが未解決
+        // （adaptChatCompletionRequest の早期 return 分岐）でも custom 名が残ることを確認するため。
+        model: 'mistral-small',
+        messages: [{ role: 'user', content: 'hello' }],
+        maxTokens: 999,
+      })
+
+      const body = JSON.parse(String(calls[0].init.body)) as Record<string, unknown>
+      expect(body.num_predict).toBe(999)
     })
   })
 })

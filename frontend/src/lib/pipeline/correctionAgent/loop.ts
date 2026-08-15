@@ -17,8 +17,8 @@ import {
  * 早期終了の判定理由（ログに残るので後で集計可能）。
  */
 type EarlyTerminationReason =
-  | 'consecutive_failed_attempts'  // 直近2試行が isFailedAttempt
-  | 'no_meaningful_reduction'       // 直近3試行で char retention >= 95%
+  | 'consecutive_failed_attempts'  // 直近2試行が同じ戦略で isFailedAttempt
+  | 'no_meaningful_reduction'       // 直近3試行（異なる戦略でも可）で char retention >= 95%
   | 'patch_regressed'               // 適用後の char 数が増加（悪化）
 
 /**
@@ -26,10 +26,20 @@ type EarlyTerminationReason =
  * 既存の maxCorrectionRounds (=4) チェックの前段で呼ぶ。
  *
  * 条件:
- * - 直近2試行が isFailedAttempt（変化なし / 削減不十分）→ 諦め
- * - 直近3試行で削減率 < 5%（95%以上残ってる）→ 局所修正で詰む形 → 諦め
+ * - 直近2試行が「同じ戦略」で isFailedAttempt（変化なし / 削減不十分）→ その戦略では
+ *   解けないと判断して諦める。戦略を変えた失敗は「別の手を試した」ことなので進展なしとは
+ *   みなさない（例: split_block 失敗 → compress_rephrase 失敗、は打ち切らない。分割→圧縮→
+ *   差し戻しという設計意図どおり3手目に進ませる）。
+ * - 直近3試行で削減率 < 5%（95%以上残ってる）→ 戦略を変えても3連続で進展がない場合の
+ *   上限として機能する（isFailedAttempt により !changed の失敗試行は retention 判定を待たず
+ *   stagnant 扱いになるため、異なる戦略を3回試しても解けない block はここで止まる）。
  *
  * 諦めた block は後段の coverage_repair_agent / general_repair_agent にハンドオフ。
+ *
+ * 停止性（無限ループしないことの根拠）は3つの独立した仕組みで担保される:
+ * 1. history.length >= thresholds.maxCorrectionRounds（既定4回）でそもそも再キューされない
+ * 2. 本関数の consecutive_failed_attempts（同じ戦略で2連続失敗）
+ * 3. 本関数の no_meaningful_reduction（異なる戦略でも3連続で削減なし）
  */
 function shouldEarlyTerminate(
   history: CorrectionAttempt[],
@@ -37,7 +47,9 @@ function shouldEarlyTerminate(
 ): EarlyTerminationReason | null {
   if (history.length >= 2) {
     const last2 = history.slice(-2)
-    if (last2.every((a) => isFailedAttempt(a, thresholds))) {
+    // 戦略を変えた失敗は「別の手を試した」ことなので進展なしとはみなさない。
+    // 同じ戦略で2回続けて失敗したときだけ、その戦略では解けないと判断して打ち切る。
+    if (last2.every((a) => isFailedAttempt(a, thresholds)) && last2[0].strategy === last2[1].strategy) {
       return 'consecutive_failed_attempts'
     }
   }
@@ -95,6 +107,7 @@ export async function correctionEngine(
     rationale: attempt.rationale,
     semanticSimilarity: attempt.semanticSimilarity,
     semanticOutcome: attempt.semanticOutcome,
+    splitTiming: attempt.splitTiming,
   })
 
   // セマンティックチェックが利用可能か（API キーや local_openai 等で判定）
@@ -137,7 +150,20 @@ export async function correctionEngine(
     timelineWithResults.map((block) => {
       const ownHistory = getHistory(String(block.id))
       const sourceId = (block as { splitFrom?: number }).splitFrom
-      const sourceHistory = sourceId !== undefined ? getHistory(String(sourceId)) : []
+      // splitBlock.ts は分割後の1個目のユニットに元ブロックと同じ id を割り当てたうえで、
+      // 全ユニットに splitFrom = 元ブロックの id を付ける（「このブロックは分割の産物である」
+      // という情報自体は意味があるので splitBlock.ts 側は変えない）。そのため1個目のユニットは
+      // splitFrom === 自分の id になる。ここで一致チェックをせずに sourceHistory を連結すると
+      // getHistory(sourceId) と getHistory(String(block.id)) が同じ Map エントリを指すため、
+      // 同じ履歴配列が2回連結されて水増しされる。
+      // 実データ（117分・839キュー）で確認済み: split_block の成功は実際は40回（子キュー48件）
+      // なのに correctionAttempts 上は128件に見えていた。この水増しのせいで「分割した80件が
+      // 後段で結合されて消えた」という誤った分析を2回行っている。
+      // 出力される字幕テキスト自体は attempts 配列を再生しないため無関係で、あくまで
+      // 計測・監査（scripts/auditOutput.ts 等）だけを誤らせる問題。
+      const sourceHistory = sourceId !== undefined && String(sourceId) !== String(block.id)
+        ? getHistory(String(sourceId))
+        : []
       const attempts = [...sourceHistory, ...ownHistory].map(summarizeAttempt)
       return attempts.length > 0 ? { ...block, correctionAttempts: attempts } : block
     })
@@ -170,7 +196,12 @@ export async function correctionEngine(
 
     if (ctx.physicalMaxChars < thresholds.minMeaningfulChars) continue
 
+    // getFeasibleStrategies はインラインの条件だけで候補を組み立てており、各ツールが
+    // 実装している canApply(ctx) を一度も呼んでいなかった（呼び出し側が存在しなかった）。
+    // ここで絞り込む。feasibility.ts 側に入れると tools/index.ts への依存が増えて
+    // 循環importの恐れがあるため、既に toolRegistry を import している loop.ts で行う。
     const feasible = getFeasibleStrategies(ctx, thresholds)
+      .filter(strategy => toolRegistry[strategy].canApply(ctx))
 
     if (feasible.length === 0) continue
 
@@ -235,6 +266,7 @@ export async function correctionEngine(
       afterTranscriptText,
       afterSubtitleText,
       rationale: patch.warning,
+      splitTiming: patch.splitTiming,
     }
 
     // セマンティックチェック（log_only / enforce 共通でスコアを取得）
@@ -270,7 +302,17 @@ export async function correctionEngine(
 
     history.push(attempt)
 
-    if (!acceptPatch) continue
+    if (!acceptPatch) {
+      // 失敗しても、まだラウンド上限に達していなければ次の戦略を試すためキューへ戻す。
+      // 従来はここで捨てていたため、split_block が失敗したブロックが compress_* に
+      // 落ちてこず、実機（117分・923キュー）で split_block 失敗77件がすべて1回試した
+      // だけで未修復のまま残っていた。停止性は maxCorrectionRounds と
+      // shouldEarlyTerminate（同じ戦略で2連続失敗 / 異なる戦略でも3連続で無進展）が担保する。
+      if (getHistory(blockIdStr).length < thresholds.maxCorrectionRounds) {
+        queue.add(blockIdStr)
+      }
+      continue
+    }
 
     currentTimeline = applyPatch(currentTimeline, patch)
 

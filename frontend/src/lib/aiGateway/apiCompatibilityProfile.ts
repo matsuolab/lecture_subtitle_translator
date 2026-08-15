@@ -2,7 +2,21 @@ import type { AdminSettings } from '@/types/adminSettings'
 import { resolveAiProvider } from '@/lib/pipeline/aiProvider'
 import { resolveModelProfile } from '@/lib/pipeline/modelProfile'
 
-export type TokenLimitParam = 'max_tokens' | 'max_completion_tokens'
+/** 組み込みプリセット（BUILTIN_API_COMPATIBILITY_PROFILES）が使う2つの名前。この2つ以外は増やさない。 */
+export type BuiltinTokenLimitParam = 'max_tokens' | 'max_completion_tokens'
+/**
+ * ユーザー定義プロファイル（preset:'user'）では、上記2つ以外の任意の文字列も許容する
+ * （resolveExplicitBuiltinApiCompatibilityProfile 参照。ユーザーが実際に運用する
+ * OpenAI 互換サーバーの中には、この2つ以外のパラメータ名でトークン上限を受け取るものがある）。
+ * `BuiltinTokenLimitParam | (string & {})` は「string に潰さず、'max_tokens' /
+ * 'max_completion_tokens' のリテラル型を保ったまま任意の文字列も受け付ける」ための定型パターン。
+ * 組み込みプリセット側の定義（BUILTIN_API_COMPATIBILITY_PROFILES）はこの型でも
+ * 引き続き 'max_tokens' / 'max_completion_tokens' のリテラルとして型チェックされる
+ * （satisfies により object literal のリテラル型が保持されるため）。
+ * 実行時の妥当性検証は validateCustomTokenLimitParam が担う（正規化時は必ずそちらを通すこと。
+ * この型だけでは任意の文字列を許してしまい、body の他フィールドとの衝突等を防げない）。
+ */
+export type TokenLimitParam = BuiltinTokenLimitParam | (string & {})
 export type JsonResponseFormatMode = 'json_object' | 'json_schema' | 'text' | 'omit'
 
 export interface RequestDialect {
@@ -165,41 +179,133 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function normalizeRequestDialect(value: unknown): RequestDialect | undefined {
-  if (!isObject(value) || !isObject(value.chat) || !isObject(value.embeddings) || !isObject(value.vision)) return undefined
-  const tokenLimitParam = value.chat.tokenLimitParam
+/**
+ * ユーザー定義プロファイルの requestDialect.chat.tokenLimitParam が実際に
+ * body へ設定して問題ない文字列かどうかを検証する。
+ * ここを通さずに任意の文字列を受け付けると、以下のいずれかで壊れる:
+ *   - JSON のキーとして不適切（空文字・前後空白・__proto__ 等）だと、
+ *     applyChatRequestDialect の `{ ...body, [tokenLimitParam]: value }` で
+ *     意図しない挙動（プロトタイプ汚染・キー消失）を引き起こしうる
+ *   - body の他フィールド名（RESERVED_CHAT_BODY_FIELD_NAMES）と衝突すると、
+ *     そのフィールドの値をトークン上限の数値で上書きしてしまい本体を壊す
+ */
+function validateCustomTokenLimitParam(value: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== 'string') {
+    return { ok: false, error: `requestDialect.chat.tokenLimitParam must be a string (got ${typeof value}).` }
+  }
+  if (!value.trim()) {
+    return { ok: false, error: 'requestDialect.chat.tokenLimitParam must not be empty or whitespace-only.' }
+  }
+  if (value.trim() !== value) {
+    return { ok: false, error: 'requestDialect.chat.tokenLimitParam must not have leading or trailing whitespace.' }
+  }
+  // JSON のキーとして安全に body へ設定できる形（英数字・アンダースコア・ハイフン、数字始まり不可）
+  // に制限する。OpenAI 互換サーバーのパラメータ名は概ねこの形（snake_case / kebab-case）に収まる。
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(value)) {
+    return {
+      ok: false,
+      error: `requestDialect.chat.tokenLimitParam "${value}" is not a valid parameter name. Use letters, digits, underscore, or hyphen, and do not start with a digit.`,
+    }
+  }
+  // __proto__ / constructor / prototype はオブジェクトの組み込みプロパティ名と衝突し、
+  // `{ ...body, [tokenLimitParam]: value }` のスプレッド代入でプロトタイプ汚染や
+  // 予期しない挙動を引き起こしうるため、正規表現チェックを通っても個別に拒否する。
+  if (DANGEROUS_OBJECT_KEY_NAMES.has(value)) {
+    return { ok: false, error: `requestDialect.chat.tokenLimitParam "${value}" is a reserved JavaScript object property name and cannot be used.` }
+  }
+  if (RESERVED_CHAT_BODY_FIELD_NAMES.has(value)) {
+    return {
+      ok: false,
+      error: `requestDialect.chat.tokenLimitParam "${value}" collides with a request body field this app already sets (${[...RESERVED_CHAT_BODY_FIELD_NAMES].sort().join(', ')}). Choose a different name.`,
+    }
+  }
+  return { ok: true, value }
+}
+
+/**
+ * chatText.ts の buildChatTextBody / chatVision.ts / modelProfile.ts の applySampling・
+ * applyReasoningEnable が実際に body へ設定するフィールド名（'model' / 'messages' は options から
+ * 直接オブジェクトリテラルで設定されるが同じ理由で衝突対象）。
+ * ここに無いフィールドを新たに body へ設定するようになった場合はこのセットも更新すること。
+ * 'stream' はこのアプリでは現状送っていないが、Chat Completions API の標準フィールド名であり
+ * 将来の衝突を避けるため予約しておく。
+ */
+const RESERVED_CHAT_BODY_FIELD_NAMES = new Set<string>([
+  'model',
+  'messages',
+  'temperature',
+  'reasoning_effort',
+  'response_format',
+  'top_p',
+  'top_k',
+  'min_p',
+  'presence_penalty',
+  'repetition_penalty',
+  'chat_template_kwargs',
+  'stream',
+])
+
+const DANGEROUS_OBJECT_KEY_NAMES = new Set<string>(['__proto__', 'constructor', 'prototype'])
+
+type NormalizeResult<T> = { ok: true; value: T } | { ok: false; error: string }
+
+function normalizeRequestDialect(value: unknown): NormalizeResult<RequestDialect> {
+  if (!isObject(value)) return { ok: false, error: 'requestDialect must be an object.' }
+  if (!isObject(value.chat)) return { ok: false, error: 'requestDialect.chat must be an object.' }
+  if (!isObject(value.embeddings)) return { ok: false, error: 'requestDialect.embeddings must be an object.' }
+  if (!isObject(value.vision)) return { ok: false, error: 'requestDialect.vision must be an object.' }
+
+  const tokenLimitParamResult = validateCustomTokenLimitParam(value.chat.tokenLimitParam)
+  if (!tokenLimitParamResult.ok) return { ok: false, error: tokenLimitParamResult.error }
+
   const responseFormat = value.chat.responseFormat
-  if (tokenLimitParam !== 'max_tokens' && tokenLimitParam !== 'max_completion_tokens') return undefined
-  if (responseFormat !== 'json_object' && responseFormat !== 'json_schema' && responseFormat !== 'text' && responseFormat !== 'omit') return undefined
+  if (responseFormat !== 'json_object' && responseFormat !== 'json_schema' && responseFormat !== 'text' && responseFormat !== 'omit') {
+    return {
+      ok: false,
+      error: `requestDialect.chat.responseFormat must be one of "json_object" | "json_schema" | "text" | "omit" (got ${JSON.stringify(responseFormat)}).`,
+    }
+  }
+
   return {
-    chat: {
-      endpoint: typeof value.chat.endpoint === 'string' && value.chat.endpoint ? value.chat.endpoint : '/chat/completions',
-      tokenLimitParam,
-      responseFormat,
+    ok: true,
+    value: {
+      chat: {
+        endpoint: typeof value.chat.endpoint === 'string' && value.chat.endpoint ? value.chat.endpoint : '/chat/completions',
+        tokenLimitParam: tokenLimitParamResult.value,
+        responseFormat,
+      },
+      embeddings: {
+        endpoint: typeof value.embeddings.endpoint === 'string' && value.embeddings.endpoint ? value.embeddings.endpoint : '/embeddings',
+      },
+      vision: {
+        endpoint: typeof value.vision.endpoint === 'string' && value.vision.endpoint ? value.vision.endpoint : '/chat/completions',
+        supportsDataUrl: typeof value.vision.supportsDataUrl === 'boolean' ? value.vision.supportsDataUrl : true,
+        supportsRemoteUrl: typeof value.vision.supportsRemoteUrl === 'boolean' ? value.vision.supportsRemoteUrl : false,
+      },
     },
-    embeddings: {
-      endpoint: typeof value.embeddings.endpoint === 'string' && value.embeddings.endpoint ? value.embeddings.endpoint : '/embeddings',
-    },
-    vision: {
-      endpoint: typeof value.vision.endpoint === 'string' && value.vision.endpoint ? value.vision.endpoint : '/chat/completions',
-      supportsDataUrl: typeof value.vision.supportsDataUrl === 'boolean' ? value.vision.supportsDataUrl : true,
-      supportsRemoteUrl: typeof value.vision.supportsRemoteUrl === 'boolean' ? value.vision.supportsRemoteUrl : false,
+  }
+}
+
+function normalizeApiCompatibilityProfileWithReason(value: unknown): NormalizeResult<ApiCompatibilityProfile> {
+  if (!isObject(value)) return { ok: false, error: 'API Compatibility Profile JSON must be an object.' }
+  const dialectResult = normalizeRequestDialect(value.requestDialect)
+  if (!dialectResult.ok) return { ok: false, error: dialectResult.error }
+  return {
+    ok: true,
+    value: {
+      id: typeof value.id === 'string' && value.id ? value.id : 'user:api:unnamed',
+      label: typeof value.label === 'string' && value.label ? value.label : 'User API Compatibility Profile',
+      schemaVersion: 1,
+      profileVersion: typeof value.profileVersion === 'string' && value.profileVersion ? value.profileVersion : 'user',
+      origin: value.origin === 'imported' ? 'imported' : 'user',
+      requestDialect: dialectResult.value,
     },
   }
 }
 
 export function normalizeApiCompatibilityProfile(value: unknown): ApiCompatibilityProfile | undefined {
-  if (!isObject(value)) return undefined
-  const requestDialect = normalizeRequestDialect(value.requestDialect)
-  if (!requestDialect) return undefined
-  return {
-    id: typeof value.id === 'string' && value.id ? value.id : 'user:api:unnamed',
-    label: typeof value.label === 'string' && value.label ? value.label : 'User API Compatibility Profile',
-    schemaVersion: 1,
-    profileVersion: typeof value.profileVersion === 'string' && value.profileVersion ? value.profileVersion : 'user',
-    origin: value.origin === 'imported' ? 'imported' : 'user',
-    requestDialect,
-  }
+  const result = normalizeApiCompatibilityProfileWithReason(value)
+  return result.ok ? result.value : undefined
 }
 
 export interface ApiCompatibilityProfileValidationResult {
@@ -212,14 +318,9 @@ export function validateApiCompatibilityProfileJson(text: string): ApiCompatibil
   if (!text.trim()) return { ok: false, error: 'API Compatibility Profile JSON is empty.' }
   try {
     const parsed = JSON.parse(text) as unknown
-    const profile = normalizeApiCompatibilityProfile(parsed)
-    if (!profile) {
-      return {
-        ok: false,
-        error: 'requestDialect.chat / embeddings / vision and valid tokenLimitParam / responseFormat are required.',
-      }
-    }
-    return { ok: true, profile }
+    const result = normalizeApiCompatibilityProfileWithReason(parsed)
+    if (!result.ok) return { ok: false, error: result.error }
+    return { ok: true, profile: result.value }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
