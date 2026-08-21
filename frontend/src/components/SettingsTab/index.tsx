@@ -45,6 +45,14 @@ const TRANSCRIBE_LANGUAGE_LABEL_BY_CODE: Record<string, string> = {
   en: 'English',
 }
 
+// 書きおこし言語に対する「既定の字幕言語」。日本語講義は英語字幕、英語講義は日本語字幕、
+// という本プロジェクトの2つの用途に合わせた組み合わせ。ここに無いコードでは字幕ラベルを
+// 触らない（利用者が設定済みの値を勝手に書き換えないため）。
+const SUBTITLE_LANGUAGE_LABEL_BY_TRANSCRIBE_CODE: Record<string, string> = {
+  ja: 'English',
+  en: 'Japanese',
+}
+
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
   message: string
@@ -116,6 +124,15 @@ export function SettingsTab({
   const sharedSettingsImportRef = React.useRef<HTMLInputElement>(null)
   const apiCompatibilityProfileImportRef = React.useRef<HTMLInputElement>(null)
   const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
+  const handleTranscribeLanguageChange = React.useCallback((value: string) => {
+    const transcriptLabel = TRANSCRIBE_LANGUAGE_LABEL_BY_CODE[value]
+    const subtitleLabel = SUBTITLE_LANGUAGE_LABEL_BY_TRANSCRIBE_CODE[value]
+    onAdminSettingsChange({
+      transcribeLanguageCode: value,
+      ...(transcriptLabel ? { transcriptLanguageLabel: transcriptLabel } : {}),
+      ...(subtitleLabel ? { subtitleLanguageLabel: subtitleLabel } : {}),
+    })
+  }, [onAdminSettingsChange])
   const resolvedApiCompatibilityProfile = React.useMemo(() => {
     try {
       return resolveApiCompatibilityProfile(adminSettings)
@@ -1209,20 +1226,15 @@ export function SettingsTab({
                 theme={theme}
                 label="書きおこし音声の言語（WhisperX）"
                 value={adminSettings.transcribeLanguageCode}
-                onChange={(value) => {
-                  const syncedLabel = TRANSCRIBE_LANGUAGE_LABEL_BY_CODE[value]
-                  onAdminSettingsChange({
-                    transcribeLanguageCode: value,
-                    ...(syncedLabel ? { transcriptLanguageLabel: syncedLabel } : {}),
-                  })
-                }}
+                onChange={handleTranscribeLanguageChange}
                 options={WHISPERX_LANGUAGES.map((lang) => ({ value: lang.code, label: `${lang.labelJa} (${lang.code})` }))}
               />
               <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
                 この設定は実行先が「このPCで実行」のときだけ有効です。
                 WhisperXが対応する41言語（アライメントモデルがある言語）のみ選べます。
                 言語を変えると初回に言語別Dockerイメージ（約10GB）のダウンロードが発生します。
-                日本語・英語を選んだ場合は下の「書き起こし言語ラベル」も自動で追従します。
+                日本語を選ぶと英語字幕、英語を選ぶと日本語字幕の組み合わせになるよう、
+                下の「書き起こし言語ラベル」「字幕言語ラベル」も自動で追従します。
                 それ以外の言語を選んだ場合はラベルを手動で設定してください（ラベルは別設定です）。
                 {/* 実際に docker run されるタグは Rust 側（lib.rs の whisperx_image）が組み立てる。
                     ここは「どのイメージが落ちてくるか」を利用者に見せるための表示専用。 */}
@@ -1270,19 +1282,14 @@ export function SettingsTab({
                 theme={theme}
                 label="書きおこし音声の言語（WhisperX）"
                 value={adminSettings.transcribeLanguageCode}
-                onChange={(value) => {
-                  const syncedLabel = TRANSCRIBE_LANGUAGE_LABEL_BY_CODE[value]
-                  onAdminSettingsChange({
-                    transcribeLanguageCode: value,
-                    ...(syncedLabel ? { transcriptLanguageLabel: syncedLabel } : {}),
-                  })
-                }}
+                onChange={handleTranscribeLanguageChange}
                 options={WHISPERX_LANGUAGES.map((lang) => ({ value: lang.code, label: `${lang.labelJa} (${lang.code})` }))}
               />
               <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
                 実行先が「AWS / リモート実行」の場合、この設定はジョブ投入時に AWS Batch へ渡され、
                 サーバー側の環境変数 <code>WHISPERX_LANGUAGE</code> を上書きします。
-                日本語・英語を選んだ場合は下の「書き起こし言語ラベル」も自動で追従します。
+                日本語を選ぶと英語字幕、英語を選ぶと日本語字幕の組み合わせになるよう、
+                下の「書き起こし言語ラベル」「字幕言語ラベル」も自動で追従します。
                 それ以外の言語を選んだ場合はラベルを手動で設定してください（ラベルは別設定です）。
               </div>
             </>
