@@ -52,7 +52,6 @@ function normalizeThresholds(thresholds: PipelineThresholds): PipelineThresholds
     mergedLongDurationSec: finiteOrDefault(thresholds.mergedLongDurationSec, DEFAULT_PIPELINE_THRESHOLDS.mergedLongDurationSec),
     overCompressedRatio: finiteOrDefault(thresholds.overCompressedRatio, DEFAULT_PIPELINE_THRESHOLDS.overCompressedRatio),
     overCompressedJaChars: finiteOrDefault(thresholds.overCompressedJaChars, DEFAULT_PIPELINE_THRESHOLDS.overCompressedJaChars),
-    verboseEnRatio: finiteOrDefault(thresholds.verboseEnRatio, DEFAULT_PIPELINE_THRESHOLDS.verboseEnRatio),
     verboseCps: finiteOrDefault(thresholds.verboseCps, DEFAULT_PIPELINE_THRESHOLDS.verboseCps),
     maxLineLen: finiteOrDefault(thresholds.maxLineLen, DEFAULT_PIPELINE_THRESHOLDS.maxLineLen),
     slowCps: finiteOrDefault(thresholds.slowCps, DEFAULT_PIPELINE_THRESHOLDS.slowCps),
@@ -354,7 +353,7 @@ export function cpsReliefRebalance(blocks: EnBlock[], thresholds: PipelineThresh
       rightId: right.id,
       strategy: 'none',
       status: 'skipped',
-      reason: 'no feasible A or C rebalance',
+      reason: 'no feasible retime-only rebalance',
       beforeCps: [left.cps, right.cps],
       beforeDuration: [durationSec(left), durationSec(right)],
     })
@@ -380,10 +379,7 @@ function applyCandidate(
   thresholds: PipelineThresholds,
   entries: CpsReliefEntry[],
 ): void {
-  const rationale =
-    strategy === 'retime_only'
-      ? `deterministic CPS-relief retime; gap preserved at ${gapSec(left, right).toFixed(2)}s`
-      : `deterministic CPS-relief split-evenly; cut at natural boundary`
+  const rationale = `deterministic CPS-relief retime; gap preserved at ${gapSec(left, right).toFixed(2)}s`
   const newLeft = rebuildBlock(
     left,
     candidate.newLeftStart,

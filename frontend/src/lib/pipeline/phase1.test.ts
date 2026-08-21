@@ -52,7 +52,6 @@ const thresholds: PipelineThresholds = {
   mergedLongDurationSec: 10,
   overCompressedRatio: 0.5,
   overCompressedJaChars: 40,
-  verboseEnRatio: 2,
   verboseCps: 20,
   maxLineLen: 42,
   slowCps: 5,
@@ -95,7 +94,10 @@ describe('runPhase1 — correctJa の部分失敗を trace の警告として残
       makeCorrected(3),
     ]
     mocks.correctSegments.mockResolvedValue(corrected)
-    mocks.semanticSplitJa.mockResolvedValue(corrected.map((seg) => makeBlock(seg.id)))
+    mocks.semanticSplitJa.mockResolvedValue({
+      blocks: corrected.map((seg) => makeBlock(seg.id)),
+      scriptResolution: { script: 'japanese', source: 'auto_detected', meanTokenLength: 1, tokenCount: 1 },
+    })
     mocks.contextGroupCueBlocks.mockResolvedValue({
       blocks: corrected.map((seg) => makeBlock(seg.id)),
       detectionCount: 0,
@@ -120,7 +122,10 @@ describe('runPhase1 — correctJa の部分失敗を trace の警告として残
   it('correctJa がすべて成功した場合、onWarning は correctJa に対して呼ばれない', async () => {
     const corrected = [makeCorrected(1), makeCorrected(2), makeCorrected(3)]
     mocks.correctSegments.mockResolvedValue(corrected)
-    mocks.semanticSplitJa.mockResolvedValue(corrected.map((seg) => makeBlock(seg.id)))
+    mocks.semanticSplitJa.mockResolvedValue({
+      blocks: corrected.map((seg) => makeBlock(seg.id)),
+      scriptResolution: { script: 'japanese', source: 'auto_detected', meanTokenLength: 1, tokenCount: 1 },
+    })
     mocks.contextGroupCueBlocks.mockResolvedValue({
       blocks: corrected.map((seg) => makeBlock(seg.id)),
       detectionCount: 0,

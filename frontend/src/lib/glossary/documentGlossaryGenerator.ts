@@ -192,7 +192,7 @@ function resolveEffectiveMaxOutputTokens(
   capability: 'chatText' | 'chatVision',
 ): number {
   const profile = resolveModelProfile(settings, model, capability)
-  return withReasoningHeadroom(desiredOutputTokens, profile)
+  return withReasoningHeadroom(desiredOutputTokens, profile, settings.llmReasoningBudgetTokens)
 }
 
 function resolveGlossaryConcurrency(settings: AdminSettings): number {
@@ -1006,7 +1006,16 @@ function looksLikeTextOnlyLatex(value: string | undefined): boolean {
 }
 
 function hasFormulaSignal(value: string | undefined): boolean {
-  return /[=+\-*/^_∂∇Σ∑Π∏√≤≥∞≈≠±×÷𝛼𝛽𝛾𝛿𝜃𝜂𝜀]|\b(exp|log|max|min|softmax|relu)\b/i.test(value ?? '')
+  // u フラグ必須: 文字クラス内の 𝛼𝛽𝛾𝛿𝜃𝜂𝜀 等はサロゲートペア（astral plane）で、
+  // u フラグ無しだと上位/下位サロゲートを個別のコードユニットとして扱ってしまう
+  // （no-misleading-character-class）。
+  //
+  // 注意: これは挙動保存ではなく、マッチ範囲が「狭まる」変更である。数学用英数字記号は
+  // すべて同じ上位サロゲート U+D835 を共有するため、u フラグ無しの文字クラスは
+  // ここに列挙していない文字（𝑥 𝒩 𝑑 等）まで巻き込んでマッチしていた。u を付けると
+  // 列挙した文字だけにマッチする。書かれた意図どおりの動作になる一方、数式判定は
+  // 以前より鈍くなるため、検出漏れが問題になる場合は文字クラスへの追記で対応すること。
+  return /[=+\-*/^_∂∇Σ∑Π∏√≤≥∞≈≠±×÷𝛼𝛽𝛾𝛿𝜃𝜂𝜀]|\b(exp|log|max|min|softmax|relu)\b/iu.test(value ?? '')
 }
 
 function normalizeCandidate(raw: RawGlossaryCandidate): NormalizedGlossaryCandidate | null {
@@ -1611,7 +1620,11 @@ export function verifyEntriesAgainstPdf(entries: SelfMadeGlossaryEntry[], docume
 // 処理 B2: mini による数式・画像文字の追加確認
 // ============================================================
 
-const MATH_RISK_PATTERN = /[∂∇Σ∑Π∏√≤≥≦≧∞≈≠±×÷→←↔𝛼𝛽𝛾𝛿𝜃𝜂𝜀𝑎𝑏𝑐𝑑𝑒𝑓𝑔𝑣𝑤𝑥𝑦𝑧𝒩]|\\(frac|sum|prod|nabla|partial|theta|alpha|beta|gamma|eta|epsilon)|\b(exp|log|max|min|softmax|relu|uniform|normal|gaussian|nadam|amsgrad)\b/i
+// u フラグ必須: 文字クラス内の 𝛼𝛽𝛾𝛿𝜃𝜂𝜀𝑎𝑏𝑐𝑑𝑒𝑓𝑔𝑣𝑤𝑥𝑦𝑧𝒩 等はサロゲートペア（astral plane）で、
+// u フラグ無しだと上位/下位サロゲートを個別のコードユニットとして扱ってしまう
+// （no-misleading-character-class。hasFormulaSignal と同じ理由・同じ注意点。
+// マッチ範囲は狭まる方向に変わる）。
+const MATH_RISK_PATTERN = /[∂∇Σ∑Π∏√≤≥≦≧∞≈≠±×÷→←↔𝛼𝛽𝛾𝛿𝜃𝜂𝜀𝑎𝑏𝑐𝑑𝑒𝑓𝑔𝑣𝑤𝑥𝑦𝑧𝒩]|\\(frac|sum|prod|nabla|partial|theta|alpha|beta|gamma|eta|epsilon)|\b(exp|log|max|min|softmax|relu|uniform|normal|gaussian|nadam|amsgrad)\b/iu
 
 function pageHasFormulaRisk(page: ExtractedPdfPage): boolean {
   return MATH_RISK_PATTERN.test(page.text)

@@ -1,4 +1,5 @@
-import { normalizeChatCompletionContent, resolveModelProfile } from '@/lib/pipeline/modelProfile'
+import { normalizeChatCompletionContent, resolveModelProfile, stripTokenLimitFields } from '@/lib/pipeline/modelProfile'
+import { resolveAiProvider } from '@/lib/pipeline/aiProvider'
 import { beginLlmCall } from './llmActivity'
 import { acquireLlmSlot, reportLlmCallSucceeded, reportLlmRateLimitEncountered } from './llmConcurrency'
 import type { AiGatewayContext } from './connection'
@@ -11,6 +12,7 @@ import {
   resolveChatResponseFormatForDialect,
 } from './apiCompatibilityProfile'
 import { classifyHttpErrorCode, formatAiGatewayHttpError } from './errors'
+import { formatTruncatedMessage } from './truncatedMessage'
 import { getCurrentPipelineAbortSignal } from '@/lib/pipeline/pipelineAbort'
 import { isTimeoutError } from './timeoutError'
 import { RATE_LIMIT_MAX_ATTEMPTS, delayRespectingAbort, resolveRateLimitDelayMs } from './rateLimitRetry'
@@ -72,6 +74,18 @@ export async function chatVision(
     body = stripOpenAiSamplingParams(body)
   }
   body = applyChatRequestDialect(body, apiCompatibilityProfile, { maxOutputTokens: options.maxTokens })
+  // chatText.ts と違い、この経路は adaptChatCompletionRequest を通らない（プロファイルによる
+  // サンプリング調整やコンテキスト長クランプの対象外）。そのため、トークン上限を送るかどうかの
+  // provider 分岐だけをここで同じ規則で適用する。これが無いと、用語集の画像ページ抽出
+  // （documentGlossaryGenerator.ts が hasImageMessageContent で chatVision へ分岐する経路）で、
+  // detectIncompleteEnds で実測した truncated（推論が出力予算を使い切り本文0文字で切断）と
+  // 同じ破綻が openai / gemini でも再発しうる。
+  // local_openai は据え置き: 小さいコンテキストを推論と本文で共有するため上限が必要。
+  // 削除するキー名は組み込みの2つに決め打ちせず、実際に有効な tokenLimitParam
+  // （apiCompatibilityProfile が解決した方言）を渡す（stripTokenLimitFields の JSDoc 参照）。
+  if (resolveAiProvider(context.settings) !== 'local_openai') {
+    body = stripTokenLimitFields(body, apiCompatibilityProfile.requestDialect.chat.tokenLimitParam)
+  }
   // jsonSchema が指定されている場合は responseFormat: 'omit' より優先する（chatText.ts の同じ
   // 分岐を参照。'omit' と jsonSchema が同時指定されてもスキーマが黙って消えないようにするため）。
   if (options.jsonSchema || options.responseFormat !== 'omit') {
@@ -195,6 +209,17 @@ export async function chatVision(
   const rawContent = typeof message?.content === 'string' ? message.content : ''
   const content = normalizeChatCompletionContent(rawContent, profile)
 
+  // truncated 時のメッセージ（formatTruncatedMessage）に「消費 completion / うち推論」を
+  // 出すために usage を拾う。chatText.ts と同じ抽出ロジック（usageSink への記録はしていない。
+  // chatVision.ts は元々コスト集計対象外で、その範囲までは今回変更しない）。
+  const usage = payload.usage as Record<string, unknown> | undefined
+  const promptTokens = typeof usage?.prompt_tokens === 'number' ? usage.prompt_tokens : undefined
+  const completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : undefined
+  const completionDetails = usage?.completion_tokens_details as Record<string, unknown> | undefined
+  const reasoningTokens = typeof completionDetails?.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : undefined
+  const promptDetails = usage?.prompt_tokens_details as Record<string, unknown> | undefined
+  const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined
+
   if (finishReason === 'content_filter') {
     pushLlmError({ nodeName: options.nodeName, model: options.model, errorCode: 'content_filter', detail: 'content_filter' })
     return { content: '', finishReason, refusal, errorMessage: 'content_filter', errorCode: 'content_filter' }
@@ -205,7 +230,19 @@ export async function chatVision(
   }
   if (finishReason === 'length') {
     pushLlmError({ nodeName: options.nodeName, model: options.model, errorCode: 'truncated', detail: `content_preview=${content}` })
-    return { content, finishReason, errorMessage: `truncated_at_length_limit (content_preview=${content.slice(0, 100)})`, errorCode: 'truncated' }
+    // 実際に送った上限・消費内訳・本文長を含めたメッセージを組み立てる（truncatedMessage.ts 参照。
+    // chatText.ts の同じ分岐と同じ理由）。reasoningTokens 等は payload.usage から取得できた分だけを
+    // 渡す（取得できていない情報を捏造しない）。
+    // 上限のパラメータ名は方言で決まり、ユーザー定義プロファイルでは任意名になりうる。
+    // 決め打ちにすると「上限を送っているのに送っていないと報告する」ため、解決済みの値を渡す。
+    const errorMessage = formatTruncatedMessage({
+      body,
+      completionTokens,
+      reasoningTokens,
+      contentLength: content.length,
+      activeTokenLimitParam: apiCompatibilityProfile.requestDialect.chat.tokenLimitParam,
+    })
+    return { content, finishReason, errorMessage, errorCode: 'truncated', promptTokens, completionTokens, reasoningTokens, cachedInputTokens }
   }
   if (!content.trim()) {
     pushLlmError({ nodeName: options.nodeName, model: options.model, errorCode: 'empty_response', detail: `payload_keys=${Object.keys(payload).join(',')}` })

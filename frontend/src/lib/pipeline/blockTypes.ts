@@ -1,6 +1,7 @@
 import type { WordTimestamp } from './types'
 import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
 import type { LanguageScript } from './languageProfileConfig'
+import type { CueSourceRef } from '@/types/sourceEvidence'
 
 export type AlignConf = 'exact' | 'proportional' | 'no_words' | 'merged'
 
@@ -10,7 +11,10 @@ export type ViolationCode =
   | 'ok'
   | 'short_duration'
   | 'over_compressed'
+  // 非推奨。classifyViolation は生成しない（旧 enJaRatio による誤検知が多く cps_over に分離した）。
+  // 過去に保存されたプロジェクト JSON の violation フィールドを読めるようにするため型には残す。
   | 'verbose_en'
+  | 'cps_over'
   | 'line_length_only'
   | 'long_segment'
   | 'proportional_ts'
@@ -25,7 +29,15 @@ export interface JaBlock {
   jaText: string
   jaChars: number
   alignConf: AlignConf
+  /**
+   * `alignCuesToAsr` が求めたキュー文字マッチ率（0-1）。診断・レビュー用の任意フィールドで、
+   * 下流の分類ロジック（metrics.ts 等）はこれを参照しない。「アンカーは取れたが言い換えが
+   * 強い」ブロックを後から識別できるようにするための情報。
+   */
+  alignMatchRate?: number
   words?: WordTimestamp[]
+  /** Lightweight pointers into PipelineRunDebug.sourceEvidence. */
+  sourceRefs?: CueSourceRef[]
   merged?: boolean
   /**
    * 意味・翻訳の文脈単位。表示 cue と同一視しない。
@@ -91,7 +103,9 @@ export interface PipelineThresholds {
   mergedLongDurationSec: number
   overCompressedRatio: number
   overCompressedJaChars: number
-  verboseEnRatio: number
+  // verboseEnRatio は撤去済み。英日文字比による判定は classifyViolation / reviewDiagnostics
+  // から廃止され、現在この値を参照する判定ロジックは存在しない（CPS・行長で制御する）。
+  // AdminSettings.pipelineVerboseEnRatio（既存保存データ互換用）とは対応しない。
   verboseCps: number
   maxLineLen: number
   slowCps: number
@@ -123,7 +137,6 @@ export const DEFAULT_PIPELINE_THRESHOLDS: PipelineThresholds = {
   mergedLongDurationSec: 7.0,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 17,
   maxLineLen: 42,
   slowCps: 3.0,

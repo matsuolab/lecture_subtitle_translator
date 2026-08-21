@@ -9,7 +9,6 @@ const thresholds: PipelineThresholds = {
   mergedLongDurationSec: 7,
   overCompressedRatio: 0.25,
   overCompressedJaChars: 15,
-  verboseEnRatio: 1.5,
   verboseCps: 17,
   maxLineLen: 42,
   slowCps: 3,
@@ -49,6 +48,7 @@ describe('finalSafeMerge', () => {
         end: 2.5,
         jaText: '今回はニューラルネットワークの学習で使う勾配の意味を丁寧に確認して、',
         enText: 'We will review gradients in PyTorch',
+        sourceRefs: [{ sourceSegmentId: 20, semanticUnitId: 'u20', relation: 'semantic_unit' }],
       }),
       block({
         id: 2,
@@ -56,6 +56,7 @@ describe('finalSafeMerge', () => {
         end: 6.2,
         jaText: '逆伝播でその値がどのように流れていくのかを順番に見ます。',
         enText: 'and trace how backpropagation flows.',
+        sourceRefs: [{ sourceSegmentId: 21, semanticUnitId: 'u21', relation: 'coverage_split' }],
       }),
     ], thresholds)
 
@@ -64,6 +65,10 @@ describe('finalSafeMerge', () => {
     expect(result.blocks[0].enText).toBe('We will review gradients in PyTorch\nand trace how backpropagation flows.')
     expect(result.blocks[0].violation).toBe('ok')
     expect(result.blocks[0].contextGroupRole).toBe('single')
+    expect(result.blocks[0].sourceRefs).toEqual([
+      { sourceSegmentId: 20, semanticUnitId: 'u20', relation: 'cue_merge' },
+      { sourceSegmentId: 21, semanticUnitId: 'u21', relation: 'cue_merge' },
+    ])
     expect(result.entries[0]).toMatchObject({
       status: 'merged',
       leftId: 1,

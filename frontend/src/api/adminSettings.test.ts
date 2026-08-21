@@ -136,6 +136,25 @@ describe('transcribeLanguageCode normalization', () => {
   })
 })
 
+describe('alignTokenMode normalization', () => {
+  it('defaults to auto when unset', () => {
+    expect(getDefaultAdminSettings().alignTokenMode).toBe('auto')
+    expect(normalizeAdminSettings({}).alignTokenMode).toBe('auto')
+  })
+
+  it('keeps a valid value as-is', () => {
+    expect(normalizeAdminSettings({ alignTokenMode: 'char' }).alignTokenMode).toBe('char')
+    expect(normalizeAdminSettings({ alignTokenMode: 'word' }).alignTokenMode).toBe('word')
+    expect(normalizeAdminSettings({ alignTokenMode: 'auto' }).alignTokenMode).toBe('auto')
+  })
+
+  it('falls back to auto for an invalid value', () => {
+    expect(normalizeAdminSettings({ alignTokenMode: 'invalid' }).alignTokenMode).toBe('auto')
+    expect(normalizeAdminSettings({ alignTokenMode: 123 }).alignTokenMode).toBe('auto')
+    expect(normalizeAdminSettings({ alignTokenMode: null }).alignTokenMode).toBe('auto')
+  })
+})
+
 describe('llmRequestTimeoutSec normalization', () => {
   it('defaults to 600 seconds when unset', () => {
     expect(getDefaultAdminSettings().llmRequestTimeoutSec).toBe(600)
@@ -157,5 +176,24 @@ describe('llmRequestTimeoutSec normalization', () => {
 
   it('falls back to the default for non-numeric input', () => {
     expect(normalizeAdminSettings({ llmRequestTimeoutSec: 'not-a-number' }).llmRequestTimeoutSec).toBe(600)
+  })
+})
+
+describe('llmReasoningBudgetTokens normalization (implementation 3)', () => {
+  it('defaults to 0 (auto) when unset', () => {
+    expect(getDefaultAdminSettings().llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({}).llmReasoningBudgetTokens).toBe(0)
+  })
+
+  it('keeps in-range values as-is, including 0', () => {
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 0 }).llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 4096 }).llmReasoningBudgetTokens).toBe(4096)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 32768 }).llmReasoningBudgetTokens).toBe(32768)
+  })
+
+  it('falls back to the default (0) for out-of-range or non-numeric input', () => {
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: -1 }).llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 32769 }).llmReasoningBudgetTokens).toBe(0)
+    expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 'not-a-number' }).llmReasoningBudgetTokens).toBe(0)
   })
 })

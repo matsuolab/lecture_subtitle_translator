@@ -4,6 +4,7 @@ import { reindexContextGroups } from './contextGrouping'
 import { formatLines } from './formatLines'
 import { classifyViolation, computeMetrics } from './metrics'
 import { joinSubtitleParts, unwrapSubtitleLines } from './textUtils'
+import { mergeCueSourceRefs } from '@/types/sourceEvidence'
 
 export interface FinalSafeMergeEntry {
   leftId: number
@@ -44,7 +45,6 @@ function normalizeThresholds(thresholds: PipelineThresholds): PipelineThresholds
     mergedLongDurationSec: finiteOrDefault(thresholds.mergedLongDurationSec, DEFAULT_PIPELINE_THRESHOLDS.mergedLongDurationSec),
     overCompressedRatio: finiteOrDefault(thresholds.overCompressedRatio, DEFAULT_PIPELINE_THRESHOLDS.overCompressedRatio),
     overCompressedJaChars: finiteOrDefault(thresholds.overCompressedJaChars, DEFAULT_PIPELINE_THRESHOLDS.overCompressedJaChars),
-    verboseEnRatio: finiteOrDefault(thresholds.verboseEnRatio, DEFAULT_PIPELINE_THRESHOLDS.verboseEnRatio),
     verboseCps: finiteOrDefault(thresholds.verboseCps, DEFAULT_PIPELINE_THRESHOLDS.verboseCps),
     maxLineLen: finiteOrDefault(thresholds.maxLineLen, DEFAULT_PIPELINE_THRESHOLDS.maxLineLen),
     slowCps: finiteOrDefault(thresholds.slowCps, DEFAULT_PIPELINE_THRESHOLDS.slowCps),
@@ -145,7 +145,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
   if (left.alignConf !== 'exact' || right.alignConf !== 'exact') {
     return { reason: `non-exact timing (${left.alignConf}, ${right.alignConf})` }
   }
-  const mergeableExistingViolations: ViolationCode[] = ['ok', 'slow_speech', 'verbose_en', 'line_length_only', 'short_duration']
+  const mergeableExistingViolations: ViolationCode[] = ['ok', 'slow_speech', 'cps_over', 'line_length_only', 'short_duration']
   if (![left.violation, right.violation].every(v => mergeableExistingViolations.includes(v))) {
     return { reason: `existing violation (${left.violation}, ${right.violation})` }
   }
@@ -162,6 +162,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
   }
 
   const mergedText = mergeCandidateText(left, right, thresholds)
+  const sourceRefs = mergeCueSourceRefs(left.sourceRefs, right.sourceRefs)
   const expectedJaLength = compactLength(left.jaText) + compactLength(right.jaText)
   if (compactLength(mergedText.jaText) < expectedJaLength) {
     return { reason: 'transcript coverage would shrink' }
@@ -177,6 +178,7 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
     enTextOriginal: undefined,
     merged: true,
     contextGroupSourceIds: [...new Set([...sourceIdsFor(left), ...sourceIdsFor(right)])],
+    ...(sourceRefs ? { sourceRefs } : {}),
   }
   const formatted = formatLines([draft], thresholds)[0]
   const metrics = computeMetrics(formatted)
@@ -190,7 +192,13 @@ function buildMergedBlock(left: EnBlock, right: EnBlock, thresholds: PipelineThr
   if (metrics.cps > thresholds.verboseCps) {
     return { reason: `CPS ${metrics.cps.toFixed(1)} > ${thresholds.verboseCps.toFixed(1)}` }
   }
-  if (violation !== 'ok' && violation !== 'slow_speech' && violation !== 'verbose_en') {
+  // 従来 verbose_en は enJaRatio でも立っていたため、結合後に行長超過になったブロックも
+  // verbose_en として許可されていた。line_length_only を許可に加えないと、この変更で
+  // 結合が従来より厳しくなりキュー数が変わってしまう。CPS 超過は直前の176行で別途拒否している。
+  if (
+    violation !== 'ok' && violation !== 'slow_speech'
+    && violation !== 'cps_over' && violation !== 'line_length_only'
+  ) {
     return { reason: `new violation ${violation}` }
   }
 

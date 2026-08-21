@@ -1,4 +1,4 @@
-import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider, WhisperxModel } from '@/types/adminSettings'
+import type { AdminSettings, AlignTokenMode, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ReasoningEffort, ServiceMode, SemanticCheckMode, TranslationProvider, WhisperxModel } from '@/types/adminSettings'
 import { DEFAULT_TEXT_NORMALIZATION_RULES_JSON } from '@/lib/pipeline/textNormalization'
 import {
   DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,
@@ -16,6 +16,7 @@ const DEFAULT_LOCAL_TRANSCRIPT_API_BASE = 'http://127.0.0.1:8000'
 
 const DEFAULT_SERVICE_MODE: ServiceMode = 'legacy_pipeline'
 const DEFAULT_TRANSLATION_PROVIDER: TranslationProvider = 'openai'
+const DEFAULT_ALIGN_TOKEN_MODE: AlignTokenMode = 'auto'
 const SHARED_SETTINGS_VERSION = 1
 const SHARED_SETTINGS_EXCLUDED_FIELDS = [
   'serviceAuthToken',
@@ -60,11 +61,11 @@ export function getDefaultAdminSettings(): AdminSettings {
     chatVisionProfileJson: '',
     embeddingProfilePreset: 'auto',
     embeddingProfileJson: '',
-    translationModel: 'gpt-5.4-mini',
-    correctionModel: 'gpt-5.4-mini',
+    translationModel: 'gpt-5.6-luna',
+    correctionModel: 'gpt-5.6-luna',
     pdfExtractionUseVision: false,
-    pdfExtractionVisionModel: 'gpt-5.4-nano',
-    pdfFormulaMiniModel: 'gpt-5.4-mini',
+    pdfExtractionVisionModel: 'gpt-5.6-luna',
+    pdfFormulaMiniModel: 'gpt-5.6-luna',
     pdfExtractionParallel: false,
     glossaryMaxOutputTokens: 4096,
     apiRequestConcurrency: 7,
@@ -75,12 +76,18 @@ export function getDefaultAdminSettings(): AdminSettings {
     enMaxLines: 2,
     enMaxCps: 16.9,
     subtitleMinDurationSec: 0.833,
+    // 放送・配信の慣行に寄せた保守的な値。ちらつき防止に必要な最小限だけを閉じる目的で、
+    // 「短い空白」と「実質的な無音」の境目として 0.5 秒を既定にした（0 秒キュー修正の
+    // 実測分類: 削除起因21件・実質無音19件のうち、ちらつきの原因になり得るのは前者側の
+    // 短いギャップのみ、という知見から）。0 にすると閉じる処理自体をスキップする。
+    subtitleMaxGapSec: 0.5,
     qualityCorrectionThreshold: 0.15,
     spellUserDictionary: [],
     spellImportedDictionaryLabels: [],
     pipelineShortDurationSec: 1.5,
     pipelineLongDurationSec: 14.0,
     pipelineMergedLongDurationSec: 12.0,
+    // 未使用（AdminSettings 側の JSDoc 参照）。既存保存データとの互換のためだけに残す既定値。
     pipelineVerboseEnRatio: 1.5,
     pipelineOverCompressedRatio: 0.25,
     pipelineOverCompressedJaChars: 15,
@@ -91,13 +98,14 @@ export function getDefaultAdminSettings(): AdminSettings {
     pipelineMergeContinuationMaxGapSec: 1.5,
     pipelineMergeContinuationMaxDurationSec: 12,
     pipelineMergeContinuationMaxTranscriptChars: 80,
-    incompleteEndDetectionModel: 'gpt-5.4-nano',
+    incompleteEndDetectionModel: 'gpt-5.6-luna',
     incompleteEndDetectionBatchSize: 30,
-    compressModel: 'gpt-5.4-mini',
-    microModel: 'gpt-5.4-nano',
-    expandModel: 'gpt-5.4-mini',
-    contextMergeModel: 'gpt-5.4-mini',
-    splitJaModel: 'gpt-5.4-nano',
+    llmReasoningBudgetTokens: 0,
+    compressModel: 'gpt-5.6-luna',
+    microModel: 'gpt-5.6-luna',
+    expandModel: 'gpt-5.6-luna',
+    contextMergeModel: 'gpt-5.6-luna',
+    splitJaModel: 'gpt-5.6-luna',
     transcribeLanguageCode: DEFAULT_WHISPERX_LANGUAGE,
     subtitleLanguageLabel: 'English',
     transcriptLanguageLabel: 'Japanese',
@@ -107,6 +115,7 @@ export function getDefaultAdminSettings(): AdminSettings {
     // 事前充填すると「ラベルだけ入れ替えた」利用者の設定に別言語の作法が残り続ける
     // （languageProfileConfig 側の stale 判定で無害化しているが、UI 上も空欄が正しい状態）。
     languageProfileConfigJson: '',
+    alignTokenMode: DEFAULT_ALIGN_TOKEN_MODE,
     textNormalizationEnabled: true,
     textNormalizationRulesJson: DEFAULT_TEXT_NORMALIZATION_RULES_JSON,
     correctionAdditionalInstructions: DEFAULT_CORRECTION_ADDITIONAL_INSTRUCTIONS,
@@ -115,11 +124,12 @@ export function getDefaultAdminSettings(): AdminSettings {
     translationFewShotJson: DEFAULT_TRANSLATION_FEW_SHOT_JSON,
     compressPromptOverride: '',
     expandPromptOverride: '',
+    // 非推奨。coverageRepairAgent 廃止に伴い未使用（古い保存プロジェクトとの互換性のため型・既定値のみ残す）。
     coverageRepairEnabled: true,
-    coverageRepairModel: 'gpt-5.4-mini',
+    coverageRepairModel: 'gpt-5.6-luna',
     coverageRepairEffort: 'low',
     generalRepairEnabled: true,
-    generalRepairModel: 'gpt-5.4-mini',
+    generalRepairModel: 'gpt-5.6-luna',
     generalRepairMaxEffort: 'medium',
     debugModeEnabled: false,
     correctionDebugEmbedding: false,
@@ -136,6 +146,13 @@ function normalizeWhisperxModel(value: unknown, fallback: WhisperxModel): Whispe
 function normalizePositiveNumber(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : parseFloat(value as string)
   return isFinite(n) && n > 0 ? n : fallback
+}
+
+// normalizePositiveNumber と異なり 0 を有効値として許容する。
+// subtitleMaxGapSec のように「0 = 機能オフ」を表す設定向け。
+function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : parseFloat(value as string)
+  return isFinite(n) && n >= 0 ? n : fallback
 }
 
 function normalizeBoundedInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -208,6 +225,12 @@ function normalizeMaxEffort(value: unknown, fallback: 'low' | 'medium' | 'high')
   return fallback
 }
 
+// 'auto'/'char'/'word' の3値以外（旧バージョンからの読み込み・破損データ）は 'auto' へフォールバック。
+function normalizeAlignTokenMode(value: unknown): AlignTokenMode {
+  if (value === 'auto' || value === 'char' || value === 'word') return value
+  return DEFAULT_ALIGN_TOKEN_MODE
+}
+
 export function normalizeAdminSettings(value: unknown): AdminSettings {
   const raw = typeof value === 'object' && value !== null ? value as Partial<AdminSettings> & { pipelineApiUrl?: string } : {}
   const defaults = getDefaultAdminSettings()
@@ -251,6 +274,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     enMaxLines: normalizePositiveNumber(raw.enMaxLines, defaults.enMaxLines),
     enMaxCps: normalizePositiveNumber(raw.enMaxCps, defaults.enMaxCps),
     subtitleMinDurationSec: normalizePositiveNumber(raw.subtitleMinDurationSec, defaults.subtitleMinDurationSec),
+    subtitleMaxGapSec: normalizeNonNegativeNumber(raw.subtitleMaxGapSec, defaults.subtitleMaxGapSec),
     qualityCorrectionThreshold: normalizePositiveNumber(raw.qualityCorrectionThreshold, defaults.qualityCorrectionThreshold),
     spellUserDictionary: Array.isArray(raw.spellUserDictionary)
       ? raw.spellUserDictionary.filter((w): w is string => typeof w === 'string' && w.trim().length > 0)
@@ -261,6 +285,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pipelineShortDurationSec: normalizePositiveNumber(raw.pipelineShortDurationSec, defaults.pipelineShortDurationSec),
     pipelineLongDurationSec: normalizePositiveNumber(raw.pipelineLongDurationSec, defaults.pipelineLongDurationSec),
     pipelineMergedLongDurationSec: normalizePositiveNumber(raw.pipelineMergedLongDurationSec, defaults.pipelineMergedLongDurationSec),
+    // 未使用（AdminSettings 側の JSDoc 参照）。既存保存データを読み込み時に落とさないためだけに正規化する。
     pipelineVerboseEnRatio: normalizePositiveNumber(raw.pipelineVerboseEnRatio, defaults.pipelineVerboseEnRatio),
     pipelineOverCompressedRatio: normalizePositiveNumber(raw.pipelineOverCompressedRatio, defaults.pipelineOverCompressedRatio),
     pipelineOverCompressedJaChars: normalizePositiveNumber(raw.pipelineOverCompressedJaChars, defaults.pipelineOverCompressedJaChars),
@@ -273,6 +298,10 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     pipelineMergeContinuationMaxTranscriptChars: normalizePositiveNumber(raw.pipelineMergeContinuationMaxTranscriptChars, defaults.pipelineMergeContinuationMaxTranscriptChars),
     incompleteEndDetectionModel: typeof raw.incompleteEndDetectionModel === 'string' && raw.incompleteEndDetectionModel ? raw.incompleteEndDetectionModel : defaults.incompleteEndDetectionModel,
     incompleteEndDetectionBatchSize: normalizeBoundedInteger(raw.incompleteEndDetectionBatchSize, defaults.incompleteEndDetectionBatchSize, 1, 200),
+    // 0 = 自動（プロファイル推定に従う）。上限 32768 は組み込みモデルプロファイル
+    // （MODEL_PROFILE_PRESETS の maxOutputTokens）と同じ値: withReasoningHeadroom は最終的に
+    // profile.maxOutputTokens でクランプするため、それを超える値を許容しても意味を持たない。
+    llmReasoningBudgetTokens: normalizeBoundedInteger(raw.llmReasoningBudgetTokens, defaults.llmReasoningBudgetTokens, 0, 32768),
     compressModel: typeof raw.compressModel === 'string' && raw.compressModel ? raw.compressModel : defaults.compressModel,
     microModel: typeof raw.microModel === 'string' && raw.microModel ? raw.microModel : defaults.microModel,
     expandModel: typeof raw.expandModel === 'string' && raw.expandModel ? raw.expandModel : defaults.expandModel,
@@ -286,6 +315,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     whisperxDevice: raw.whisperxDevice === 'cpu' ? 'cpu' : defaults.whisperxDevice,
     whisperxModel: normalizeWhisperxModel(raw.whisperxModel, defaults.whisperxModel),
     languageProfileConfigJson: typeof raw.languageProfileConfigJson === 'string' && raw.languageProfileConfigJson ? raw.languageProfileConfigJson : defaults.languageProfileConfigJson,
+    alignTokenMode: normalizeAlignTokenMode(raw.alignTokenMode),
     textNormalizationEnabled: typeof raw.textNormalizationEnabled === 'boolean' ? raw.textNormalizationEnabled : defaults.textNormalizationEnabled,
     textNormalizationRulesJson: typeof raw.textNormalizationRulesJson === 'string' ? raw.textNormalizationRulesJson : defaults.textNormalizationRulesJson,
     correctionAdditionalInstructions: typeof raw.correctionAdditionalInstructions === 'string' ? raw.correctionAdditionalInstructions : defaults.correctionAdditionalInstructions,
@@ -294,6 +324,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     translationFewShotJson: typeof raw.translationFewShotJson === 'string' ? raw.translationFewShotJson : defaults.translationFewShotJson,
     compressPromptOverride: typeof raw.compressPromptOverride === 'string' ? raw.compressPromptOverride : '',
     expandPromptOverride: typeof raw.expandPromptOverride === 'string' ? raw.expandPromptOverride : '',
+    // 非推奨。coverageRepairAgent 廃止に伴い未使用（古い保存プロジェクトを開いても壊れないよう正規化のみ残す）。
     coverageRepairEnabled: typeof raw.coverageRepairEnabled === 'boolean' ? raw.coverageRepairEnabled : defaults.coverageRepairEnabled,
     coverageRepairModel: typeof raw.coverageRepairModel === 'string' ? raw.coverageRepairModel : defaults.coverageRepairModel,
     coverageRepairEffort: normalizeReasoningEffort(raw.coverageRepairEffort, defaults.coverageRepairEffort),

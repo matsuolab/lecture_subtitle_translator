@@ -4,8 +4,19 @@ import type { PipelineRunResult } from '@/types/pipeline'
 import type { WorkLogExport } from '@/lib/worklog/types'
 import { normalizeSubtitleText, parseTextNormalizationConfig } from '@/lib/pipeline/textNormalization'
 import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
+import {
+  LocalStorageRecoveryStore,
+  createRecoverySnapshotInput,
+  decodeProjectDocument,
+  materializeProjectDocument,
+  migrateLegacyProjectDocument,
+  serializeProjectDocument,
+  type DecodeProjectDocumentResult,
+  type RecoverySaveResult,
+} from '@/lib/projectSession'
 
-const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
+/** 旧keyは読み取りmigration専用。新規保存には使わない。 */
+const LEGACY_STORAGE_KEY = 'matsuo-subtitle-editor-v1'
 
 export interface SessionExportData {
   version: number
@@ -13,6 +24,7 @@ export interface SessionExportData {
   /** 書き出したアプリのバージョン（リリースビルドではタグ名、開発ビルドでは 'dev'）。障害報告の特定に使う */
   appVersion?: string
   blocks: SubtitleBlock[]
+  extensions?: Record<string, unknown>
   session?: {
     videoSource?: {
       name: string
@@ -23,39 +35,44 @@ export interface SessionExportData {
     pipelineHistory?: PipelineRunResult[]
     /** 現セッションのワークログ（書き起こし起点→修正の作業履歴） */
     workLog?: WorkLogExport
+    /** v3出力で保持する、インポート元を含むワークログ系譜。 */
+    workLogs?: WorkLogExport[]
+    activeWorkLogSessionId?: string
+    extensions?: Record<string, unknown>
   }
-}
-
-interface StoredLocalSession {
-  savedAt: string
-  blocks: SubtitleBlock[]
-  session?: SessionExportData['session']
 }
 
 // ─── localStorage（クラッシュ/誤リロード対策） ────────────────────────────
 
-export function saveToLocalStorage(blocks: SubtitleBlock[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      savedAt: new Date().toISOString(),
-      blocks,
-    } satisfies StoredLocalSession))
-  } catch {
-    // QuotaExceededError 等は無視
-  }
+function recoveryStore(): LocalStorageRecoveryStore {
+  return new LocalStorageRecoveryStore(localStorage)
 }
 
-export function saveSessionSnapshotToLocalStorage(data: SessionExportData): void {
-  try {
-    const payload: StoredLocalSession = {
-      savedAt: data.savedAt,
-      blocks: data.blocks,
-      session: data.session,
-    }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
-  } catch {
-    // QuotaExceededError 等は無視
+/** blocks-only autosaveでも、直前の軽量sessionを必ず維持する。 */
+export function saveToLocalStorage(blocks: SubtitleBlock[]): RecoverySaveResult {
+  const store = recoveryStore()
+  const loaded = store.load()
+  if (loaded.status === 'ok') {
+    return store.save({
+      savedAt: new Date().toISOString(),
+      blocks,
+      session: loaded.snapshot.session,
+    })
   }
+  return store.save({ savedAt: new Date().toISOString(), blocks })
+}
+
+export function saveSessionSnapshotToLocalStorage(data: SessionExportData): RecoverySaveResult {
+  return recoveryStore().save(createRecoverySnapshotInput({
+    savedAt: data.savedAt,
+    blocks: data.blocks,
+    videoSource: data.session?.videoSource,
+    adminSettings: data.session?.adminSettings,
+    pipelineRun: data.session?.pipelineRun,
+    pipelineHistory: data.session?.pipelineHistory,
+    activeWorkLogSessionId: data.session?.activeWorkLogSessionId
+      ?? data.session?.workLog?.header.sessionId,
+  }))
 }
 
 export function loadFromLocalStorage(): SubtitleBlock[] | null {
@@ -65,7 +82,28 @@ export function loadFromLocalStorage(): SubtitleBlock[] | null {
 
 export function loadSessionSnapshotFromLocalStorage(): SessionExportData | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const loaded = recoveryStore().load()
+    if (loaded.status === 'ok') {
+      return {
+        version: loaded.snapshot.version,
+        savedAt: loaded.snapshot.savedAt,
+        blocks: loaded.snapshot.blocks,
+        session: loaded.snapshot.session ? {
+          videoSource: loaded.snapshot.session.videoSource,
+          adminSettings: loaded.snapshot.session.adminSettings,
+          pipelineRun: reconcileRestoredPipelineRun(loaded.snapshot.session.pipelineRun),
+          pipelineHistory: loaded.snapshot.session.pipelineHistory,
+          activeWorkLogSessionId: loaded.snapshot.session.activeWorkLogSessionId,
+        } : undefined,
+      }
+    }
+    if (loaded.status !== 'empty') return null
+  } catch {
+    return null
+  }
+
+  try {
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed.blocks)) return null
@@ -83,7 +121,7 @@ export function loadSessionSnapshotFromLocalStorage(): SessionExportData | null 
       }
     }) as SubtitleBlock[]
     const session = parsed.session as SessionExportData['session'] | undefined
-    return {
+    const migrated: SessionExportData = {
       version: Number(parsed.version ?? 2),
       savedAt: String(parsed.savedAt ?? new Date(0).toISOString()),
       blocks,
@@ -91,6 +129,8 @@ export function loadSessionSnapshotFromLocalStorage(): SessionExportData | null 
         ? { ...session, pipelineRun: reconcileRestoredPipelineRun(session.pipelineRun) }
         : session,
     }
+    saveSessionSnapshotToLocalStorage(migrated)
+    return migrated
   } catch {
     return null
   }
@@ -137,32 +177,41 @@ export function exportProjectJson(data: SessionExportData | SubtitleBlock[]): vo
   const base: SessionExportData = Array.isArray(data)
     ? { version: 1, savedAt: new Date().toISOString(), blocks: data }
     : data
-  const payload: SessionExportData = {
+  const document = migrateLegacyProjectDocument({
     ...base,
     appVersion: (import.meta.env.VITE_APP_VERSION as string | undefined) || 'dev',
-  }
-  const json = JSON.stringify(payload, null, 2)
+  })
+  const json = serializeProjectDocument(document)
   // セッションIDがあればワークログ(<sessionId>.jsonl)と名前で対応が取れる
-  const suffix = payload.session?.workLog?.header.sessionId
-    ?? timestampForFilename(payload.savedAt)
+  const suffix = document.session?.activeWorkLogSessionId
+    ?? timestampForFilename(document.savedAt)
   downloadFile(json, `subtitle-project_${suffix}.json`, 'application/json')
 }
 
-export function importProjectJson(file: File): Promise<SubtitleBlock[]> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = e => {
-      try {
-        const parsed = JSON.parse(e.target?.result as string)
-        if (!Array.isArray(parsed.blocks)) throw new Error('blocks が見つかりません')
-        resolve(parsed.blocks as SubtitleBlock[])
-      } catch (err) {
-        reject(err)
-      }
+/** Browser/Tauriの入力経路が共有する、副作用なしのデコード入口。 */
+export function parseProjectJson(text: string): DecodeProjectDocumentResult {
+  return decodeProjectDocument(text)
+}
+
+export async function importProjectDocument(file: File): Promise<DecodeProjectDocumentResult> {
+  try {
+    return parseProjectJson(await file.text())
+  } catch (error) {
+    return {
+      status: 'invalid',
+      error: error instanceof Error ? error.message : 'ファイル読み込みに失敗しました',
     }
-    reader.onerror = () => reject(new Error('ファイル読み込みに失敗しました'))
-    reader.readAsText(file)
-  })
+  }
+}
+
+/** Appのatomic hydration接続まで残すblocks-only互換wrapper。 */
+export async function importProjectJson(file: File): Promise<SubtitleBlock[]> {
+  const result = await importProjectDocument(file)
+  if (result.status === 'invalid') throw new Error(result.error)
+  if (result.status === 'unsupported_newer') {
+    throw new Error(`このプロジェクトは新しい形式(v${result.foundVersion})です`)
+  }
+  return materializeProjectDocument(result.document).blocks
 }
 
 // ─── SRT インポート ────────────────────────────────────────────────────────
@@ -192,7 +241,7 @@ function srtTimeToSeconds(time: string): number {
   return h * 3600 + m * 60 + s
 }
 
-const TIMESTAMP_RE = /^(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})/
+const TIMESTAMP_RE = /^(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/
 
 /** 次の行がタイムスタンプ行かどうか（= 新ブロックの開始） */
 function isNextBlockStart(lines: string[], i: number): boolean {

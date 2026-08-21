@@ -83,14 +83,82 @@ describe('adaptChatCompletionRequest', () => {
     expect(adapted.body.max_tokens).toBeLessThanOrEqual(32768)
   })
 
-  it('does not clamp token limits for the OpenAI API provider', () => {
+  it('strips token limit fields for the OpenAI API provider instead of clamping them', () => {
+    // 実測: 同一入力でも max_tokens を送るとバッチ見積り値（例: 376）だけが finishReason=length
+    // で本文 0 文字のまま切断され、送らなければ 450 前後で安定して完走した。上限は消費量を
+    // 左右せず成功可否だけを左右していたため、openai / gemini ではフィールドごと削除する
+    // （モデル未一致で profile が undefined でも同じ扱いになることを確認する）。
     const adapted = adaptChatCompletionRequest({
-      body: { model: 'gpt-5.4-mini', max_tokens: 999999 },
+      body: { model: 'gpt-5.4-mini', max_tokens: 999999, max_completion_tokens: 999999 },
       messages: [{ role: 'user', content: 'hello' }],
       settings: settings({ translationProvider: 'openai' }),
       model: 'gpt-5.4-mini',
       reasoningMode: 'nonThinking',
     })
+    expect('max_tokens' in adapted.body).toBe(false)
+    expect('max_completion_tokens' in adapted.body).toBe(false)
+  })
+
+  it('strips token limit fields for the Gemini API provider instead of clamping them', () => {
+    // 旧実装は provider !== 'openai' でクランプしていたため gemini はクランプ対象だった。
+    // 新方針では openai と同様に「送らない」扱いに変わる。
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'gemini-3-flash-preview', max_tokens: 999999 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'gemini' }),
+      model: 'gemini-3-flash-preview',
+      reasoningMode: 'nonThinking',
+    })
+    expect('max_tokens' in adapted.body).toBe(false)
+    expect('max_completion_tokens' in adapted.body).toBe(false)
+  })
+
+  it('keeps clamping token limits for the local_openai provider even when a model profile matches (e.g. a gemma/qwen-named local model)', () => {
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'gemma-4-e4b-it', max_tokens: 999999 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'gemma-4-e4b-it',
+      reasoningMode: 'nonThinking',
+    })
+    expect(adapted.body.max_tokens).toBeLessThan(999999)
+    expect(adapted.body.max_tokens as number).toBeGreaterThanOrEqual(256)
+  })
+
+  it('strips token limit fields for openai/gemini even when no model profile matches at all (the common production case: a real gpt-*/gemini-* model with no gemma/qwen profile configured)', () => {
+    // resolveModelProfile が undefined を返す（!profile の早期 return）経路でも、provider による
+    // トークン上限の扱いが正しく適用されることを確認する。detectIncompleteEnds.ts /
+    // translateEn.ts が渡す実際の本番モデル（例: gpt-5.6-luna）はここを通る。
+    const openaiAdapted = adaptChatCompletionRequest({
+      body: { model: 'gpt-5.6-luna', max_completion_tokens: 376 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'openai' }),
+      model: 'gpt-5.6-luna',
+      reasoningMode: 'nonThinking',
+    })
+    expect(openaiAdapted.profile).toBeUndefined()
+    expect('max_completion_tokens' in openaiAdapted.body).toBe(false)
+
+    const geminiAdapted = adaptChatCompletionRequest({
+      body: { model: 'gemini-3-flash-preview', max_tokens: 376 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'gemini' }),
+      model: 'gemini-3-flash-preview',
+      reasoningMode: 'nonThinking',
+    })
+    expect(geminiAdapted.profile).toBeUndefined()
+    expect('max_tokens' in geminiAdapted.body).toBe(false)
+  })
+
+  it('leaves the body untouched (no clamp, no strip) for local_openai when no model profile matches', () => {
+    const adapted = adaptChatCompletionRequest({
+      body: { model: 'mistral-small', max_tokens: 999999 },
+      messages: [{ role: 'user', content: 'hello' }],
+      settings: settings({ translationProvider: 'local_openai' }),
+      model: 'mistral-small',
+      reasoningMode: 'nonThinking',
+    })
+    expect(adapted.profile).toBeUndefined()
     expect(adapted.body.max_tokens).toBe(999999)
   })
 
@@ -289,6 +357,52 @@ describe('withReasoningHeadroom', () => {
     expect(withReasoningHeadroom(Number.POSITIVE_INFINITY, MODEL_PROFILE_PRESETS.gemma)).toBe(MIN_REASONING_HEADROOM_TOKENS)
     expect(withReasoningHeadroom(Number.NaN, undefined)).toBe(MIN_REASONING_HEADROOM_TOKENS)
     expect(Number.isNaN(withReasoningHeadroom(Number.NaN, MODEL_PROFILE_PRESETS.gemma))).toBe(false)
+  })
+
+  describe('reasoningBudgetOverrideTokens (implementation 3: AdminSettings.llmReasoningBudgetTokens)', () => {
+    it('falls back to the previous profile-based behavior when the override is 0 (default = auto)', () => {
+      // profile 未解決（isReasoningCapableProfile が false）のとき、override=0 なら従来どおり素通し。
+      expect(withReasoningHeadroom(1000, undefined, 0)).toBe(1000)
+      // 思考しうる profile のとき、override=0 なら従来どおり REASONING_BUDGET_TOKENS を加算。
+      const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+      expect(withReasoningHeadroom(1000, profile, 0)).toBe(1000 + REASONING_BUDGET_TOKENS)
+    })
+
+    it('always adds the override amount regardless of profile reasoning capability when override > 0', () => {
+      // profile が undefined（=推定不能なローカルモデル）でも override が指定されていれば加算する。
+      // これが実装3の主目的: モデル名が gemma/qwen に一致しないローカルモデルで割り増しが
+      // 一切効かず出力上限で切れる、という破綻の穴を利用者が埋められるようにする。
+      expect(withReasoningHeadroom(1000, undefined, 5000)).toBe(1000 + 5000)
+
+      const nonThinkingProfile = {
+        ...MODEL_PROFILE_PRESETS.gemma,
+        maxOutputTokens: 1_000_000,
+        reasoning: { ...MODEL_PROFILE_PRESETS.gemma.reasoning, capability: 'none' as const },
+      }
+      expect(withReasoningHeadroom(1000, nonThinkingProfile, 5000)).toBe(1000 + 5000)
+    })
+
+    it('overrides REASONING_BUDGET_TOKENS entirely (does not add both) when override > 0 for a reasoning-capable profile', () => {
+      const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+      const result = withReasoningHeadroom(1000, profile, 3000)
+      expect(result).toBe(1000 + 3000)
+      expect(result).not.toBe(1000 + REASONING_BUDGET_TOKENS)
+    })
+
+    it('still clamps to profile.maxOutputTokens and never drops below MIN_REASONING_HEADROOM_TOKENS with an override', () => {
+      const smallCapProfile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 2000 }
+      expect(withReasoningHeadroom(1000, smallCapProfile, 5000)).toBe(2000)
+
+      const tinyCapProfile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 10 }
+      expect(withReasoningHeadroom(1, tinyCapProfile, 5000)).toBe(MIN_REASONING_HEADROOM_TOKENS)
+    })
+
+    it('ignores a negative or non-finite override and falls back to profile-based behavior', () => {
+      expect(withReasoningHeadroom(1000, undefined, -1)).toBe(1000)
+      expect(withReasoningHeadroom(1000, undefined, Number.NaN)).toBe(1000)
+      const profile = { ...MODEL_PROFILE_PRESETS.gemma, maxOutputTokens: 1_000_000 }
+      expect(withReasoningHeadroom(1000, profile, -1)).toBe(1000 + REASONING_BUDGET_TOKENS)
+    })
   })
 })
 

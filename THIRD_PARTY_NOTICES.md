@@ -51,6 +51,7 @@ https://www.gnu.org/licenses/lgpl-3.0.html
 | `retext-english` | 英語テキスト解析 | MIT |
 | `retext-repeated-words` | 重複語検出 | MIT |
 | `dictionary-en` | 英語 Hunspell 辞書パッケージ | MIT AND BSD |
+| `diff` | 書きおこしと字幕テキストの差分アライメント | BSD-3-Clause |
 
 正確なバージョンと依存関係は `frontend/package-lock.json` を参照してください。
 

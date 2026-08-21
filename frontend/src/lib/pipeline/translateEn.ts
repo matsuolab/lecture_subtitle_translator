@@ -227,6 +227,8 @@ function resolveApiConfig(settings: AdminSettings): {
   maxSegmentsPerRequest: number
   requestConcurrency: number
   modelProfile: ReturnType<typeof resolveModelProfile>
+  /** withReasoningHeadroom に渡す推論予算の上書き値（AdminSettings.llmReasoningBudgetTokens）。0=自動。 */
+  reasoningBudgetOverrideTokens: number
 } {
   const connection = requireAiConnection(settings)
   const model = requireChatModelForProvider(settings, resolveTranslateModelId(settings.translationModel), 'translation')
@@ -246,6 +248,7 @@ function resolveApiConfig(settings: AdminSettings): {
     // thinking系モデルの出力上限見積り（withReasoningHeadroom）に使う。呼出のたびに解決すると
     // 無駄なので resolveApiConfig で一度だけ解決し、各 chatText 呼出箇所で使い回す。
     modelProfile: resolveModelProfile(settings, model, 'chatText'),
+    reasoningBudgetOverrideTokens: settings.llmReasoningBudgetTokens,
   }
 }
 
@@ -468,6 +471,7 @@ async function callOpenAICompatible(
   const maxTokens = withReasoningHeadroom(
     estimateDesiredOutputTokens(sumTextLength(inputs), inputs.length),
     config.modelProfile,
+    config.reasoningBudgetOverrideTokens,
   )
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[batch]',
@@ -592,7 +596,7 @@ async function callContextGroupAllocation(
       : []
   const charCount = groups.reduce((sum, group) => sum + group.text.length, 0)
   const itemCount = groups.reduce((sum, group) => sum + group.items.length, 0)
-  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(charCount, itemCount), config.modelProfile)
+  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(charCount, itemCount), config.modelProfile, config.reasoningBudgetOverrideTokens)
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[contextGroupAllocation]',
     model: config.model,
@@ -720,7 +724,7 @@ async function callTranslationOnce(
   glossaryTerms: string[],
 ): Promise<SingleCallResult> {
   const glossaryInstruction = buildGlossaryInstruction(glossaryTerms, config.languages)
-  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(input.text.length, 1), config.modelProfile)
+  const maxTokens = withReasoningHeadroom(estimateDesiredOutputTokens(input.text.length, 1), config.modelProfile, config.reasoningBudgetOverrideTokens)
   const result = await createAiGateway(config.settings).chatText({
     nodeName: 'translateEn[single]',
     model: config.model,

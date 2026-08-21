@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PipelineRunResult } from '@/types/pipeline'
-import { loadSessionSnapshotFromLocalStorage, reconcileRestoredPipelineRun } from './persistence'
+import {
+  loadSessionSnapshotFromLocalStorage,
+  reconcileRestoredPipelineRun,
+  saveSessionSnapshotToLocalStorage,
+  saveToLocalStorage,
+} from './persistence'
 
-function installFakeLocalStorage(initial: Record<string, string> = {}): void {
+function installFakeLocalStorage(initial: Record<string, string> = {}): Map<string, string> {
   const store = new Map(Object.entries(initial))
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => store.get(key) ?? null,
@@ -12,6 +17,7 @@ function installFakeLocalStorage(initial: Record<string, string> = {}): void {
     key: () => null,
     length: 0,
   })
+  return store
 }
 
 const STORAGE_KEY = 'matsuo-subtitle-editor-v1'
@@ -46,7 +52,7 @@ describe('reconcileRestoredPipelineRun', () => {
   })
 
   it('終端状態はそのまま返す', () => {
-    for (const status of ['success', 'error', 'idle', 'cancelled'] as const) {
+    for (const status of ['success', 'warning', 'error', 'idle', 'cancelled'] as const) {
       const run: PipelineRunResult = { status, step: 'done', message: 'x' }
       expect(reconcileRestoredPipelineRun(run)).toBe(run)
     }
@@ -114,5 +120,35 @@ describe('loadSessionSnapshotFromLocalStorage', () => {
     const restored = loadSessionSnapshotFromLocalStorage()
     expect(restored).not.toBeNull()
     expect(restored?.session).toBeUndefined()
+  })
+
+  it('blocks-only autosaveでも直前のvideo/settings/run/historyを上書き消さない', () => {
+    const initialBlocks = [{
+      id: 1, startTime: 0, endTime: 1, subtitle: 'before', transcript: '前',
+      cps: 6, charCount: 6, status: 'pending' as const, glossaryTerms: [],
+    }]
+    installFakeLocalStorage()
+    expect(saveSessionSnapshotToLocalStorage({
+      version: 2,
+      savedAt: '2026-08-12T00:00:00.000Z',
+      blocks: initialBlocks,
+      session: {
+        videoSource: { name: 'lecture.mp4' },
+        adminSettings: { translationModel: 'gpt-5' },
+        pipelineRun: { status: 'success', step: 'done', message: 'ok', runId: 'run-1' },
+        pipelineHistory: [{ status: 'error', step: 'done', message: 'old', runId: 'run-0' }],
+        activeWorkLogSessionId: 'work-1',
+      },
+    })).toMatchObject({ ok: true, revision: 1 })
+
+    expect(saveToLocalStorage([{ ...initialBlocks[0], subtitle: 'after' }]))
+      .toMatchObject({ ok: true, revision: 2 })
+    const restored = loadSessionSnapshotFromLocalStorage()
+    expect(restored?.blocks[0].subtitle).toBe('after')
+    expect(restored?.session?.videoSource?.name).toBe('lecture.mp4')
+    expect(restored?.session?.adminSettings?.translationModel).toBe('gpt-5')
+    expect(restored?.session?.pipelineRun?.runId).toBe('run-1')
+    expect(restored?.session?.pipelineHistory?.[0]?.runId).toBe('run-0')
+    expect(restored?.session?.activeWorkLogSessionId).toBe('work-1')
   })
 })

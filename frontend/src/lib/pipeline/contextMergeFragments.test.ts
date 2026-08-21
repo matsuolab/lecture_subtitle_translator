@@ -1,7 +1,19 @@
-import { describe, expect, it } from 'vitest'
-import type { EnBlock } from './blockTypes'
+import { describe, expect, it, vi } from 'vitest'
+import { getDefaultAdminSettings } from '@/api/adminSettings'
+import { DEFAULT_PIPELINE_THRESHOLDS, type EnBlock } from './blockTypes'
 import { DEFAULT_LANGUAGE_PROFILE_CONFIG, type LanguageProfileConfig } from './languageProfileConfig'
-import { __testing } from './contextMergeFragments'
+import { __testing, mergeContextFragments } from './contextMergeFragments'
+
+vi.mock('./llmCallWithMeta', () => ({
+  llmCallWithMeta: vi.fn(async () => ({
+    content: JSON.stringify({
+      decision: 'merge_prev',
+      subtitle_text: 'This is complete.',
+      transcript_text: 'これは完結します。',
+      rationale: 'complete the fragment',
+    }),
+  })),
+}))
 
 const { fragmentMaxChars, isContextDependentSubtitle, isContextMergeCandidate } = __testing
 
@@ -118,5 +130,44 @@ describe('isContextMergeCandidate — 上限が字幕言語に追従する', () 
     // transcript.continuationEndPattern = [,;:]$ が効くこと
     const block = makeBlock({ enText: '誤差を計算します。', jaText: 'we compute the error,' })
     expect(isContextMergeCandidate(block, EN_TO_JA_PROFILE)).toBe(true)
+  })
+})
+
+function makeSourceEvidenceBlock(
+  partial: Pick<EnBlock, 'id' | 'start' | 'end' | 'jaText' | 'enText' | 'sourceRefs'>,
+): EnBlock {
+  return {
+    ...partial,
+    jaChars: partial.jaText.length,
+    alignConf: 'exact',
+    enChars: partial.enText.length,
+    cps: 5,
+    maxLineLen: partial.enText.length,
+    violation: 'ok',
+    expandCount: 0,
+    compressCount: 0,
+    contextGroupId: 'cg-1',
+  }
+}
+
+describe('mergeContextFragments source evidence transport', () => {
+  it('stable-unions both cue origins when the LLM merge is accepted', async () => {
+    const settings = { ...getDefaultAdminSettings(), openaiApiKey: 'test' }
+    const result = await mergeContextFragments([
+      makeSourceEvidenceBlock({
+        id: 1, start: 0, end: 2, jaText: 'これは', enText: 'This begins.',
+        sourceRefs: [{ sourceSegmentId: 1, semanticUnitId: 'u1', relation: 'semantic_unit' }],
+      }),
+      makeSourceEvidenceBlock({
+        id: 2, start: 2.1, end: 4, jaText: '完結します', enText: 'and completes',
+        sourceRefs: [{ sourceSegmentId: 2, semanticUnitId: 'u2', relation: 'overlong_split' }],
+      }),
+    ], settings, DEFAULT_PIPELINE_THRESHOLDS)
+
+    expect(result).toHaveLength(1)
+    expect(result[0].sourceRefs).toEqual([
+      { sourceSegmentId: 1, semanticUnitId: 'u1', relation: 'cue_merge' },
+      { sourceSegmentId: 2, semanticUnitId: 'u2', relation: 'cue_merge' },
+    ])
   })
 })

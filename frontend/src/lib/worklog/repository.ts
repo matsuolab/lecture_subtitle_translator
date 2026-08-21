@@ -1,5 +1,5 @@
 import { isTauri } from '@tauri-apps/api/core'
-import type { WorkLogLine } from './types'
+import type { WorkLogLine, WorkLogWriteError, WorkLogWriteResult } from './types'
 import { WORK_LOG_FILE_EXT } from './types'
 import { parseJsonl, serializeLine } from './jsonl'
 
@@ -48,17 +48,25 @@ export async function appendWorkLogLine(
   dir: string,
   sessionId: string,
   line: WorkLogLine,
-): Promise<void> {
-  if (!isTauri()) {
-    const arr = memoryStore.get(sessionId) ?? []
-    arr.push(line)
-    memoryStore.set(sessionId, arr)
-    return
+): Promise<WorkLogWriteResult> {
+  try {
+    if (!isTauri()) {
+      const arr = memoryStore.get(sessionId) ?? []
+      arr.push(line)
+      memoryStore.set(sessionId, arr)
+      return { ok: true }
+    }
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs')
+    await ensureDir(dir)
+    const path = await sessionFilePath(dir, sessionId)
+    await writeTextFile(path, `${serializeLine(line)}\n`, { append: true })
+    return { ok: true }
+  } catch (error) {
+    const detail: WorkLogWriteError = error instanceof Error
+      ? { name: error.name || 'Error', message: error.message }
+      : { name: 'Error', message: String(error) }
+    return { ok: false, error: detail }
   }
-  const { writeTextFile } = await import('@tauri-apps/plugin-fs')
-  await ensureDir(dir)
-  const path = await sessionFilePath(dir, sessionId)
-  await writeTextFile(path, `${serializeLine(line)}\n`, { append: true })
 }
 
 /** セッションの全行を読み出す（再開時の seq 復元・破損チェック用） */
