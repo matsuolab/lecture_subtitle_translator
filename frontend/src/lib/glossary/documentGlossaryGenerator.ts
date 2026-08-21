@@ -318,7 +318,7 @@ const CANDIDATES_JSON_SCHEMA: JsonSchemaSpec = {
   },
 }
 
-// buildDetailPrompt (499-516行付近) の JSON 形式定義と厳密に一致させること。
+// buildDetailPrompt が返すプロンプト内の JSON 形式定義と厳密に一致させること。
 // domain/desc/note/reviewReason/references はこの段では出力しない方針のため含めない。
 const ENTRIES_JSON_SCHEMA: JsonSchemaSpec = {
   name: 'glossary_entries',
