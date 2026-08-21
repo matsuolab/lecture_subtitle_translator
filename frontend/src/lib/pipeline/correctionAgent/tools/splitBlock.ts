@@ -2,7 +2,7 @@ import type { AdminSettings } from '@/types/adminSettings'
 import type { EnBlock, PipelineThresholds } from '../../blockTypes'
 import { normalizeSpaces } from '../../textUtils'
 import { resolveTranslateModelId } from '../../prompts'
-import { loadLanguageProfileConfig, type LanguageProfileConfig } from '../../languageProfileConfig'
+import { loadLanguageProfileConfig, type LanguageScript, type LanguageProfileConfig } from '../../languageProfileConfig'
 import { formatLines } from '../../formatLines'
 import { computeMetrics } from '../../metrics'
 import { requireChatModelForProvider } from '../../aiProvider'
@@ -111,6 +111,26 @@ function isBadEnglishUnit(text: string): boolean {
   if (normalized.replace(/\s/g, '').length < 8) return true
   if (/^[a-z]/.test(normalized)) return true
   return /^(This|That|It|These|There is\.?|There are\.?|In that case,?|In the case of|Each one|Means)\.?$/i.test(normalized)
+}
+
+/**
+ * 「単独の字幕単位として成立しないテキストか」を、そのテキストの言語で判定する。
+ *
+ * この判定はロール（書きおこし／字幕）ではなく **言語** に依存する。
+ * 既定構成（書きおこし=日本語 / 字幕=英語）では、従来の
+ * isBadJapaneseUnit(unit) / isBadEnglishUnit(translation) と同じ組み合わせになる。
+ * 英→日構成ではそれぞれ入れ替わり、短い日本語字幕が英語基準（8文字未満）で
+ * 誤って却下される問題を防ぐ。
+ */
+function isBadUnitForScript(
+  text: string,
+  script: LanguageScript,
+  opts: { exemptTrailingParticle?: boolean } = {},
+): boolean {
+  if (script === 'japanese') return isBadJapaneseUnit(text, opts)
+  if (script === 'latin') return isBadEnglishUnit(text)
+  // generic: 言語固有の作法が不明なため、極端に短いものだけ却下する。
+  return normalizeSpaces(text).replace(/\s/g, '').length < 6
 }
 
 function confidenceOf(unit: SplitUnit): number {
@@ -406,6 +426,7 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, 'split_block: rejected low-confidence split unit')
     }
 
+    const languages = loadLanguageProfileConfig(settings)
     // 元のブロックの jaText が既に不完全な終わり方をしていた場合（助詞・接続表現で終わる等）、
     // 分割後の最後のユニットは必ず原文の末尾まで到達する（checkSeamOnlySplit が「最後のユニットが
     // tail_dropped でないこと」＝原文末尾に到達していることを保証している）。つまり最後のユニットの
@@ -414,12 +435,17 @@ export const splitBlockTool: Tool = {
     // 「末尾が助詞・接続で終わる」判定を免除する（最小文字数の判定は免除しない）。
     // 最後のユニット以外は従来どおり全ての判定を適用する。
     const originalWasIncomplete = endsWithIncompleteJapanese(block.jaText)
-    const badJa = cleanUnits.find((unit, index) => {
+    const badSource = cleanUnits.find((unit, index) => {
       const isLastUnit = index === cleanUnits.length - 1
-      return isBadJapaneseUnit(unit.text, { exemptTrailingParticle: isLastUnit && originalWasIncomplete })
+      return isBadUnitForScript(unit.text, languages.transcript.script, {
+        exemptTrailingParticle: isLastUnit && originalWasIncomplete,
+      })
     })
-    if (badJa) {
-      return buildFailurePatch(block, `split_block: rejected incomplete or too-short Japanese unit: ${badJa.text}`)
+    if (badSource) {
+      return buildFailurePatch(
+        block,
+        `split_block: rejected incomplete or too-short ${languages.transcript.label} unit: ${badSource.text}`,
+      )
     }
 
     // 2個目以降のユニットが接続表現で始まると、前のユニットに文脈依存する断片になる
@@ -444,13 +470,15 @@ export const splitBlockTool: Tool = {
       return buildFailurePatch(block, `split_block: translation API failed: ${failedTranslation.errorMessage}`)
     }
     const translated = translatedResults.map(r => r.text)
-    const badEn = translated.find(en => isBadEnglishUnit(en))
-    if (badEn) {
-      return buildFailurePatch(block, `split_block: rejected fragment-like English unit: ${badEn}`)
+    const badSubtitle = translated.find(text => isBadUnitForScript(text, languages.subtitle.script))
+    if (badSubtitle) {
+      return buildFailurePatch(
+        block,
+        `split_block: rejected fragment-like ${languages.subtitle.label} unit: ${badSubtitle}`,
+      )
     }
 
     const gapMs = thresholds.minInterSubtitleGapMs
-    const languages = loadLanguageProfileConfig(settings)
     const timing = allocateSplitTiming({
       parent: block,
       units: cleanUnits.map((unit, index) => ({ jaText: unit.text, enText: translated[index] })),

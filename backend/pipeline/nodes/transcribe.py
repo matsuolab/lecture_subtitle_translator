@@ -19,6 +19,9 @@ from ..contracts import RunState
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 _AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg"}
 _NO_MODEL_TAGS: frozenset[str] = frozenset({"no_model", "latest"})
+_SUPPORTED_DEVICES: frozenset[str] = frozenset({"cuda", "cpu"})
+# CTranslate2 の CPU バックエンドが扱えない compute_type。
+_CUDA_ONLY_COMPUTE_TYPES: frozenset[str] = frozenset({"float16", "fp16"})
 
 log = logging.getLogger(__name__)
 
@@ -70,12 +73,22 @@ class TranscribeNode(BaseStubNode):
 
             hf_token = str(runtime_settings.get("hf_token") or os.getenv("HF_TOKEN", ""))
             batch_size = int(os.getenv("WHISPERX_BATCH_SIZE", "8"))
-            compute_type = str(os.getenv("WHISPERX_COMPUTE_TYPE", "float16"))
+            compute_type = str(
+                runtime_settings.get("whisperx_compute_type")
+                or os.getenv("WHISPERX_COMPUTE_TYPE", "float16")
+            )
             cache_volume = str(os.getenv("WHISPERX_CACHE_VOLUME", "whisperx_hf_cache"))
             timeout = int(os.getenv("WHISPERX_TIMEOUT", "3600"))
             model_size = str(os.getenv("WHISPERX_MODEL", "large-v3"))
-            language = str(os.getenv("WHISPERX_LANGUAGE", "ja"))
-            device = str(os.getenv("WHISPERX_DEVICE", "cuda"))
+            # 書きおこし言語は runtime_settings を優先する。env はデプロイ既定のフォールバック。
+            language = str(
+                runtime_settings.get("whisperx_language")
+                or os.getenv("WHISPERX_LANGUAGE", "ja")
+            )
+            device = str(
+                runtime_settings.get("whisperx_device")
+                or os.getenv("WHISPERX_DEVICE", "cuda")
+            ).strip().lower()
 
             if whisperx_backend:
                 log.info("[transcribe] WhisperX 開始: backend=%s audio=%s", whisperx_backend, audio_path)
@@ -103,6 +116,7 @@ class TranscribeNode(BaseStubNode):
                             timeout=timeout,
                             model_size=model_size,
                             language=language,
+                            device=device,
                         )
                         self.provider = "docker-whisperx"
                         self.model = image.split(":")[-1] if ":" in image else image
@@ -209,6 +223,31 @@ def _is_no_model_tag(image: str) -> bool:
     return tag in _NO_MODEL_TAGS
 
 
+def _resolve_device(device: str) -> str:
+    """WhisperX に渡す device 名へ正規化する。未知の値は cuda 扱い（従来動作）。"""
+    normalized = (device or "").strip().lower()
+    return normalized if normalized in _SUPPORTED_DEVICES else "cuda"
+
+
+def _resolve_compute_type(device: str, compute_type: str) -> str:
+    """
+    device に対して成立する compute_type へ丸める。
+
+    CTranslate2 の CPU バックエンドは float16 を扱えず、そのまま渡すと
+    `ValueError: Requested float16 compute type, but the target device or backend
+    do not support efficient float16 computation.` で落ちる（自動フォールバックはしない）。
+
+    丸め先は **float32**。WhisperX 自身が compute_type 未指定時に CPU へ選ぶ既定と同じ値で、
+    精度を落とさない。int8 は速度は出るが量子化により認識精度が下がるため既定にはしない
+    （利用者が明示的に int8 を指定した場合はその指定を尊重する）。
+    """
+    normalized = (compute_type or "").strip().lower()
+    if device == "cpu" and normalized in _CUDA_ONLY_COMPUTE_TYPES:
+        log.info("[transcribe] compute_type=%s は CPU で使えないため float32 を使用します", normalized)
+        return "float32"
+    return normalized or "float16"
+
+
 def _to_docker_path(path: Path) -> str:
     """Windows の絶対パスを Docker ボリュームマウントで使える形式に変換する。"""
     return str(path).replace("\\", "/")
@@ -225,6 +264,7 @@ def _run_docker_whisperx(
     timeout: int,
     model_size: str,
     language: str,
+    device: str = "cuda",
 ) -> list[dict]:
     """
     docker run で jim60105/docker-whisperX を実行し、JSON 出力を返す。
@@ -245,8 +285,13 @@ def _run_docker_whisperx(
             input_mount = _to_docker_path(Path(tmp_input))
             output_mount = _to_docker_path(Path(tmp_output))
 
-            cmd = [
-                "docker", "run", "--gpus", "all", "--rm",
+            effective_device = _resolve_device(device)
+            cmd = ["docker", "run", "--rm"]
+            # GPU 実行時のみ --gpus を付ける。NVIDIA ランタイムが無い環境（Apple Silicon の
+            # Docker Desktop など）では --gpus all を渡すだけで daemon がエラーを返すため。
+            if effective_device == "cuda":
+                cmd += ["--gpus", "all"]
+            cmd += [
                 "-v", f"{input_mount}:/app/input:ro",
                 "-v", f"{output_mount}:/app/output",
                 "-v", f"{cache_volume}:/.cache",
@@ -259,7 +304,8 @@ def _run_docker_whisperx(
                 "--output_format", "json",
                 "--output_dir", "/app/output",
                 "--batch_size", str(batch_size),
-                "--compute_type", compute_type,
+                "--device", effective_device,
+                "--compute_type", _resolve_compute_type(effective_device, compute_type),
                 "--vad_method", "silero",
                 "--return_char_alignments",
                 f"/app/input/{safe_audio.name}",

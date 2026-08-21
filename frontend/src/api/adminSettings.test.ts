@@ -197,3 +197,61 @@ describe('llmReasoningBudgetTokens normalization (implementation 3)', () => {
     expect(normalizeAdminSettings({ llmReasoningBudgetTokens: 'not-a-number' }).llmReasoningBudgetTokens).toBe(0)
   })
 })
+
+describe('言語ラベルと書きおこし言語の整合', () => {
+  it('書きおこしが en なら 英語→日本語 のラベルに補正する', () => {
+    // 既存の保存設定が「書きおこしだけ en、ラベルは既定のまま」という不整合状態。
+    // ラベルは翻訳方向そのものなので、補正しないと
+    // 「Translate each Japanese block into natural English」という指示になり
+    // 英語の書きおこしが英語のまま返ってくる。
+    const normalized = normalizeAdminSettings({
+      transcribeLanguageCode: 'en',
+      transcriptLanguageLabel: 'Japanese',
+      subtitleLanguageLabel: 'English',
+    })
+
+    expect(normalized.transcriptLanguageLabel).toBe('English')
+    expect(normalized.subtitleLanguageLabel).toBe('Japanese')
+  })
+
+  it('書きおこしが ja なら 日本語→英語 のラベルに補正する', () => {
+    const normalized = normalizeAdminSettings({
+      transcribeLanguageCode: 'ja',
+      transcriptLanguageLabel: 'English',
+      subtitleLanguageLabel: 'Japanese',
+    })
+
+    expect(normalized.transcriptLanguageLabel).toBe('Japanese')
+    expect(normalized.subtitleLanguageLabel).toBe('English')
+  })
+
+  it('ラベル未保存でも書きおこし言語から補完する', () => {
+    const normalized = normalizeAdminSettings({ transcribeLanguageCode: 'en' })
+
+    expect(normalized.transcriptLanguageLabel).toBe('English')
+    expect(normalized.subtitleLanguageLabel).toBe('Japanese')
+  })
+
+  it('利用者が独自に付けたラベルは尊重する', () => {
+    // 既知の組み合わせに無いラベルは、意図した設定とみなして書き換えない。
+    const normalized = normalizeAdminSettings({
+      transcribeLanguageCode: 'en',
+      transcriptLanguageLabel: 'English (US)',
+      subtitleLanguageLabel: '中国語',
+    })
+
+    expect(normalized.transcriptLanguageLabel).toBe('English (US)')
+    expect(normalized.subtitleLanguageLabel).toBe('中国語')
+  })
+
+  it('対応表に無い言語ではラベルを推測しない', () => {
+    const normalized = normalizeAdminSettings({
+      transcribeLanguageCode: 'fr',
+      transcriptLanguageLabel: 'French',
+      subtitleLanguageLabel: 'Japanese',
+    })
+
+    expect(normalized.transcriptLanguageLabel).toBe('French')
+    expect(normalized.subtitleLanguageLabel).toBe('Japanese')
+  })
+})

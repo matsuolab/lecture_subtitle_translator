@@ -7,8 +7,9 @@ import {
 } from './blockTypes'
 import { classifyViolation, computeMetrics } from './metrics'
 import { countCpsChars } from '../subtitleMetrics'
+import { joinSubtitleParts, unwrapSubtitleLines } from './textUtils'
 
-export type CpsReliefStrategy = 'retime_only'
+export type CpsReliefStrategy = 'retime_only' | 'split_evenly'
 export type CpsReliefStatus = 'applied' | 'skipped'
 
 export interface CpsReliefEntry {
@@ -43,6 +44,9 @@ function finiteOrDefault(value: number, fallback: number): number {
 
 function normalizeThresholds(thresholds: PipelineThresholds): PipelineThresholds {
   return {
+    // 数値以外のフィールド（言語 script など）は素通しする。
+    // 列挙し忘れると結合・行分割の言語作法が黙って既定へ落ちるため、先にスプレッドする。
+    ...thresholds,
     shortDurationSec: finiteOrDefault(thresholds.shortDurationSec, DEFAULT_PIPELINE_THRESHOLDS.shortDurationSec),
     longDurationSec: finiteOrDefault(thresholds.longDurationSec, DEFAULT_PIPELINE_THRESHOLDS.longDurationSec),
     mergedLongDurationSec: finiteOrDefault(thresholds.mergedLongDurationSec, DEFAULT_PIPELINE_THRESHOLDS.mergedLongDurationSec),
@@ -192,6 +196,105 @@ function tryRetimeOnly(left: EnBlock, right: EnBlock, thresholds: PipelineThresh
   }
 }
 
+interface SplitChoice {
+  leftText: string
+  rightText: string
+  score: number
+  naturalBoundary: boolean
+}
+
+function endsWithGlueWord(text: string): boolean {
+  return /\b(of|and|or|the|a|an|to|with|for|in|on|at|by|as|its)$/i.test(text.replace(/[,.;:!?]$/, '').trim())
+}
+
+function startsWithConnector(text: string): boolean {
+  return /^(so|but|and|or|because|then|which|that|when|where|if|while|though|although)\b/i.test(text)
+}
+
+function findBestSplit(combined: string, maxLineLen: number): SplitChoice | null {
+  let best: SplitChoice | null = null
+  for (let i = 1; i < combined.length - 1; i += 1) {
+    if (combined[i] !== ' ') continue
+    const left = combined.slice(0, i).trim()
+    const right = combined.slice(i + 1).trim()
+    if (!left || !right) continue
+    if (left.length > maxLineLen || right.length > maxLineLen) continue
+
+    const lChars = countCpsChars(left)
+    const rChars = countCpsChars(right)
+    const balance = Math.abs(lChars - rChars)
+
+    const endsSentence = /[.!?]$/.test(left)
+    const endsClause = /[,;:]$/.test(left)
+    const startsConn = startsWithConnector(right)
+    const startsCapital = /^[A-Z]/.test(right)
+    const badGlue = endsWithGlueWord(left)
+
+    let score = balance
+    if (endsSentence) score -= 30
+    else if (endsClause) score -= 15
+    if (startsConn) score -= 8
+    if (startsCapital) score -= 3
+    if (badGlue) score += 50 // hard penalty: never split on glue words
+
+    const naturalBoundary = endsSentence || endsClause || startsConn
+
+    if (!best || score < best.score) {
+      best = { leftText: left, rightText: right, score, naturalBoundary }
+    }
+  }
+  return best
+}
+
+function trySplitEvenly(left: EnBlock, right: EnBlock, thresholds: PipelineThresholds): PairCandidate | null {
+  const subtitleScript = thresholds.subtitleScript ?? 'latin'
+  const combined = joinSubtitleParts(
+    [unwrapSubtitleLines(left.enText, subtitleScript), unwrapSubtitleLines(right.enText, subtitleScript)],
+    subtitleScript,
+  )
+  const totalDur = right.end - left.start
+  const gap = gapSec(left, right)
+  if (totalDur <= 0) return null
+
+  const choice = findBestSplit(combined, thresholds.maxLineLen)
+  if (!choice) return null
+  // glue 語境界しか見つからなかった場合は採用しない（不自然なカットを避ける）
+  if (!choice.naturalBoundary && endsWithGlueWord(choice.leftText)) return null
+
+  const lChars = countCpsChars(choice.leftText)
+  const rChars = countCpsChars(choice.rightText)
+  const totalChars = lChars + rChars
+  if (totalChars === 0) return null
+
+  // 文字数比例で時間配分（gap は維持）
+  const innerSpan = totalDur - gap
+  if (innerSpan <= 0) return null
+  const lDur = innerSpan * (lChars / totalChars)
+  const rDur = innerSpan - lDur
+
+  if (lDur < MIN_DURATION_SEC || rDur < MIN_DURATION_SEC) return null
+  if (lDur > HARD_MAX_DURATION_SEC || rDur > HARD_MAX_DURATION_SEC) return null
+
+  const targetCps = thresholds.verboseCps - CPS_MARGIN
+  if (lChars / lDur > targetCps) return null
+  if (rChars / rDur > targetCps) return null
+
+  // どちらかが awkward (短文長表示) になる場合は不採用
+  if (lDur > awkwardMaxDuration(lChars)) return null
+  if (rDur > awkwardMaxDuration(rChars)) return null
+
+  const newLeftEnd = left.start + lDur
+  const newRightStart = newLeftEnd + gap
+  return {
+    newLeftStart: left.start,
+    newLeftEnd,
+    newRightStart,
+    newRightEnd: right.end,
+    newLeftText: choice.leftText,
+    newRightText: choice.rightText,
+  }
+}
+
 function shouldConsiderPair(left: EnBlock, right: EnBlock, thresholds: PipelineThresholds): boolean {
   const lDur = durationSec(left)
   const rDur = durationSec(right)
@@ -233,6 +336,13 @@ export function cpsReliefRebalance(blocks: EnBlock[], thresholds: PipelineThresh
     const candidateA = tryRetimeOnly(left, right, safeThresholds)
     if (candidateA) {
       applyCandidate(result, i, left, right, candidateA, 'retime_only', safeThresholds, entries)
+      appliedCount += 1
+      continue
+    }
+
+    const candidateC = trySplitEvenly(left, right, safeThresholds)
+    if (candidateC) {
+      applyCandidate(result, i, left, right, candidateC, 'split_evenly', safeThresholds, entries)
       appliedCount += 1
       continue
     }

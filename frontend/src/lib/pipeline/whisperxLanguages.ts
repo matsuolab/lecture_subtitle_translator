@@ -61,6 +61,34 @@ export const WHISPERX_LANGUAGES: readonly WhisperxLanguage[] = [
 
 export const DEFAULT_WHISPERX_LANGUAGE = 'ja'
 
+/**
+ * 書きおこし言語コード → 言語ラベル（翻訳元・翻訳先）の既定の組み合わせ。
+ *
+ * 言語ラベルは翻訳プロンプトの組み立て（prompts.ts の buildFullTranslateSystemPrompt）と
+ * few-shot の選択（translateEn.ts の isEnToJa 判定）に使われ、**実際の翻訳方向を決める**。
+ * 書きおこし言語コード（WhisperX に渡す値）とは別設定なので、両者がずれると
+ * 「英語を書きおこして英語に翻訳する」ような指示になり、字幕が原文のまま出てしまう。
+ *
+ * 日本語講義は英語字幕、英語講義は日本語字幕、という本プロジェクトの2つの用途を既定とする。
+ * ここに無い言語コード（フランス語など）は組み合わせを推測できないため、利用者の手動設定に委ねる。
+ */
+export interface TranscribeLanguageLabels {
+  /** 翻訳元（書きおこし）の言語ラベル */
+  transcript: string
+  /** 翻訳先（字幕）の言語ラベル */
+  subtitle: string
+}
+
+export const LANGUAGE_LABEL_PAIRS: Record<string, TranscribeLanguageLabels> = {
+  ja: { transcript: 'Japanese', subtitle: 'English' },
+  en: { transcript: 'English', subtitle: 'Japanese' },
+}
+
+/** 書きおこし言語コードに対応する既定の言語ラベル。対応が無ければ undefined。 */
+export function resolveTranscribeLanguageLabels(code: string): TranscribeLanguageLabels | undefined {
+  return LANGUAGE_LABEL_PAIRS[code]
+}
+
 // 今回のスコープではモデルサイズは固定（言語のみ可変）。
 export const WHISPERX_MODEL_SIZE = 'large-v3'
 

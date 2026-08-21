@@ -1,6 +1,13 @@
 import type { PipelineThresholds } from '../blockTypes'
+import type { LanguageScript } from '../languageProfileConfig'
 import type { AgentThresholds, CorrectionStrategy, DecisionContext } from './types'
 import { buildMetrics } from './metrics'
+import { usesWordSpacing } from '../textUtils'
+
+/** 「1単語だけ削る」圧縮が成立する字幕言語か。空白で語を区切る言語のみ。 */
+function supportsWordLevelCompression(script: LanguageScript | undefined): boolean {
+  return usesWordSpacing(script ?? 'latin')
+}
 
 export function getFeasibleStrategies(
   ctx: DecisionContext,
@@ -28,8 +35,14 @@ export function getFeasibleStrategies(
 
   // tier=tiny（≤10%超過）の場合のみ compress_micro を候補に。
   // 1単語ずつ精密に削るための専用ツール。
+  //
+  // 語間を空白で区切らない字幕言語（日本語など）では成立しない: ツール内部の
+  // countWords / detectRemovedWord が split(/\s+/) 前提で、テキスト全体が 1 語として
+  // 扱われるため削除語を検出できず、進捗判定が壊れる。該当言語では候補から外し、
+  // compress_trim / compress_rephrase / split_block に委ねる。
   if (
     !isDurationViolation &&
+    supportsWordLevelCompression(thresholds.subtitleScript) &&
     m.tier === 'tiny' &&
     compressCount < thresholds.maxCompressPerBlock &&
     !failed.has('compress_micro') &&

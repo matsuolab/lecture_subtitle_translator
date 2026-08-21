@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useMemo, useCallback, Fragment } from 'rea
 import type { SubtitleBlock as SubtitleBlockType } from '@/types/subtitle'
 import { getCpsLevel } from '@/types/subtitle'
 import type { SpellIssue } from '@/lib/pipeline/spellCheck'
+import type { GlossaryRoles } from '@/utils/glossaryApply'
 import { SubtitleBlock } from './SubtitleBlock'
 import { SubtitleSearchBar, type SubtitleSearchState } from './SubtitleSearchBar'
 import { findMatches, buildReplaceAll, buildReplaceOne, type SearchMatch } from '@/lib/search/subtitleSearch'
@@ -41,6 +42,8 @@ interface SubtitleBlockListProps {
   maxCharsPerLine: number
   spellIssuesByBlock: Record<number, SpellIssue[]>
   onAddToSpellDictionary: (word: string) => void
+  /** 用語辞書の ja/en フィールドと字幕・書きおこしロールの対応（翻訳方向で入れ替わる） */
+  glossaryRoles: GlossaryRoles
 }
 
 interface BoundaryDrag {
@@ -192,6 +195,7 @@ export function SubtitleBlockList({
   maxCps,
   maxCharsPerLine,
   spellIssuesByBlock,
+  glossaryRoles,
   onAddToSpellDictionary,
 }: SubtitleBlockListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -617,6 +621,7 @@ export function SubtitleBlockList({
               maxCharsPerLine={maxCharsPerLine}
               spellIssues={spellIssuesByBlock[block.id]}
               onAddToSpellDictionary={onAddToSpellDictionary}
+              glossaryRoles={glossaryRoles}
               searchRangesTranscript={searchRangesByBlock.get(block.id)?.transcript}
               searchRangesSubtitle={searchRangesByBlock.get(block.id)?.subtitle}
               searchOpen={searchOpen}

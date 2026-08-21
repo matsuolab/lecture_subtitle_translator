@@ -101,10 +101,11 @@ describe('cpsReliefRebalance', () => {
     expect(right.alignConf).toBe('merged')
   })
 
-  it('does not mutate text when retime-only cannot safely solve the pair', () => {
+  it('falls back to an evenly split retime when retime-only cannot safely solve the pair', () => {
     // id 16+17 type: left has dense text (47 chars), right has tiny text ("so") with 7.99s
-    // A would leave "so" displayed for 7.7s — awkward
-    // C splits combined text at a natural boundary
+    // A would leave "so" displayed for 7.7s — awkward, so retime-only (candidate A) is
+    // infeasible and cpsReliefRebalance falls back to splitting the combined text at a
+    // natural boundary (candidate C / trySplitEvenly) instead of leaving the pair untouched.
     const blocks = [
       block({
         id: 16,
@@ -129,19 +130,20 @@ describe('cpsReliefRebalance', () => {
     const result = cpsReliefRebalance(blocks, thresholds)
 
     expect(result.entries).toHaveLength(1)
-    expect(result.entries[0].strategy).toBe('none')
-    expect(result.entries[0].status).toBe('skipped')
+    expect(result.entries[0].strategy).toBe('split_evenly')
+    expect(result.entries[0].status).toBe('applied')
 
     const left = result.blocks.find(b => b.id === 16)!
     const right = result.blocks.find(b => b.id === 17)!
-    expect(left.enText).toBe('We need the input and output dimensions of the function,')
-    expect(right.enText).toBe('so')
+    // Combined text is re-split at a natural boundary rather than left as 47 chars / "so".
+    expect(left.enText).toBe('We need the input and output')
+    expect(right.enText).toBe('dimensions of the function, so')
+    // Original envelope (left.start .. right.end) and the gap between them are preserved.
     expect(left.start).toBe(73.696)
-    expect(left.end).toBe(76.18)
-    expect(right.start).toBe(76.26)
     expect(right.end).toBe(84.252)
-    expect(left.alignConf).toBe('proportional')
-    expect(right.alignConf).toBe('proportional')
+    expect(right.start - left.end).toBeCloseTo(76.26 - 76.18, 5)
+    expect(left.alignConf).toBe('merged')
+    expect(right.alignConf).toBe('merged')
   })
 
   it('skips pairs where the combined CPS would still exceed the threshold', () => {

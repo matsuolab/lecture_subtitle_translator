@@ -10,7 +10,7 @@ import type { PipelineThresholds } from './blockTypes'
  * ここに集約する。
  */
 export const PIPELINE_THRESHOLD_FIELDS: ReadonlyArray<{
-  readonly field: keyof PipelineThresholds
+  readonly field: Exclude<keyof PipelineThresholds, 'subtitleScript' | 'transcriptScript'>
   readonly settingsKey: keyof AdminSettings
 }> = [
   { field: 'shortDurationSec', settingsKey: 'pipelineShortDurationSec' },
@@ -27,9 +27,13 @@ export const PIPELINE_THRESHOLD_FIELDS: ReadonlyArray<{
   { field: 'maxCompressPerBlock', settingsKey: 'pipelineMaxCompressPerBlock' },
 ]
 
-/** 本番設定（AdminSettings）から PipelineThresholds を組み立てる。対応表はこのファイルの単一情報源。 */
+/**
+ * 本番設定（AdminSettings）から PipelineThresholds を組み立てる。対応表はこのファイルの単一情報源。
+ * subtitleScript / transcriptScript（言語作法）はこの対応表の対象外。呼び出し側
+ * （localPipeline.ts の buildPipelineThresholds）が languageProfileConfig から別途補う。
+ */
 export function buildPipelineThresholdsFromSettings(settings: AdminSettings): PipelineThresholds {
-  const result = {} as Record<keyof PipelineThresholds, number>
+  const result = {} as Record<Exclude<keyof PipelineThresholds, 'subtitleScript' | 'transcriptScript'>, number>
   for (const { field, settingsKey } of PIPELINE_THRESHOLD_FIELDS) {
     result[field] = settings[settingsKey] as number
   }

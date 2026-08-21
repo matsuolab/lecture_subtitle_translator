@@ -21,9 +21,15 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # tsconfig.json は "files": [] + project references 構成のため、
+      # `tsc --noEmit` では参照先を辿らず何も検査されない。build モード（-b）で実行する。
       - name: Type check
         working-directory: frontend
-        run: npx tsc --noEmit
+        run: npx tsc -b
+
+      - name: Test
+        working-directory: frontend
+        run: npm test
 
       - name: Build
         working-directory: frontend

@@ -1,7 +1,8 @@
 import type { AdminSettings } from '@/types/adminSettings'
 import type { ContextGroupRole, JaBlock } from './blockTypes'
 import { detectIncompleteEnds } from './detectIncompleteEnds'
-import { normalizeSpaces } from './textUtils'
+import { loadLanguageProfileConfig, type LanguageScript } from './languageProfileConfig'
+import { joinSubtitleParts } from './textUtils'
 
 export interface ContextGroupingResult {
   blocks: JaBlock[]
@@ -55,8 +56,8 @@ function sourceIdsFor(block: JaBlock): number[] {
     : [block.id]
 }
 
-function annotateGroup(group: GroupDraft): JaBlock[] {
-  const groupText = normalizeSpaces(group.members.map(block => block.jaText).join(' '))
+function annotateGroup(group: GroupDraft, transcriptScript: LanguageScript = 'latin'): JaBlock[] {
+  const groupText = joinSubtitleParts(group.members.map(block => block.jaText), transcriptScript)
   const sourceIds = [...new Set(group.members.flatMap(sourceIdsFor))]
   return group.members.map((block, index) => ({
     ...block,
@@ -78,6 +79,7 @@ export function assignContextGroupsFromFlags(
     'pipelineMergeContinuationMaxDurationSec' |
     'pipelineMergeContinuationMaxTranscriptChars'
   >,
+  transcriptScript: LanguageScript = 'latin',
 ): JaBlock[] {
   const cfg: GroupConfig = {
     maxGapSec: settings.pipelineMergeContinuationMaxGapSec,
@@ -112,14 +114,14 @@ export function assignContextGroupsFromFlags(
     const reason = members.length > 1
       ? 'incomplete_end_context_group'
       : 'single_cue_context_group'
-    grouped.push(...annotateGroup({ id, members, reason }))
+    grouped.push(...annotateGroup({ id, members, reason }, transcriptScript))
     index = cursor + 1
   }
 
   return grouped
 }
 
-export function reindexContextGroups(blocks: JaBlock[]): JaBlock[] {
+export function reindexContextGroups(blocks: JaBlock[], transcriptScript: LanguageScript = 'latin'): JaBlock[] {
   const result: JaBlock[] = []
   let index = 0
   while (index < blocks.length) {
@@ -135,7 +137,7 @@ export function reindexContextGroups(blocks: JaBlock[]): JaBlock[] {
       id,
       members,
       reason: first.contextGroupReason ?? (members.length > 1 ? 'context_group_reindexed' : 'single_cue_context_group'),
-    }))
+    }, transcriptScript))
     index = cursor
   }
   return result
@@ -189,7 +191,12 @@ export async function contextGroupCueBlocks(
     }
   }
 
-  const grouped = assignContextGroupsFromFlags(blocks, flags, settings)
+  const grouped = assignContextGroupsFromFlags(
+    blocks,
+    flags,
+    settings,
+    loadLanguageProfileConfig(settings).transcript.script,
+  )
   const ids = new Set(grouped.map(block => block.contextGroupId ?? `cg-${block.id}`))
   const groupedBlockCount = grouped.filter(block => (block.contextGroupSize ?? 1) > 1).length
   return {

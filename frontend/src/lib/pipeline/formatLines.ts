@@ -1,10 +1,15 @@
 import type { EnBlock, PipelineThresholds } from './blockTypes'
 import { computeMetrics } from './metrics'
-import { splitEnLines42 } from './textUtils'
+import { splitSubtitleLines } from './textUtils'
 
+/**
+ * 字幕テキストを表示用に折り返す。
+ * 折り返し規則は thresholds.subtitleScript で切り替わる（未指定はラテン系＝従来と同一）。
+ */
 export function formatLines(blocks: EnBlock[], thresholds: PipelineThresholds): EnBlock[] {
+  const script = thresholds.subtitleScript ?? 'latin'
   return blocks.map((block) => {
-    const enText = splitEnLines42(block.enRaw ?? block.enText, thresholds.maxLineLen)
+    const enText = splitSubtitleLines(block.enRaw ?? block.enText, thresholds.maxLineLen, script)
     const metrics = computeMetrics({ ...block, enText })
     return {
       ...block,

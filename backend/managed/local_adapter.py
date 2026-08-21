@@ -113,6 +113,7 @@ class LocalManagedAdapter(ManagedAdapter):
         workflow: str,
         execution_mode: str,
         schema_version: str,
+        language: str | None = None,
     ) -> ManagedJobHandle:
         stored = self._get_upload(input_key)
         if not stored:
@@ -126,6 +127,10 @@ class LocalManagedAdapter(ManagedAdapter):
             "execution_mode": execution_mode,
             "allow_transcribe_fallback": False,
         }
+        if language:
+            # transcribe.py が runtime_settings.whisperx_language を最優先で読む
+            # 既存の仕組みに乗せる（/api/pipeline/runs のローカル実行経路と同じ器）。
+            initial_data["runtime_settings"] = {"whisperx_language": language}
 
         payload = {
             "workflow": workflow,

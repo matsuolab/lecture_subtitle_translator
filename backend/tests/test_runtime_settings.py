@@ -3,7 +3,13 @@ import json
 from unittest.mock import patch
 
 from backend.pipeline.contracts import RunState
-from backend.pipeline.nodes.translate import TranslateNode, _translate_segments_with_openai_compatible, _resolve_runtime_config
+from backend.pipeline.nodes.translate import (
+    TranslateNode,
+    _translate_segments_with_openai_compatible,
+    _looks_untranslated,
+    _resolve_direction,
+    _resolve_runtime_config,
+)
 from backend.pipeline.service import PipelineService
 
 
@@ -134,7 +140,50 @@ def test_translate_batches_large_segment_lists() -> None:
         return _FakeResponse(payload)
 
     with patch("backend.pipeline.nodes.translate.urllib_request.urlopen", side_effect=_fake_urlopen):
-        translated = _translate_segments_with_openai_compatible(source_texts, runtime_settings, runtime)
+        translated = _translate_segments_with_openai_compatible(
+            source_texts, runtime_settings, runtime, _resolve_direction(runtime_settings)
+        )
 
     assert translated == [f"EN:segment-{idx}" for idx in range(41)]
     assert [len(batch) for batch in seen_batches] == [40, 1]
+
+
+def test_resolve_direction_uses_transcription_language() -> None:
+    """書きおこし言語から翻訳方向を決める。
+
+    英語書きおこしのとき、字幕は日本語になる。ここが日→英に固定されていると、
+    正しい日本語訳が _looks_untranslated に「未翻訳」と誤判定されてノードが必ず失敗する。
+    """
+    ja_to_en = _resolve_direction({"whisperx_language": "ja"})
+    assert (ja_to_en.source_label, ja_to_en.target_label) == ("Japanese", "English")
+
+    en_to_ja = _resolve_direction({"whisperx_language": "en"})
+    assert (en_to_ja.source_label, en_to_ja.target_label) == ("English", "Japanese")
+
+    # 地域つきコード（en-US 等）も英語として扱う
+    assert _resolve_direction({"whisperx_language": "en-US"}).target_label == "Japanese"
+
+    # 未指定・対応外の言語は従来どおり日→英に倒す（当てずっぽうのプロンプトを出さない）
+    assert _resolve_direction({}).target_label == "English"
+    assert _resolve_direction({"whisperx_language": "fr"}).target_label == "English"
+
+
+def test_looks_untranslated_checks_target_language() -> None:
+    """未翻訳判定はソース言語の字種が残っているかで見る。
+
+    英→日では「日本語が多い＝未翻訳」ではなく「英語が多い＝未翻訳」になる。
+    """
+    ja_to_en = _resolve_direction({"whisperx_language": "ja"})
+    en_to_ja = _resolve_direction({"whisperx_language": "en"})
+
+    # 英→日: 正しい日本語訳は「翻訳済み」と判定される（この修正の主眼）
+    assert not _looks_untranslated("This is a pen.", "これはペンです", en_to_ja)
+    # 英→日: 英語のまま返ってきたら未翻訳
+    assert _looks_untranslated("This is a pen.", "This is a pen.", en_to_ja)
+
+    # 日→英: 従来どおりの判定
+    assert not _looks_untranslated("これはペンです", "This is a pen.", ja_to_en)
+    assert _looks_untranslated("これはペンです", "これはペンです", ja_to_en)
+
+    # 方向によらず、空文字は未翻訳
+    assert _looks_untranslated("This is a pen.", "", en_to_ja)

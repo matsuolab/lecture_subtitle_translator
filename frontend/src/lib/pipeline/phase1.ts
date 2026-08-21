@@ -74,6 +74,8 @@ export async function runPhase1(
   const contextGrouped = await runNode('contextGroupCueBlocks', () =>
     contextGroupCueBlocks(split, settings, onWarning),
   )
-  const merged = await runNode('mergeShort', () => reindexContextGroups(mergeShort(contextGrouped.blocks, thresholds)))
+  const merged = await runNode('mergeShort', () =>
+    reindexContextGroups(mergeShort(contextGrouped.blocks, thresholds), thresholds.transcriptScript),
+  )
   return { blocks: merged, correctedSegments: corrected }
 }

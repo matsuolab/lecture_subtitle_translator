@@ -7,15 +7,45 @@
  *
  * LLM による翻訳と重複しても構わない。ライブラリ側は決定的（deterministic）
  * なルールベースなので再現性があり、QA として機能する。
+ *
+ * **ロールと言語の対応**: 用語辞書のエントリは ja / en という言語ペアで保持するが、
+ * どちらが「字幕（訳文）」でどちらが「書きおこし（原文）」かは翻訳方向で入れ替わる。
+ * 検出方式も言語で変わる（ラテン語は単語境界つき正規表現、日本語は単語境界の概念が
+ * 無いため部分一致）ので、各関数は GlossaryRoles を受け取って両者を解決する。
  */
 
 import nlp from 'compromise'
 import type { GlossaryEntry } from '@/context/GlossaryContext'
+import type { LanguageProfileConfig } from '@/lib/pipeline/languageProfileConfig'
+
+/** 用語辞書エントリのどちらのフィールドを見るか。 */
+export type GlossaryField = 'ja' | 'en'
+
+/** 字幕／書きおこしの各ロールが、辞書のどのフィールドに対応するか。 */
+export interface GlossaryRoles {
+  subtitle: GlossaryField
+  transcript: GlossaryField
+}
+
+/** 既定（日本語書きおこし → 英語字幕）。 */
+export const DEFAULT_GLOSSARY_ROLES: GlossaryRoles = { subtitle: 'en', transcript: 'ja' }
+
+/**
+ * 言語プロファイルから辞書ロールを解決する。
+ * 字幕が日本語なら ja/en が入れ替わる。それ以外（既定・未知言語）は従来どおり。
+ */
+export function resolveGlossaryRoles(languages: LanguageProfileConfig): GlossaryRoles {
+  return languages.subtitle.script === 'japanese'
+    ? { subtitle: 'ja', transcript: 'en' }
+    : DEFAULT_GLOSSARY_ROLES
+}
 
 export interface MissingTerm {
   entry: GlossaryEntry
-  jaFound: boolean   // 日本語原文に ja が含まれていた
-  enMissing: boolean // 英語テキストに en が含まれていない
+  /** 書きおこし（原文）に対応語が含まれていた */
+  jaFound: boolean
+  /** 字幕（訳文）に対応語が含まれていない */
+  enMissing: boolean
 }
 
 /**
@@ -25,6 +55,19 @@ export interface MissingTerm {
 function buildPattern(term: string): RegExp {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`\\b${escaped}(?:'?s)?\\b`, 'gi')
+}
+
+/**
+ * テキストに用語が含まれるかを、その用語の言語に応じた方式で判定する。
+ *
+ * `en`: 単語境界つき正規表現 + compromise による語形変化の検出。
+ * `ja`: 部分一致。`\b` は \w 境界を要求するため `\b機械学習\b` は成立せず、
+ *       日本語では単語境界つき正規表現が常に false になる。
+ */
+function containsTerm(text: string, term: string, field: GlossaryField): boolean {
+  if (!term) return false
+  if (field === 'ja') return text.includes(term)
+  return buildPattern(term).test(text) || findWithNlp(text, term)
 }
 
 /**
@@ -50,22 +93,25 @@ function findWithNlp(text: string, term: string): boolean {
 }
 
 /**
- * 日本語原文に辞書用語が含まれているのに英語訳に対応語がない箇所を検出する
+ * 書きおこし（原文）に辞書用語が含まれているのに、字幕（訳文）に対応語がない箇所を検出する
  *
- * 長い日本語用語から先に処理し、マッチした文字範囲を covered としてスキップする。
+ * 長い用語から先に処理し、マッチした文字範囲を covered としてスキップする。
  * これにより「機械学習」がヒットした後に「学習」が二重 flag されることを防ぐ。
- * compromise を使って英語側の語形変化も考慮してチェックする。
+ * 字幕側がラテン語の場合は compromise で語形変化も考慮する。
  */
 export function findMissingTranslations(
-  target: string,
-  source: string,
+  transcriptText: string,
+  subtitleText: string,
   entries: GlossaryEntry[],
+  roles: GlossaryRoles = DEFAULT_GLOSSARY_ROLES,
 ): MissingTerm[] {
-  // ja の長い順にソート
-  const sorted = [...entries.filter(e => e.confirmed && e.ja.length > 0)]
-    .sort((a, b) => b.ja.length - a.ja.length)
+  const termOf = (entry: GlossaryEntry, field: GlossaryField): string => entry[field]
 
-  // covered: [start, end) の文字範囲リスト（日本語 target 上）
+  // 書きおこし側の用語が長い順にソート
+  const sorted = [...entries.filter(e => e.confirmed && termOf(e, roles.transcript).length > 0)]
+    .sort((a, b) => termOf(b, roles.transcript).length - termOf(a, roles.transcript).length)
+
+  // covered: [start, end) の文字範囲リスト（書きおこしテキスト上）
   const covered: Array<[number, number]> = []
 
   const isCovered = (idx: number, len: number) =>
@@ -74,29 +120,30 @@ export function findMissingTranslations(
   const results: MissingTerm[] = []
 
   for (const entry of sorted) {
-    // 日本語 target 中の全出現位置をチェック
-    let idx = target.indexOf(entry.ja)
+    const sourceTerm = termOf(entry, roles.transcript)
+    // 書きおこし中の全出現位置をチェック
+    let idx = transcriptText.indexOf(sourceTerm)
     if (idx === -1) continue
 
     // いずれかの出現が未カバーかどうか確認
     let hasUncovered = false
     while (idx !== -1) {
-      if (!isCovered(idx, entry.ja.length)) { hasUncovered = true; break }
-      idx = target.indexOf(entry.ja, idx + 1)
+      if (!isCovered(idx, sourceTerm.length)) { hasUncovered = true; break }
+      idx = transcriptText.indexOf(sourceTerm, idx + 1)
     }
     if (!hasUncovered) continue
 
-    // 英語訳の存在チェック
-    const enFound = buildPattern(entry.en).test(source) || findWithNlp(source, entry.en)
+    // 訳語の存在チェック
+    const translationFound = containsTerm(subtitleText, termOf(entry, roles.subtitle), roles.subtitle)
 
-    // マッチした全位置を covered に追加（英訳あり・なし問わず）
-    let pos = target.indexOf(entry.ja)
+    // マッチした全位置を covered に追加（訳語あり・なし問わず）
+    let pos = transcriptText.indexOf(sourceTerm)
     while (pos !== -1) {
-      covered.push([pos, pos + entry.ja.length])
-      pos = target.indexOf(entry.ja, pos + 1)
+      covered.push([pos, pos + sourceTerm.length])
+      pos = transcriptText.indexOf(sourceTerm, pos + 1)
     }
 
-    if (!enFound) {
+    if (!translationFound) {
       results.push({ entry, jaFound: true, enMissing: true })
     }
   }
@@ -119,32 +166,44 @@ const TERM_COLOR_PALETTE = [
   '#a78bfa', // violet
 ]
 
+export interface MatchedGlossaryEntry {
+  entry: GlossaryEntry
+  color: string
+  /** 字幕（訳文）側に出現した */
+  inSubtitle: boolean
+  /** 書きおこし（原文）側に出現した */
+  inTranscript: boolean
+  roles: GlossaryRoles
+}
+
 /**
- * 日英テキスト両方に独立してマッチングし、同エントリは同色を割り当てる。
+ * 字幕・書きおこし両方に独立してマッチングし、同エントリは同色を割り当てる。
  *
- * - 英語: 単語境界regex（大文字小文字無視・複数形対応）
- * - 日本語: includes()（単語境界なし）
+ * - ラテン語側: 単語境界regex（大文字小文字無視・複数形対応）
+ * - 日本語側: includes()（単語境界なし）
  * - 片方にしか出ない用語も検出対象（一方向依存を排除）
- * - 色はマッチした用語の出現順で割り当て（日英で共通）
+ * - 色はマッチした用語の出現順で割り当て（両ペインで共通）
  * - TM でも同パターンで流用できる設計
  */
 export function findMatchedGlossaryEntries(
-  sourceEn: string,
-  targetJa: string,
+  subtitleText: string,
+  transcriptText: string,
   entries: GlossaryEntry[],
-): Array<{ entry: GlossaryEntry; color: string; inEn: boolean; inJa: boolean }> {
-  const results: Array<{ entry: GlossaryEntry; color: string; inEn: boolean; inJa: boolean }> = []
+  roles: GlossaryRoles = DEFAULT_GLOSSARY_ROLES,
+): MatchedGlossaryEntry[] {
+  const results: MatchedGlossaryEntry[] = []
   let colorIdx = 0
 
   for (const entry of entries) {
-    const inEn = buildPattern(entry.en).test(sourceEn)
-    const inJa = entry.ja.length > 0 && targetJa.includes(entry.ja)
-    if (!inEn && !inJa) continue
+    const inSubtitle = containsTerm(subtitleText, entry[roles.subtitle], roles.subtitle)
+    const inTranscript = containsTerm(transcriptText, entry[roles.transcript], roles.transcript)
+    if (!inSubtitle && !inTranscript) continue
     results.push({
       entry,
       color: TERM_COLOR_PALETTE[colorIdx % TERM_COLOR_PALETTE.length],
-      inEn,
-      inJa,
+      inSubtitle,
+      inTranscript,
+      roles,
     })
     colorIdx++
   }
@@ -152,30 +211,32 @@ export function findMatchedGlossaryEntries(
   return results
 }
 
-export function toSourceTerms(
-  matched: Array<{ entry: GlossaryEntry; color: string; inEn: boolean }>,
+/** 字幕ペインのハイライト用。 */
+export function toSubtitleTerms(
+  matched: MatchedGlossaryEntry[],
 ): import('@/types/subtitle').GlossaryTerm[] {
   return matched
-    .filter(m => m.inEn)
-    .map(({ entry, color }) => ({
-      word: entry.en,
-      expectedTranslation: entry.ja,
-      actualTranslation: entry.en,
+    .filter(m => m.inSubtitle)
+    .map(({ entry, color, roles }) => ({
+      word: entry[roles.subtitle],
+      expectedTranslation: entry[roles.transcript],
+      actualTranslation: entry[roles.subtitle],
       isDeviated: false,
       insight: entry.note ?? entry.desc,
       color,
     }))
 }
 
-export function toTargetTerms(
-  matched: Array<{ entry: GlossaryEntry; color: string; inJa: boolean }>,
+/** 書きおこしペインのハイライト用。 */
+export function toTranscriptTerms(
+  matched: MatchedGlossaryEntry[],
 ): import('@/types/subtitle').GlossaryTerm[] {
   return matched
-    .filter(m => m.inJa)
-    .map(({ entry, color }) => ({
-      word: entry.ja,
-      expectedTranslation: entry.en,
-      actualTranslation: entry.ja,
+    .filter(m => m.inTranscript)
+    .map(({ entry, color, roles }) => ({
+      word: entry[roles.transcript],
+      expectedTranslation: entry[roles.subtitle],
+      actualTranslation: entry[roles.transcript],
       isDeviated: false,
       color,
     }))
@@ -225,7 +286,12 @@ function levenshtein(a: string, b: string): number {
 export function findTypoCandidates(
   text: string,
   entries: GlossaryEntry[],
+  field: GlossaryField = 'en',
 ): TypoCandidate[] {
+  // 日本語にはラテン語のような綴り誤りの概念が無く、トークナイザ（空白・英字区切り）も
+  // 編集距離による比較も成立しない。スペル校正が CJK で自動オフになるのと同じ方針で無効化する。
+  if (field === 'ja') return []
+
   // テキストから単語トークンを抽出
   const tokenRegex = /[a-zA-Z][\w'-]*/g
   const tokens: string[] = []

@@ -66,6 +66,22 @@ function shouldEarlyTerminate(
   return null
 }
 
+/**
+ * 「この文字数を下回る予算なら修復しても意味がない」と判断する下限。
+ *
+ * 既定の 20 文字はラテン語基準。日本語は 1 文字あたりの情報量が大きく、
+ * 15 文字でも十分に意味のある字幕になるため、そのまま当てると
+ * 短い cue が丸ごと修復対象から外れてしまう（例: CPS 4.0 × 3.9秒 = 15文字）。
+ * 断片判定の文字数上限（55 → 24）と同じ考え方で圧縮する。
+ */
+function resolveMinMeaningfulChars(
+  thresholds: Pick<AgentThresholds, 'minMeaningfulChars'> & { subtitleScript?: PipelineThresholds['subtitleScript'] },
+): number {
+  return thresholds.subtitleScript === 'japanese'
+    ? Math.round(thresholds.minMeaningfulChars / 2)
+    : thresholds.minMeaningfulChars
+}
+
 export interface CorrectionEngineOptions {
   // ツール実行で警告・エラーが発生した場合に呼ばれるコールバック
   // blockId, strategy, message（LLM 実レスポンスを含む診断情報）
@@ -146,6 +162,17 @@ export async function correctionEngine(
     attempt.semanticOutcome = outcome
   }
 
+  /**
+   * 戦略が失敗（changed=false / 差し戻し）したブロックを、次の戦略を試すためにキューへ戻す。
+   *
+   * ループ先頭のガード（meetsConstraints / maxCorrectionRounds / shouldEarlyTerminate /
+   * physicalMaxChars / feasible が空）がいずれも再投入せずに抜けるため、これで無限ループにはならない。
+   * feasibility は試行済み戦略を除外するので、毎回異なる戦略が選ばれる。
+   */
+  const requeueForNextStrategy = (blockIdStr: string): void => {
+    queue.add(blockIdStr)
+  }
+
   const attachAttemptHistories = (timelineWithResults: EnBlock[]): EnBlock[] =>
     timelineWithResults.map((block) => {
       const ownHistory = getHistory(String(block.id))
@@ -194,7 +221,7 @@ export async function correctionEngine(
 
     const ctx = buildContext(block, blockIdx, currentTimeline, history, thresholds, settings)
 
-    if (ctx.physicalMaxChars < thresholds.minMeaningfulChars) continue
+    if (ctx.physicalMaxChars < resolveMinMeaningfulChars(thresholds)) continue
 
     // getFeasibleStrategies はインラインの条件だけで候補を組み立てており、各ツールが
     // 実装している canApply(ctx) を一度も呼んでいなかった（呼び出し側が存在しなかった）。
@@ -240,6 +267,7 @@ export async function correctionEngine(
         afterSubtitleText: beforeSubtitleText,
         rationale: message,
       })
+      requeueForNextStrategy(blockIdStr)
       continue
     }
 
@@ -302,15 +330,15 @@ export async function correctionEngine(
 
     history.push(attempt)
 
+    // 変化なし・差し戻しなら、別の戦略を試すためキューへ戻す。
+    // （ここで抜けてしまうと 1 ブロックにつき 1 戦略しか試されず、
+    //  maxCorrectionRounds も feasibility の tried 除外も早期終了判定も働かない）
+    // 従来はここで捨てていたため、split_block が失敗したブロックが compress_* に
+    // 落ちてこず、実機（117分・923キュー）で split_block 失敗77件がすべて1回試した
+    // だけで未修復のまま残っていた。停止性は maxCorrectionRounds と
+    // shouldEarlyTerminate（同じ戦略で2連続失敗 / 異なる戦略でも3連続で無進展）が担保する。
     if (!acceptPatch) {
-      // 失敗しても、まだラウンド上限に達していなければ次の戦略を試すためキューへ戻す。
-      // 従来はここで捨てていたため、split_block が失敗したブロックが compress_* に
-      // 落ちてこず、実機（117分・923キュー）で split_block 失敗77件がすべて1回試した
-      // だけで未修復のまま残っていた。停止性は maxCorrectionRounds と
-      // shouldEarlyTerminate（同じ戦略で2連続失敗 / 異なる戦略でも3連続で無進展）が担保する。
-      if (getHistory(blockIdStr).length < thresholds.maxCorrectionRounds) {
-        queue.add(blockIdStr)
-      }
+      requeueForNextStrategy(blockIdStr)
       continue
     }
 

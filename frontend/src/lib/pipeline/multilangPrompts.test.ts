@@ -10,6 +10,8 @@ import { __testing as splitBlockTesting } from './correctionAgent/tools/splitBlo
 import { __testing as semanticSplitTesting } from './semanticSplitJa'
 import { __testing as decisionTesting } from './correctionAgent/decisionNode'
 import { __testing as translateTesting } from './translate'
+import { __testing as translateEnTesting } from './translateEn'
+import { __testing as correctTesting } from './correct'
 import { __testing as generalRepairTesting } from './generalRepairAgent'
 import { buildReviewItemsForBlock } from './reviewDiagnostics'
 import type { AgentThresholds, CorrectionStrategy, DecisionContext } from './correctionAgent/types'
@@ -300,5 +302,58 @@ describe('reviewDiagnostics の言語プロファイル分岐', () => {
     const items = buildReviewItemsForBlock(fragmentBlock(), thresholds, japaneseSubtitleProfile)
     // transcript=English（continuationEndPattern 既定なし）→ source 継続でも断片化しない
     expect(items.some((item) => item.reason === 'context_dependent_fragment')).toBe(false)
+  })
+})
+
+describe('組み込み few-shot は言語ペアごとに切り替わる', () => {
+  const EN_TO_JA_PROFILE: LanguageProfileConfig = {
+    subtitle: { label: 'Japanese', script: 'japanese' },
+    transcript: { label: 'English', script: 'latin' },
+  }
+
+  function settingsFor(profile: LanguageProfileConfig, overrides: Partial<AdminSettings> = {}): AdminSettings {
+    return {
+      subtitleLanguageLabel: profile.subtitle.label,
+      transcriptLanguageLabel: profile.transcript.label,
+      languageProfileConfigJson: '',
+      correctionFewShotJson: '',
+      translationFewShotJson: '',
+      correctionAdditionalInstructions: '',
+      ...overrides,
+    } as AdminSettings
+  }
+
+  it('英→日構成では日本語字幕の例が入る', () => {
+    const { fewShotSegments, fewShotTranslations } =
+      translateEnTesting.resolveTranslationFewShot('', EN_TO_JA_PROFILE)
+    expect(fewShotSegments.length).toBeGreaterThan(0)
+    expect(fewShotSegments.length).toBe(fewShotTranslations.length)
+    // 原文=英語 / 訳文=日本語 になっていること
+    expect(fewShotSegments.join('')).toMatch(/[A-Za-z]/)
+    expect(fewShotTranslations.join('')).toMatch(/[぀-ヿ㐀-䶿一-鿿]/)
+  })
+
+  it('日→英構成は従来どおり英語訳の例が入る', () => {
+    const { fewShotSegments, fewShotTranslations } =
+      translateEnTesting.resolveTranslationFewShot('', DEFAULT_LANGUAGE_PROFILE_CONFIG)
+    expect(fewShotSegments.join('')).toMatch(/[぀-ヿ㐀-䶿一-鿿]/)
+    expect(fewShotTranslations.join('')).toMatch(/[A-Za-z]/)
+  })
+
+  it('英語以外のラテン言語（ドイツ語）には英語の例を当てない', () => {
+    // script=latin というだけで英語の例を注入すると出力言語を引きずる
+    const { fewShotSegments } = translateEnTesting.resolveTranslationFewShot('', {
+      subtitle: { label: 'Japanese', script: 'japanese' },
+      transcript: { label: 'German', script: 'latin' },
+    })
+    expect(fewShotSegments).toEqual([])
+  })
+
+  it('補正 few-shot も英語書きおこしでのみ組み込み例を使う', () => {
+    expect(correctTesting.resolveCorrectionFewShotMessages(settingsFor(EN_TO_JA_PROFILE))).toHaveLength(2)
+    expect(correctTesting.resolveCorrectionFewShotMessages(settingsFor({
+      subtitle: { label: 'Japanese', script: 'japanese' },
+      transcript: { label: 'German', script: 'latin' },
+    }))).toHaveLength(0)
   })
 })

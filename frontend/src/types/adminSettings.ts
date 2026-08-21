@@ -8,6 +8,10 @@ export type ApiCompatibilityProfilePresetId = 'auto' | 'openai' | 'lmstudio' | '
 export type AlignTokenMode = 'auto' | 'char' | 'word'
 export type { ModelProfilePresetId } from './modelProfile'
 
+export type WhisperxDevice = 'cuda' | 'cpu'
+
+export type WhisperxModel = 'large-v3' | 'medium' | 'small' | 'base' | 'tiny'
+
 export interface AdminSettings {
   serviceMode: ServiceMode
   serviceUrl: string
@@ -107,6 +111,13 @@ export interface AdminSettings {
   transcribeLanguageCode: string
   subtitleLanguageLabel: string
   transcriptLanguageLabel: string
+  /** WhisperX の実行 device。NVIDIA GPU が無い環境（Apple Silicon 等）は cpu を選ぶ */
+  whisperxDevice: WhisperxDevice
+  /**
+   * WhisperX のモデルサイズ。イメージタグは 書きおこし言語 と組み合わせて Rust 側で解決する。
+   * CPU 実行では large-v3 が実時間の約5.7倍かかるため、小さいモデルを選べるようにしている。
+   */
+  whisperxModel: WhisperxModel
   languageProfileConfigJson: string
   // 書きおこしトークン単位。WhisperXは日本語/中国語のみ1文字ずつ、それ以外は単語ごとに
   // タイムスタンプを返す（asrAlignment.ts の detectAsrScriptDetail 参照）。既定 'auto' は

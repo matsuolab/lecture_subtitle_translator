@@ -5,7 +5,7 @@ import { locales } from '@/i18n'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useToast } from '@/context/ToastContext'
-import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ServiceMode, TranslationProvider } from '@/types/adminSettings'
+import type { AdminSettings, ApiCompatibilityProfilePresetId, ModelProfilePresetId, ServiceMode, TranslationProvider, WhisperxDevice, WhisperxModel } from '@/types/adminSettings'
 import { createSharedAdminSettingsExport, parseSharedAdminSettingsExport } from '@/api/adminSettings'
 import { createAiGateway } from '@/lib/aiGateway'
 import type { AiGatewayProbeName } from '@/lib/aiGateway'
@@ -27,9 +27,16 @@ import {
   parseTextNormalizationConfig,
   validateTextNormalizationRulesJson,
 } from '@/lib/pipeline/textNormalization'
+import { loadLanguageProfileConfig } from '@/lib/pipeline/languageProfileConfig'
+import {
+  diffSubtitleQualityPreset,
+  resolveSubtitleQualityPreset,
+  type SubtitleQualityPreset,
+} from '@/lib/pipeline/subtitleQualityPresets'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { getWorkLogDir, isWorkLogPersistent, openWorkLogDir } from '@/lib/worklog/repository'
-import { isSupportedWhisperxLanguage, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
+import { isSupportedWhisperxLanguage, resolveTranscribeLanguageLabels, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
+
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -102,6 +109,18 @@ export function SettingsTab({
   const sharedSettingsImportRef = React.useRef<HTMLInputElement>(null)
   const apiCompatibilityProfileImportRef = React.useRef<HTMLInputElement>(null)
   const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
+  const handleTranscribeLanguageChange = React.useCallback((value: string) => {
+    // 言語ラベルは翻訳方向そのものを決めるため、書きおこし言語と必ず揃える。
+    // 対応が無い言語（フランス語など）はラベルを触らず手動設定に委ねる。
+    const labels = resolveTranscribeLanguageLabels(value)
+    onAdminSettingsChange({
+      transcribeLanguageCode: value,
+      ...(labels ? {
+        transcriptLanguageLabel: labels.transcript,
+        subtitleLanguageLabel: labels.subtitle,
+      } : {}),
+    })
+  }, [onAdminSettingsChange])
   const resolvedApiCompatibilityProfile = React.useMemo(() => {
     try {
       return resolveApiCompatibilityProfile(adminSettings)
@@ -563,17 +582,19 @@ export function SettingsTab({
               />
             </>
           ) : (
-            <div style={{
-              padding: '10px 12px',
-              borderRadius: 8,
-              border: `1px solid ${theme.panelBorder}`,
-              background: theme.panelBg,
-              color: theme.textSecondary,
-              fontSize: 12,
-              lineHeight: 1.6,
-            }}>
-              ローカル実行に必要なサービスはアプリが自動で起動します。
-            </div>
+            <>
+              <div style={{
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: `1px solid ${theme.panelBorder}`,
+                background: theme.panelBg,
+                color: theme.textSecondary,
+                fontSize: 12,
+                lineHeight: 1.6,
+              }}>
+                ローカル実行に必要なサービスはアプリが自動で起動します。
+              </div>
+            </>
           )}
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
             {serviceHelpText}
@@ -1059,7 +1080,7 @@ export function SettingsTab({
           <SettingsGroupLabel
             theme={theme}
             title="基本モデル"
-            hint="日本語書き起こしの補正と、英語字幕への翻訳に使う主モデルです。高品質な処理が必要な段階です。"
+            hint="書き起こしの補正と、字幕言語への翻訳に使う主モデルです。高品質な処理が必要な段階です。"
           />
           <ComboField
             theme={theme}
@@ -1123,7 +1144,7 @@ export function SettingsTab({
           />
           <ComboField
             theme={theme}
-            label="日本語分割モデル (splitJa)"
+            label="書きおこし分割モデル (splitJa)"
             value={adminSettings.splitJaModel}
             placeholder={adminSettings.translationProvider === 'gemini' ? DEFAULT_GEMINI_CHAT_MODEL : getChatModelPlaceholder(DEFAULT_OPENAI_CHAT_MODEL)}
             listId="available-models-list"
@@ -1193,14 +1214,16 @@ export function SettingsTab({
                 theme={theme}
                 label="書きおこし音声の言語（WhisperX）"
                 value={adminSettings.transcribeLanguageCode}
-                onChange={(value) => onAdminSettingsChange({ transcribeLanguageCode: value })}
+                onChange={handleTranscribeLanguageChange}
                 options={WHISPERX_LANGUAGES.map((lang) => ({ value: lang.code, label: `${lang.labelJa} (${lang.code})` }))}
               />
               <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
                 この設定は実行先が「このPCで実行」のときだけ有効です。
                 WhisperXが対応する41言語（アライメントモデルがある言語）のみ選べます。
                 言語を変えると初回に言語別Dockerイメージ（約10GB）のダウンロードが発生します。
-                併せて下の「書き起こし言語ラベル」もAIプロンプト用の表示名として同じ言語に変更してください（ラベルは別設定です）。
+                日本語を選ぶと英語字幕、英語を選ぶと日本語字幕の組み合わせになるよう、
+                下の「書き起こし言語ラベル」「字幕言語ラベル」も自動で追従します。
+                それ以外の言語を選んだ場合はラベルを手動で設定してください（ラベルは別設定です）。
                 {/* 実際に docker run されるタグは Rust 側（lib.rs の whisperx_image）が組み立てる。
                     ここは「どのイメージが落ちてくるか」を利用者に見せるための表示専用。 */}
                 <div style={{ marginTop: 4, fontFamily: 'monospace' }}>
@@ -1209,14 +1232,55 @@ export function SettingsTab({
                     : '—'}
                 </div>
               </div>
+              <SelectField
+                theme={theme}
+                label="書きおこしの実行デバイス"
+                value={adminSettings.whisperxDevice}
+                onChange={(value) => onAdminSettingsChange({ whisperxDevice: value as WhisperxDevice })}
+                options={[
+                  { value: 'cuda', label: 'GPU (NVIDIA CUDA)' },
+                  { value: 'cpu', label: 'CPU（GPUなし / Apple Silicon）' },
+                ]}
+              />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                NVIDIA GPU が無い環境では CPU を選びます。GPU 指定のままだと Docker が
+                「GPU ベンダーを検出できない」というエラーで失敗します。
+              </div>
+              <SelectField
+                theme={theme}
+                label="書きおこしモデル"
+                value={adminSettings.whisperxModel}
+                onChange={(value) => onAdminSettingsChange({ whisperxModel: value as WhisperxModel })}
+                options={[
+                  { value: 'large-v3', label: 'large-v3（最高精度 / GPU 推奨）' },
+                  { value: 'medium', label: 'medium' },
+                  { value: 'small', label: 'small（CPU 実行の推奨）' },
+                  { value: 'base', label: 'base（動作確認向け）' },
+                  { value: 'tiny', label: 'tiny' },
+                ]}
+              />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                CPU 実行では large-v3 は実時間の約5.7倍かかります（60分の講義で5時間以上）。
+                small なら実時間とほぼ同等です。GPU があれば large-v3 のままで構いません。
+              </div>
             </>
           ) : (
-            <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-              実行先が「AWS / リモート実行」の場合、書きおこしの言語はアプリからは変更できません。
-              接続先サーバー側の設定（AWS Batch ジョブ定義の環境変数 <code>WHISPERX_LANGUAGE</code>）で決まります。
-              変更したい場合は管理者向けドキュメント（ローカルWhisperXセットアップ／設定リファレンス）を参照してください。
-              下の「書き起こし言語ラベル」はAIプロンプト用の表示名なので、サーバー側の書きおこし言語に合わせて設定してください。
-            </div>
+            <>
+              <SelectField
+                theme={theme}
+                label="書きおこし音声の言語（WhisperX）"
+                value={adminSettings.transcribeLanguageCode}
+                onChange={handleTranscribeLanguageChange}
+                options={WHISPERX_LANGUAGES.map((lang) => ({ value: lang.code, label: `${lang.labelJa} (${lang.code})` }))}
+              />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                実行先が「AWS / リモート実行」の場合、この設定はジョブ投入時に AWS Batch へ渡され、
+                サーバー側の環境変数 <code>WHISPERX_LANGUAGE</code> を上書きします。
+                日本語を選ぶと英語字幕、英語を選ぶと日本語字幕の組み合わせになるよう、
+                下の「書き起こし言語ラベル」「字幕言語ラベル」も自動で追従します。
+                それ以外の言語を選んだ場合はラベルを手動で設定してください（ラベルは別設定です）。
+              </div>
+            </>
           )}
           <Field
             theme={theme}
@@ -1270,6 +1334,12 @@ export function SettingsTab({
               </div>
             </div>
           </details>
+
+          <SubtitleQualityPresetPanel
+            theme={theme}
+            adminSettings={adminSettings}
+            onAdminSettingsChange={onAdminSettingsChange}
+          />
         </FieldCard>
 
         <SettingsGroupLabel
@@ -1646,7 +1716,7 @@ export function SettingsTab({
         <SettingsGroupLabel
           theme={theme}
           title="字幕の自動調整（文字量・速度）"
-          hint="英訳の文字量や読む速さを判定し、短縮・展開する基準です。CPSと行長のしきい値で制御します。"
+          hint="字幕の文字量や読む速さを判定し、短縮・展開する基準です。CPSと行長のしきい値で制御します。"
         />
         <FieldCard theme={theme}>
           <NumberField
@@ -1698,7 +1768,7 @@ export function SettingsTab({
         <SettingsGroupLabel
           theme={theme}
           title="未完結な文の結合（前処理）"
-          hint="文の途中で切れた字幕を次の字幕と結合してから翻訳し、英訳のあふれやCPS違反を防ぎます。"
+          hint="文の途中で切れた字幕を次の字幕と結合してから翻訳し、訳文のあふれやCPS違反を防ぎます。"
         />
         <FieldCard theme={theme}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1817,6 +1887,94 @@ export function SettingsTab({
           {t.settingsStorageNotice}
         </div>
       </Section>
+    </div>
+  )
+}
+
+const PRESET_FIELD_LABELS: Record<keyof SubtitleQualityPreset, string> = {
+  enMaxCharsPerLine: '1行の最大文字数',
+  enMaxLines: '最大行数',
+  enMaxCps: '最大CPS（1秒あたり文字数）',
+  subtitleMinDurationSec: '最小表示時間（秒）',
+  pipelineSlowCps: '間延び判定CPS',
+  pipelineVerboseEnRatio: '冗長判定の文字数比',
+  pipelineOverCompressedRatio: '過圧縮判定の文字数比',
+  pipelineOverCompressedJaChars: '過圧縮判定の最小書きおこし文字数',
+}
+
+/**
+ * 現在の言語構成に対する推奨品質基準を提示し、明示操作で適用する。
+ *
+ * ラベル変更に連動して自動的に書き換えないのは、チームで調整済みの値を
+ * 黙って破壊しないため。差分を見せたうえで利用者に選ばせる。
+ */
+function SubtitleQualityPresetPanel({
+  theme,
+  adminSettings,
+  onAdminSettingsChange,
+}: {
+  theme: Theme
+  adminSettings: AdminSettings
+  onAdminSettingsChange: (patch: Partial<AdminSettings>) => void
+}) {
+  const info = React.useMemo(
+    () => resolveSubtitleQualityPreset(loadLanguageProfileConfig(adminSettings)),
+    [adminSettings],
+  )
+  const diff = React.useMemo(
+    () => (info ? diffSubtitleQualityPreset(adminSettings, info.preset) : []),
+    [adminSettings, info],
+  )
+
+  if (!info) {
+    return (
+      <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+        この言語構成には推奨の品質基準がありません。下の「字幕品質・修復」で行長・CPS を手動で設定してください。
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      border: `1px solid ${theme.panelBorder}`,
+      borderRadius: 8,
+      background: theme.panelBg,
+      padding: '10px 12px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: theme.textPrimary }}>
+        推奨の品質基準（{info.label}）
+      </div>
+      {diff.length === 0 ? (
+        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+          現在の設定は推奨値と一致しています。
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            字幕言語に合わせた行長・CPS・文字数比の推奨値です。適用すると次の {diff.length} 項目が変わります。
+            公開ガイドラインの英日比から導出した出発点なので、実際の講義動画で確認して調整してください。
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: theme.textSecondary, lineHeight: 1.7 }}>
+            {diff.map(entry => (
+              <li key={entry.key}>
+                {PRESET_FIELD_LABELS[entry.key]}: {entry.current} → <strong style={{ color: theme.textPrimary }}>{entry.next}</strong>
+              </li>
+            ))}
+          </ul>
+          <div>
+            <button
+              type="button"
+              style={smallButtonStyle(theme)}
+              onClick={() => onAdminSettingsChange({ ...info.preset })}
+            >
+              推奨値を適用
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -2110,6 +2268,7 @@ function NumberField({
   )
 }
 
+// 値の型は呼び出し側の options から推論する（翻訳プロバイダ以外の列挙にも使うため）。
 function SelectField<T extends string>({
   theme,
   label,

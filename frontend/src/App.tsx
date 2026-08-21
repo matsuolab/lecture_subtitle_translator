@@ -36,6 +36,12 @@ import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecor
 import type { TranscriptSegment } from '@/lib/pipeline/types'
 import { useSpellChecker, type SpellIssue } from '@/lib/pipeline/spellCheck'
 import type { LocalPipelineGlossary } from '@/lib/pipeline/localPipeline'
+import { loadLanguageProfileConfig } from '@/lib/pipeline/languageProfileConfig'
+import {
+  DEFAULT_GLOSSARY_ROLES,
+  resolveGlossaryRoles,
+  type GlossaryRoles,
+} from '@/utils/glossaryApply'
 import { useTheme } from '@/context/ThemeContext'
 import { useLocale } from '@/context/LocaleContext'
 import { useGlossary, type GlossaryEntry, type SelfMadeGlossaryEntry } from '@/context/GlossaryContext'
@@ -231,31 +237,45 @@ function canonicalFormulaText(entry: SelfMadeGlossaryEntry): string | undefined 
     ?? entry.formula
 }
 
-function buildPipelineGlossary(glossary: GlossaryEntry[], selfMadeGlossary: SelfMadeGlossaryEntry[]): LocalPipelineGlossary {
+function buildPipelineGlossary(
+  glossary: GlossaryEntry[],
+  selfMadeGlossary: SelfMadeGlossaryEntry[],
+  roles: GlossaryRoles = DEFAULT_GLOSSARY_ROLES,
+): LocalPipelineGlossary {
   const confirmedFormal = glossary.filter(entry => entry.confirmed)
   const correctionSelfMade = selfMadeGlossary.filter(canUseSelfMadeForCorrection)
   const translationSelfMade = selfMadeGlossary.filter(canUseSelfMadeForTranslation)
 
+  // 補正は書きおこし（原文）に対して行うので、原文側の言語の表記を渡す。
+  // 翻訳は「原文表記 => 訳文表記」の対で渡す。どちらも翻訳方向で ja/en が入れ替わる。
+  const sourceOf = (entry: { ja: string; en: string }): string => entry[roles.transcript]
+  const targetOf = (entry: { ja: string; en: string }): string => entry[roles.subtitle]
+  // 話し言葉での読み。原文が日本語なら spokenJa、英語なら spokenEn を補正ヒントに使う。
+  const spokenSourceOf = (entry: SelfMadeGlossaryEntry): string | undefined =>
+    roles.transcript === 'ja' ? entry.spokenJa : entry.spokenEn
+  const spokenTargetOf = (entry: SelfMadeGlossaryEntry): string | undefined =>
+    roles.subtitle === 'ja' ? entry.spokenJa : entry.spokenEn
+
   const correctionTerms = uniqueNonEmpty([
-    ...confirmedFormal.flatMap(entry => [entry.ja, entry.abbr]),
+    ...confirmedFormal.flatMap(entry => [sourceOf(entry), entry.abbr]),
     ...correctionSelfMade.flatMap(entry => [
       entry.ja,
       entry.en,
       entry.abbr,
       canonicalFormulaText(entry),
-      entry.spokenJa,
+      spokenSourceOf(entry),
     ]),
   ])
 
   const translationTerms = uniqueNonEmpty([
     ...confirmedFormal.flatMap(entry => [
-      entry.ja && entry.en ? `${entry.ja} => ${entry.en}` : undefined,
+      entry.ja && entry.en ? `${sourceOf(entry)} => ${targetOf(entry)}` : undefined,
       entry.abbr,
     ]),
     ...translationSelfMade.flatMap(entry => [
-      entry.ja && entry.en ? `${entry.ja} => ${entry.en}` : undefined,
-      canonicalFormulaText(entry) && (entry.spokenEn || entry.spokenJa)
-        ? `${canonicalFormulaText(entry)} => ${entry.spokenEn ?? entry.spokenJa}`
+      entry.ja && entry.en ? `${sourceOf(entry)} => ${targetOf(entry)}` : undefined,
+      canonicalFormulaText(entry) && (spokenTargetOf(entry) || spokenSourceOf(entry))
+        ? `${canonicalFormulaText(entry)} => ${spokenTargetOf(entry) ?? spokenSourceOf(entry)}`
         : undefined,
       entry.abbr,
     ]),
@@ -567,6 +587,11 @@ export default function App() {
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(() => (
     mergeImportedAdminSettings(loadAdminSettings(), restoredSession?.session?.adminSettings)
   ))
+  // 用語辞書の ja/en フィールドが、字幕・書きおこしのどちらに対応するか。翻訳方向で入れ替わる。
+  const glossaryRoles = useMemo(
+    () => resolveGlossaryRoles(loadLanguageProfileConfig(adminSettings)),
+    [adminSettings],
+  )
   const latestPipelineDebugRef = useRef<PipelineRunDebug | undefined>(
     restoredSession?.session?.pipelineRun?.debug,
   )
@@ -1175,7 +1200,7 @@ export default function App() {
           pipelineRun: startingState,
           videoSource: source,
         })
-        const pipelineGlossary = buildPipelineGlossary(glossary, selfMadeGlossary)
+        const pipelineGlossary = buildPipelineGlossary(glossary, selfMadeGlossary, glossaryRoles)
         const apiResult = await runPipelineViaApi(sourceName, adminSettings, source, (progress) => {
           managedRunId = progress.runId
           const nodeLabel: Record<string, string> = {
@@ -2741,6 +2766,7 @@ export default function App() {
                 maxCps={adminSettings.enMaxCps}
                 maxCharsPerLine={adminSettings.enMaxCharsPerLine}
                 spellIssuesByBlock={spellIssuesByBlock}
+                glossaryRoles={glossaryRoles}
                 onAddToSpellDictionary={handleAddToSpellDictionary}
               />
             )}

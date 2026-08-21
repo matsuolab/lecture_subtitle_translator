@@ -59,3 +59,107 @@ def test_transcribe_strict_external_fails_when_path_missing() -> None:
 
     assert result.status == "failure"
     assert "docker whisperx failed" in result.issues[0]
+
+
+# --- device / compute_type / language の解決 -------------------------------
+
+
+def test_resolve_device_normalizes_and_defaults_to_cuda() -> None:
+    from backend.pipeline.nodes.transcribe import _resolve_device
+
+    assert _resolve_device("cpu") == "cpu"
+    assert _resolve_device("CUDA") == "cuda"
+    assert _resolve_device(" cpu ") == "cpu"
+    # 未知の値・空文字は従来動作（cuda）へ倒す
+    assert _resolve_device("mps") == "cuda"
+    assert _resolve_device("") == "cuda"
+
+
+def test_resolve_compute_type_falls_back_to_float32_on_cpu() -> None:
+    from backend.pipeline.nodes.transcribe import _resolve_compute_type
+
+    # CTranslate2 の CPU バックエンドは float16 を扱えず ValueError で落ちる。
+    # 丸め先は WhisperX 自身の CPU 既定と同じ float32（精度を落とさない）。
+    assert _resolve_compute_type("cpu", "float16") == "float32"
+    assert _resolve_compute_type("cpu", "FP16") == "float32"
+    # 利用者が明示指定した型はそのまま尊重する（速度優先で int8 を選ぶ余地を残す）
+    assert _resolve_compute_type("cpu", "int8") == "int8"
+    assert _resolve_compute_type("cpu", "float32") == "float32"
+    # GPU 実行時は指定どおり
+    assert _resolve_compute_type("cuda", "float16") == "float16"
+
+
+def test_docker_command_omits_gpus_flag_on_cpu(monkeypatch, tmp_path) -> None:
+    """CPU 実行では --gpus を付けない（NVIDIA ランタイムが無い環境で daemon が失敗するため）。"""
+    from backend.pipeline.nodes import transcribe as mod
+
+    captured: dict = {}
+
+    def fake_run(cmd, timeout):
+        captured["cmd"] = cmd
+        # 出力 JSON を作らずに失敗させ、コマンド構築だけを検証する
+        return 1
+
+    monkeypatch.setattr(mod, "_run_docker_streaming", fake_run)
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFTEST")
+
+    for device, expect_gpus in (("cpu", False), ("cuda", True)):
+        try:
+            mod._run_docker_whisperx(
+                audio_path=audio,
+                image="ghcr.io/jim60105/whisperx:base-en",
+                hf_token="",
+                batch_size=4,
+                compute_type="float16",
+                cache_volume="vol",
+                timeout=10,
+                model_size="base",
+                language="en",
+                device=device,
+            )
+        except RuntimeError:
+            pass  # 終了コード 1 で失敗するのは想定どおり
+
+        cmd = captured["cmd"]
+        assert ("--gpus" in cmd) is expect_gpus, f"device={device}"
+        assert cmd[cmd.index("--device") + 1] == device
+        expected_compute = "float32" if device == "cpu" else "float16"
+        assert cmd[cmd.index("--compute_type") + 1] == expected_compute
+
+
+def test_runtime_settings_override_language_and_device(monkeypatch, tmp_path) -> None:
+    """書きおこし言語と device は runtime_settings を env より優先する。"""
+    from backend.pipeline.nodes import transcribe as mod
+
+    captured: dict = {}
+
+    def fake_docker(**kwargs):
+        captured.update(kwargs)
+        return [{"start": 0.0, "end": 1.0, "text": "hello", "ja": "hello"}]
+
+    monkeypatch.setattr(mod, "_run_docker_whisperx", fake_docker)
+    monkeypatch.setenv("WHISPERX_LANGUAGE", "ja")
+    monkeypatch.setenv("WHISPERX_DEVICE", "cuda")
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFTEST")
+
+    node = mod.TranscribeNode()
+    result = node.run(
+        _state(
+            {
+                "execution_mode": "production",
+                "audio_path": str(audio),
+                "runtime_settings": {
+                    "whisperx_execution_backend": "docker",
+                    "whisperx_docker_image": "ghcr.io/jim60105/whisperx:no_model",
+                    "whisperx_language": "en",
+                    "whisperx_device": "cpu",
+                },
+            }
+        )
+    )
+
+    assert result.status == "success"
+    assert captured["language"] == "en"
+    assert captured["device"] == "cpu"

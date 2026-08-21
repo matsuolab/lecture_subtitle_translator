@@ -83,15 +83,23 @@ const WHISPERX_LANGUAGES: [&str; 41] = [
     "hr", "ro", "eu", "gl", "ka", "lv", "tl", "sv", "id",
 ];
 
-/// WhisperX の言語別 Docker イメージタグ（`ghcr.io/jim60105/whisperx:large-v3-{language}`）を
-/// 組み立てる。モデルサイズは large-v3 に固定（今回のスコープでは言語のみ可変）。
-/// ホワイトリスト外のコードは Err を返す（未知コードがそのまま docker 引数に流れるのを防ぐため）。
-fn whisperx_image(language: &str) -> Result<String, String> {
+/// WhisperX の Docker イメージタグ（`ghcr.io/jim60105/whisperx:{model}-{language}`）を組み立てる。
+/// ホワイトリスト外のコード・モデルは Err を返す（未知の値がそのまま docker 引数に流れるのを防ぐため）。
+///
+/// モデルサイズを可変にしているのは CPU 実行のため。large-v3 は CPU では実時間の約5.7倍かかり
+/// （M5 実測）、講義動画では現実的でない。small 前後を選べる必要がある。
+fn whisperx_image(language: &str, model: &str) -> Result<String, String> {
     if !WHISPERX_LANGUAGES.contains(&language) {
         return Err(format!("unsupported WhisperX language code: {language}"));
     }
-    Ok(format!("ghcr.io/jim60105/whisperx:large-v3-{language}"))
+    if !WHISPERX_MODELS.contains(&model) {
+        return Err(format!("unsupported WhisperX model: {model}"));
+    }
+    Ok(format!("ghcr.io/jim60105/whisperx:{model}-{language}"))
 }
+
+/// jim60105/docker-whisperX がビルドしているモデルサイズ。
+const WHISPERX_MODELS: &[&str] = &["large-v3", "medium", "small", "base", "tiny"];
 
 #[derive(Default)]
 struct LocalBackendState {
@@ -376,8 +384,8 @@ async fn http_request(options: HttpRequestOptions) -> Result<HttpResponsePayload
 }
 
 #[tauri::command]
-fn check_local_whisperx(language: String) -> Result<String, String> {
-    let image = whisperx_image(&language)?;
+fn check_local_whisperx(language: String, model: Option<String>) -> Result<String, String> {
+    let image = whisperx_image(&language, model.as_deref().unwrap_or("large-v3"))?;
 
     let mut docker_info = Command::new("docker");
     docker_info.args(["info", "--format", "{{.ServerVersion}}"]);
@@ -417,16 +425,31 @@ fn check_local_whisperx(language: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn transcribe_local(audio_path: String, language: String) -> Result<serde_json::Value, String> {
+async fn transcribe_local(
+    audio_path: String,
+    language: String,
+    device: Option<String>,
+    model: Option<String>,
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_whisperx_cli(&audio_path, &language)
+        run_whisperx_cli(
+            &audio_path,
+            &language,
+            device.as_deref().unwrap_or("cuda"),
+            model.as_deref().unwrap_or("large-v3"),
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Value, String> {
-    let image = whisperx_image(language)?;
+fn run_whisperx_cli(
+    audio_path: &str,
+    language: &str,
+    device: &str,
+    model: &str,
+) -> Result<serde_json::Value, String> {
+    let image = whisperx_image(language, model)?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -443,9 +466,13 @@ fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Valu
     let output_mount = format!("{output_host}:/output");
 
     let mut command = Command::new("docker");
+    command.args(["run", "--rm"]);
+    // GPU 実行時のみ --gpus を付ける。NVIDIA ランタイムが無い環境（Apple Silicon の
+    // Docker Desktop など）では --gpus all を渡すだけで daemon がエラーを返すため。
+    if device != "cpu" {
+        command.args(["--gpus", "all"]);
+    }
     command.args([
-        "run", "--rm",
-        "--gpus", "all",
         "-v", &audio_mount,
         "-v", &output_mount,
         &image,
@@ -453,6 +480,10 @@ fn run_whisperx_cli(audio_path: &str, language: &str) -> Result<serde_json::Valu
         "/audio/input.wav",
         "--output_format", "json",
         "--output_dir", "/output",
+        // 言語・device・compute_type はいずれも明示しない。
+        // 言語はイメージタグが表す（ENTRYPOINT が --language ${LANG} を渡す）。
+        // device は WhisperX が実行環境から自動判定し、compute_type の既定 'default' が
+        // GPU なら float16 / CPU なら float32 を選ぶ。明示すると既定より精度を落とす恐れがある。
     ]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
@@ -862,7 +893,7 @@ mod tests {
     #[test]
     fn whisperx_image_returns_expected_tag_for_ja() {
         assert_eq!(
-            whisperx_image("ja").unwrap(),
+            whisperx_image("ja", "large-v3").unwrap(),
             "ghcr.io/jim60105/whisperx:large-v3-ja"
         );
     }
@@ -870,23 +901,43 @@ mod tests {
     #[test]
     fn whisperx_image_returns_expected_tag_for_en() {
         assert_eq!(
-            whisperx_image("en").unwrap(),
+            whisperx_image("en", "large-v3").unwrap(),
             "ghcr.io/jim60105/whisperx:large-v3-en"
         );
     }
 
     #[test]
     fn whisperx_image_rejects_unknown_code() {
-        assert!(whisperx_image("xx").is_err());
+        assert!(whisperx_image("xx", "large-v3").is_err());
     }
 
     #[test]
     fn whisperx_image_rejects_empty_string() {
-        assert!(whisperx_image("").is_err());
+        assert!(whisperx_image("", "large-v3").is_err());
     }
 
     #[test]
     fn whisperx_image_rejects_injection_like_value() {
-        assert!(whisperx_image("; rm -rf").is_err());
+        assert!(whisperx_image("; rm -rf", "large-v3").is_err());
     }
+
+    #[test]
+    fn whisperx_image_supports_smaller_models_for_cpu() {
+        // CPU 実行では large-v3 が実時間の約5.7倍かかるため、小さいモデルを選べる必要がある
+        assert_eq!(
+            whisperx_image("en", "small").unwrap(),
+            "ghcr.io/jim60105/whisperx:small-en"
+        );
+    }
+
+    #[test]
+    fn whisperx_image_rejects_unknown_model() {
+        assert!(whisperx_image("en", "gigantic").is_err());
+    }
+
+    #[test]
+    fn whisperx_image_rejects_injection_like_model() {
+        assert!(whisperx_image("en", "; rm -rf").is_err());
+    }
+
 }

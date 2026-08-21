@@ -128,3 +128,59 @@ describe('finalSafeMerge', () => {
     expect(result.entries[0].reason).toMatch(/^CPS /)
   })
 })
+
+describe('finalSafeMerge — 英→日構成の結合作法', () => {
+  // 字幕=日本語 / 書きおこし=英語。日本語字幕は語間に空白を挟んではいけない。
+  const enToJaThresholds: PipelineThresholds = {
+    ...thresholds,
+    maxLineLen: 20,
+    verboseCps: 12,
+    subtitleScript: 'japanese',
+    transcriptScript: 'latin',
+  }
+
+  it('日本語字幕を空白なしで結合する', () => {
+    const result = finalSafeMerge([
+      block({
+        id: 1,
+        start: 0,
+        end: 2.5,
+        jaText: 'We will review gradients,',
+        enText: '勾配を確認して、',
+      }),
+      block({
+        id: 2,
+        start: 2.7,
+        end: 6.2,
+        jaText: 'and trace how backpropagation flows.',
+        enText: '逆伝播の流れを見ます。',
+      }),
+    ], enToJaThresholds)
+
+    expect(result.mergedCount).toBe(1)
+    // 改行は入るが、結合部に空白が混入しないこと
+    expect(result.blocks[0].enText.replace(/\n/g, '')).toBe('勾配を確認して、逆伝播の流れを見ます。')
+    expect(result.blocks[0].enText).not.toMatch(/、\s+逆/)
+  })
+
+  it('英語書きおこしは空白区切りで結合する', () => {
+    const result = finalSafeMerge([
+      block({
+        id: 1,
+        start: 0,
+        end: 2.5,
+        jaText: 'We will review gradients,',
+        enText: '勾配を確認して、',
+      }),
+      block({
+        id: 2,
+        start: 2.7,
+        end: 6.2,
+        jaText: 'and trace how backpropagation flows.',
+        enText: '逆伝播の流れを見ます。',
+      }),
+    ], enToJaThresholds)
+
+    expect(result.blocks[0].jaText).toBe('We will review gradients, and trace how backpropagation flows.')
+  })
+})

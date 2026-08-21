@@ -1,5 +1,6 @@
 import type { WordTimestamp } from './types'
 import type { PipelineCorrectionAttemptSummary } from '@/types/pipeline'
+import type { LanguageScript } from './languageProfileConfig'
 import type { CueSourceRef } from '@/types/sourceEvidence'
 
 export type AlignConf = 'exact' | 'proportional' | 'no_words' | 'merged'
@@ -110,6 +111,15 @@ export interface PipelineThresholds {
   slowCps: number
   maxExpandPerBlock: number
   maxCompressPerBlock: number
+  /**
+   * 字幕言語の文字体系。行分割・cue 結合の作法を切り替えるために使う。
+   * thresholds は整形処理が必要な全ノード（correctionAgent の奥まで）へ既に流れているため、
+   * 個々のシグネチャを増やさずに言語作法を伝える経路として相乗りしている。
+   * 省略時はラテン系として扱い、従来と同一の挙動になる。
+   */
+  subtitleScript?: LanguageScript
+  /** 書きおこし言語の文字体系。転写テキストの結合作法に使う。省略時はラテン系扱い。 */
+  transcriptScript?: LanguageScript
 }
 
 export interface BlockMetrics {
