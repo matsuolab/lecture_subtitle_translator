@@ -76,6 +76,7 @@ class JobOrchestrator(Protocol):
         workflow: str,
         execution_mode: str,
         schema_version: str,
+        language: str | None = None,
     ) -> ManagedJobHandle: ...
 
     def get_job_status(self, job_id: str) -> dict[str, Any] | None: ...
