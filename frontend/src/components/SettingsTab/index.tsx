@@ -1265,12 +1265,27 @@ export function SettingsTab({
               </div>
             </>
           ) : (
-            <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
-              実行先が「AWS / リモート実行」の場合、書きおこしの言語はアプリからは変更できません。
-              接続先サーバー側の設定（AWS Batch ジョブ定義の環境変数 <code>WHISPERX_LANGUAGE</code>）で決まります。
-              変更したい場合は管理者向けドキュメント（ローカルWhisperXセットアップ／設定リファレンス）を参照してください。
-              下の「書き起こし言語ラベル」はAIプロンプト用の表示名なので、サーバー側の書きおこし言語に合わせて設定してください。
-            </div>
+            <>
+              <SelectField
+                theme={theme}
+                label="書きおこし音声の言語（WhisperX）"
+                value={adminSettings.transcribeLanguageCode}
+                onChange={(value) => {
+                  const syncedLabel = TRANSCRIBE_LANGUAGE_LABEL_BY_CODE[value]
+                  onAdminSettingsChange({
+                    transcribeLanguageCode: value,
+                    ...(syncedLabel ? { transcriptLanguageLabel: syncedLabel } : {}),
+                  })
+                }}
+                options={WHISPERX_LANGUAGES.map((lang) => ({ value: lang.code, label: `${lang.labelJa} (${lang.code})` }))}
+              />
+              <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+                実行先が「AWS / リモート実行」の場合、この設定はジョブ投入時に AWS Batch へ渡され、
+                サーバー側の環境変数 <code>WHISPERX_LANGUAGE</code> を上書きします。
+                日本語・英語を選んだ場合は下の「書き起こし言語ラベル」も自動で追従します。
+                それ以外の言語を選んだ場合はラベルを手動で設定してください（ラベルは別設定です）。
+              </div>
+            </>
           )}
           <Field
             theme={theme}
