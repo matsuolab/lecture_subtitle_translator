@@ -326,3 +326,65 @@ describe('generateSelfMadeGlossaryFromPdf JSON Schema (Structured Outputs) wirin
     expect(formulaCall?.jsonSchema?.name).toBe('glossary_formula_review')
   })
 })
+
+describe('用語抽出プロンプトの翻訳方向対応', () => {
+  /** 候補抽出段のユーザープロンプト本文を取り出す。 */
+  function capturedCandidatePrompt(): string {
+    const call = chatTextMock.mock.calls.find(([options]) => !isThemeCall(options))
+    if (!call) throw new Error('candidate extraction call was not made')
+    const content = call[0].messages.find(message => message.role === 'user')?.content
+    return typeof content === 'string' ? content : JSON.stringify(content)
+  }
+
+  async function runWith(overrides: Partial<AdminSettings>): Promise<void> {
+    chatTextMock.mockImplementation(async (options) => {
+      if (isThemeCall(options)) return ok(themeJson())
+      return ok(candidatesJson([{ text: 'Transformer', page: 1 }]))
+    })
+    await generateSelfMadeGlossaryFromPdf(settings(overrides), makeDocument(1), {})
+  }
+
+  it('既定（日→英）構成のプロンプト文面は従来の日英固定文言と一致する', async () => {
+    await runWith({})
+    const prompt = capturedCandidatePrompt()
+
+    // リグレッション固定: 既定構成では方向対応前と同じ指示が出ていること。
+    expect(prompt).toContain('- ja は 日本語 表記、en は 英語 表記を格納する内部互換フィールド')
+    expect(prompt).toContain('この資料の書きおこし言語は 日本語、字幕言語は 英語')
+    expect(prompt).toContain('英語への翻訳修正に役立つ')
+    expect(prompt).toContain('「日本語のみ候補」と「英語のみ候補」')
+  })
+
+  it('英→日構成では ja/en に入れるべき言語が入れ替わって指示される', async () => {
+    await runWith({ subtitleLanguageLabel: 'Japanese', transcriptLanguageLabel: 'English' })
+    const prompt = capturedCandidatePrompt()
+
+    // フィールド名は据え置きのまま、格納される言語だけが入れ替わる。
+    expect(prompt).toContain('- ja は 日本語 表記、en は 英語 表記を格納する内部互換フィールド')
+    expect(prompt).toContain('この資料の書きおこし言語は 英語、字幕言語は 日本語')
+  })
+
+  it('英→日構成では訳出方向の文言が日本語訳になる', async () => {
+    await runWith({ subtitleLanguageLabel: 'Japanese', transcriptLanguageLabel: 'English' })
+    const prompt = capturedCandidatePrompt()
+
+    expect(prompt).toContain('日本語への翻訳修正に役立つ')
+    expect(prompt).not.toContain('英語への翻訳修正に役立つ')
+  })
+
+  it('英→日構成では同一概念のまとめ指示が書きおこし=英語 / 字幕=日本語で提示される', async () => {
+    await runWith({ subtitleLanguageLabel: 'Japanese', transcriptLanguageLabel: 'English' })
+    const prompt = capturedCandidatePrompt()
+
+    expect(prompt).toContain('「英語のみ候補」と「日本語のみ候補」')
+  })
+
+  it('abbreviation の指示から言語固定の「英語用語」表現が消えている', async () => {
+    await runWith({ subtitleLanguageLabel: 'Japanese', transcriptLanguageLabel: 'English' })
+    const prompt = capturedCandidatePrompt()
+
+    // 英→日では「英語用語を abbreviation にしない」は原文側を指してしまい誤指示になる。
+    expect(prompt).not.toContain('のような英語用語を abbreviation にしない')
+    expect(prompt).toContain('のような用語そのものを abbreviation にしない')
+  })
+})

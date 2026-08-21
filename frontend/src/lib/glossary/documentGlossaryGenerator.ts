@@ -29,6 +29,7 @@ import { resolveModelProfile, withReasoningHeadroom } from '@/lib/pipeline/model
 import { mapWithConcurrency, normalizeConcurrency } from '@/lib/concurrency'
 import type { AdminSettings } from '@/types/adminSettings'
 
+import { resolveGlossaryPromptDirection, type GlossaryPromptDirection } from './glossaryDirection'
 import type { ExtractedPdfDocument, ExtractedPdfPage } from './pdfExtractor'
 
 interface ChatCompletionResponse {
@@ -639,16 +640,26 @@ recall を precision より優先してください。判定に迷ったら抽�
 
 判定に迷ったら抽出する。一般語かどうかの判定はしない。`
 
-const ABSOLUTE_RULES = `絶対に守ること:
+/**
+ * 絶対制約。ja/en フィールドにどちらの言語を入れるかは翻訳方向で入れ替わるため、
+ * 方向を受け取って該当行だけを組み立てる。
+ *
+ * フィールド名 (ja/en) 自体は内部互換のため変えられないので、「ja は日本語」ではなく
+ * 「ja には <解決された言語> を入れる」と明示しないと、英語書きおこしの資料で
+ * LLM が英語用語を en 側だけに入れ、原文側 (ja) が空のまま返ってくる。
+ */
+function buildAbsoluteRules(direction: GlossaryPromptDirection): string {
+  return `絶対に守ること:
 - 翻訳はしない。PDF に存在しない訳語を補わない
 - 推測で値を作らない。PDF に書かれていない情報は空欄にする
-- ja は source 側表記、en は target 側表記を格納する内部互換フィールド
-- 現行運用では source=日本語、target=英語。PDF に実在する source/target 表記のみ入れる
+- ja は ${direction.jaLanguage} 表記、en は ${direction.enLanguage} 表記を格納する内部互換フィールド
+- この資料の書きおこし言語は ${direction.transcriptLanguage}、字幕言語は ${direction.subtitleLanguage}。PDF に実在する表記のみ入れる
 - どちらか一方が PDF に書かれていない場合、そのフィールドは空文字、対応 Source は "missing"
 - jaSource / enSource は "document" | "vision" | "llm_inferred" | "missing" のいずれかにする
 - llmClaimedSource は監査用メタデータです。本文だけで確認したなら "document_text"、ページ画像で補ったなら "page_image"、不明なら "unknown"
 - llmClaimedSource の判定のために候補品質を落とさない。本文と画像の両方を見て、正しい候補を優先する
 - JSON のみを返す`
+}
 
 const FORMULA_NOTATION_RULES = `数式・記号 (category="formula") の表記ルール:
 - displayText: 人間が見て分かる Unicode + ^/_ 記法
@@ -673,8 +684,9 @@ function buildCandidatePrompt(
   useVision: boolean,
   maxChars: number,
   themeContext: string,
+  direction: GlossaryPromptDirection,
 ): string {
-  return `以下の PDF 資料から、字幕の書き起こし修正・英訳修正に役立つ「専門用語候補」を抽出してください。
+  return `以下の PDF 資料から、字幕の書き起こし修正・${direction.subtitleLanguage}への翻訳修正に役立つ「専門用語候補」を抽出してください。
 完成した辞書 entry を作るタスクではありません。recall 重視で、迷ったら抽出してください。
 
 文書名: ${document.source.name}
@@ -684,15 +696,15 @@ ${CATEGORY_GUIDE}
 
 ${EXTRACTION_RULES}
 
-${ABSOLUTE_RULES}
+${buildAbsoluteRules(direction)}
 
 ${FORMULA_NOTATION_RULES}
 
 候補抽出段の追加制約:
 - 1 候補は text/category/page/snippet を基本とする
 - ja/en/formula/displayText は PDF 上で明確に分かる場合のみ短く入れる。片方が無くてもよい
-- abbreviation は SGD / GPU / TPU のような略語そのものだけに使う。Optimizer / Deep Learning / Regularization のような英語用語を abbreviation にしない
-- 「日本語のみ候補」と「英語のみ候補」が同じ箇所で同一概念を指す場合、別候補にせず 1 候補にまとめる
+- abbreviation は SGD / GPU / TPU のような略語そのものだけに使う。Optimizer / Deep Learning / Regularization のような用語そのものを abbreviation にしない
+- 「${direction.transcriptLanguage}のみ候補」と「${direction.subtitleLanguage}のみ候補」が同じ箇所で同一概念を指す場合、別候補にせず 1 候補にまとめる
 - 章題・節題そのもの (例: 「Transformer基礎」「深層学習と画像認識」) は候補に入れてよいが、できれば含まれる単独の専門語 (例: 「Transformer」「深層学習」) を別候補として出すこと
 - llmClaimedSource は監査メタデータ。本文だけで確認したなら "document_text"、ページ画像で補ったなら "page_image"、不明なら "unknown"
 - desc, note, reviewReason, spokenJa, spokenEn, domain, references はこの段でも次段でも出さない
@@ -726,8 +738,9 @@ function buildCandidateUserContent(
   useVision: boolean,
   maxChars: number,
   themeContext: string,
+  direction: GlossaryPromptDirection,
 ): ChatMessageContent {
-  const prompt = buildCandidatePrompt(document, pages, useVision, maxChars, themeContext)
+  const prompt = buildCandidatePrompt(document, pages, useVision, maxChars, themeContext, direction)
   if (!useVision) return prompt
 
   const content: Exclude<ChatMessageContent, string> = [{ type: 'text', text: prompt }]
@@ -742,6 +755,7 @@ function buildDetailPrompt(
   document: ExtractedPdfDocument,
   candidates: NormalizedGlossaryCandidate[],
   themeContext: string,
+  direction: GlossaryPromptDirection,
 ): string {
   return `以下の候補を、字幕補正用の専門用語候補 JSON に展開してください。
 完成した辞書 entry ではなく、補正prompt に渡すための候補一覧です。
@@ -751,7 +765,7 @@ function buildDetailPrompt(
 ${themeContext ? `${themeContext}\n` : ''}
 ${CATEGORY_GUIDE}
 
-${ABSOLUTE_RULES}
+${buildAbsoluteRules(direction)}
 
 ${FORMULA_NOTATION_RULES}
 
@@ -759,9 +773,9 @@ ${FORMULA_NOTATION_RULES}
 - 新しい候補を追加しない
 - 入力候補にない用語を補完しない
 - 入力候補にない訳語を作らない (推測翻訳禁止)
-- 入力候補内に同一概念の日本語表記と英語表記がある場合は 1 entry に統合する
+- 入力候補内に同一概念の${direction.transcriptLanguage}表記と${direction.subtitleLanguage}表記がある場合は 1 entry に統合する
   例: 「深層学習」と "Deep Learning" は 1 entry にする
-- abbreviation は略語本体 (SGD, GPU, TPU など) に使う。Optimizer / Deep Learning のような英語用語そのものを abbreviation にしない
+- abbreviation は略語本体 (SGD, GPU, TPU など) に使う。Optimizer / Deep Learning のような用語そのものを abbreviation にしない
 - 候補をむやみに drop しない。短い・一般語に見える・章題に出てきた、などで落とさない
 - domain / desc / note / reviewReason / references は出力しない (空文字でも出さない)
 - note はユーザー自由記入欄として UI には残すが、LLM側からは生成しない
@@ -1890,7 +1904,7 @@ async function runCandidateExtractionAttempt(
       },
       {
         role: 'user',
-        content: buildCandidateUserContent(document, pages, useVision, maxChars, themeContext),
+        content: buildCandidateUserContent(document, pages, useVision, maxChars, themeContext, resolveGlossaryPromptDirection(settings)),
       },
     ],
   })
@@ -2080,7 +2094,7 @@ async function requestDetailBatch(
       },
       {
         role: 'user',
-        content: buildDetailPrompt(document, candidates, themeContext),
+        content: buildDetailPrompt(document, candidates, themeContext, resolveGlossaryPromptDirection(settings)),
       },
     ],
   })
