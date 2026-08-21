@@ -22,7 +22,7 @@ _UNTRANSLATED_RATIO_THRESHOLD = 0.35
 
 @dataclass(frozen=True)
 class _TranslationDirection:
-    """\u66f8\u304d\u304a\u3053\u3057\u8a00\u8a9e\u2192\u5b57\u5e55\u8a00\u8a9e\u306e\u5bfe\u5fdc\u3002\u30d7\u30ed\u30f3\u30d7\u30c8\u306e\u6587\u8a00\u3068\u672a\u7ffb\u8a33\u5224\u5b9a\u306e\u5b57\u7a2e\u3092\u6c7a\u3081\u308b\u3002"""
+    """書きおこし言語→字幕言語の対応。プロンプトの文言と未翻訳判定の字種を決める。"""
 
     source_label: str
     target_label: str
@@ -43,10 +43,9 @@ _EN_TO_JA = _TranslationDirection(
 
 
 def _resolve_direction(runtime_settings: dict[str, Any]) -> _TranslationDirection:
-    """\u66f8\u304d\u304a\u3053\u3057\u8a00\u8a9e\u304b\u3089\u7ffb\u8a33\u65b9\u5411\u3092\u6c7a\u3081\u308b\u3002transcribe.py \u3068\u540c\u3058\u89e3\u6c7a\u9806\uff08runtime_settings \u2192 env\uff09\u3002
-
-    \u82f1\u8a9e\u4ee5\u5916\u306e\u66f8\u304d\u304a\u3053\u3057\u306f\u65e2\u5b58\u306e\u65e5\u672c\u8a9e\u2192\u82f1\u8a9e\u306e\u6271\u3044\u306b\u5012\u3059\uff08\u3053\u306e\u30ce\u30fc\u30c9\u304c\u5bfe\u5fdc\u3059\u308b\u8a00\u8a9e\u30da\u30a2\u306f
-    \u65e5\u2192\u82f1\u30fb\u82f1\u2192\u65e5\u306e2\u3064\u3067\u3001\u305d\u308c\u4ee5\u5916\u306b\u5f53\u3066\u305a\u3063\u307d\u3046\u306e\u30d7\u30ed\u30f3\u30d7\u30c8\u3092\u51fa\u3055\u306a\u3044\u305f\u3081\uff09\u3002
+    """
+    書きおこし言語から翻訳方向を決める。transcribe.py と同じ解決順（runtime_settings → env）。
+    英語以外の書きおこしは既存の日本語→英語の扱いに倒す
     """
     language = str(
         runtime_settings.get("whisperx_language")
