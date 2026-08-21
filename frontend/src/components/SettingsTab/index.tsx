@@ -35,23 +35,8 @@ import {
 } from '@/lib/pipeline/subtitleQualityPresets'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { getWorkLogDir, isWorkLogPersistent, openWorkLogDir } from '@/lib/worklog/repository'
-import { isSupportedWhisperxLanguage, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
+import { isSupportedWhisperxLanguage, resolveTranscribeLanguageLabels, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
 
-// WhisperX の書きおこし言語コードから、languageProfileConfig.ts の
-// KNOWN_LANGUAGE_DEFAULTS が認識する「書き起こし言語ラベル」への対応表。
-// ここに無いコードは script 既定を推測できないため、ラベルは自動追従させず手動設定に委ねる。
-const TRANSCRIBE_LANGUAGE_LABEL_BY_CODE: Record<string, string> = {
-  ja: 'Japanese',
-  en: 'English',
-}
-
-// 書きおこし言語に対する「既定の字幕言語」。日本語講義は英語字幕、英語講義は日本語字幕、
-// という本プロジェクトの2つの用途に合わせた組み合わせ。ここに無いコードでは字幕ラベルを
-// 触らない（利用者が設定済みの値を勝手に書き換えないため）。
-const SUBTITLE_LANGUAGE_LABEL_BY_TRANSCRIBE_CODE: Record<string, string> = {
-  ja: 'English',
-  en: 'Japanese',
-}
 
 type ServiceCheckState = {
   status: 'idle' | 'checking' | 'success' | 'error'
@@ -125,12 +110,15 @@ export function SettingsTab({
   const apiCompatibilityProfileImportRef = React.useRef<HTMLInputElement>(null)
   const isLocalOpenAiProvider = adminSettings.translationProvider === 'local_openai'
   const handleTranscribeLanguageChange = React.useCallback((value: string) => {
-    const transcriptLabel = TRANSCRIBE_LANGUAGE_LABEL_BY_CODE[value]
-    const subtitleLabel = SUBTITLE_LANGUAGE_LABEL_BY_TRANSCRIBE_CODE[value]
+    // 言語ラベルは翻訳方向そのものを決めるため、書きおこし言語と必ず揃える。
+    // 対応が無い言語（フランス語など）はラベルを触らず手動設定に委ねる。
+    const labels = resolveTranscribeLanguageLabels(value)
     onAdminSettingsChange({
       transcribeLanguageCode: value,
-      ...(transcriptLabel ? { transcriptLanguageLabel: transcriptLabel } : {}),
-      ...(subtitleLabel ? { subtitleLanguageLabel: subtitleLabel } : {}),
+      ...(labels ? {
+        transcriptLanguageLabel: labels.transcript,
+        subtitleLanguageLabel: labels.subtitle,
+      } : {}),
     })
   }, [onAdminSettingsChange])
   const resolvedApiCompatibilityProfile = React.useMemo(() => {

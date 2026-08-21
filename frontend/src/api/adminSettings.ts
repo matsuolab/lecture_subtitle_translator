@@ -7,7 +7,12 @@ import {
   DEFAULT_TRANSLATION_FEW_SHOT_JSON,
 } from '@/lib/pipeline/prompts'
 import { normalizeConcurrency } from '@/lib/concurrency'
-import { DEFAULT_WHISPERX_LANGUAGE, isSupportedWhisperxLanguage } from '@/lib/pipeline/whisperxLanguages'
+import {
+  DEFAULT_WHISPERX_LANGUAGE,
+  LANGUAGE_LABEL_PAIRS,
+  isSupportedWhisperxLanguage,
+  resolveTranscribeLanguageLabels,
+} from '@/lib/pipeline/whisperxLanguages'
 
 const STORAGE_KEY = 'subtitle-editor.admin-settings.v4'
 const ENV_SERVICE_URL = (import.meta.env.VITE_PIPELINE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -231,6 +236,61 @@ function normalizeAlignTokenMode(value: unknown): AlignTokenMode {
   return DEFAULT_ALIGN_TOKEN_MODE
 }
 
+/**
+ * 言語ラベル（翻訳元・翻訳先）を解決する。
+ *
+ * 言語ラベルは翻訳プロンプトの組み立てに使われ、**実際の翻訳方向を決める**。
+ * 一方 transcribeLanguageCode は WhisperX に渡す書きおこし言語で、別々の設定になっている。
+ * 両者がずれると「英語を書きおこして英語へ翻訳する」という指示になり、
+ * 字幕が原文のまま出てしまう（翻訳されていないように見える）。
+ *
+ * 設定画面で書きおこし言語を選び直したときは SettingsTab がラベルも一緒に更新するが、
+ * それだけでは **すでに保存済みの設定を読み込んだ場合**（既定ラベルのまま
+ * transcribeLanguageCode だけ en になっている等）に不整合が残る。
+ * そのため読み込み時にもここで組み合わせを補正する。
+ *
+ * ただし利用者が意図して別の組み合わせにしている場合（英語音声から英語字幕を作る等）を
+ * 壊さないよう、**保存値が「別の既知言語のラベル」である場合はそのまま尊重する**。
+ * 補正するのは、ラベルが未保存・空・既定値のままで、書きおこし言語と食い違うときだけ。
+ */
+function resolveLanguageLabels(
+  raw: Partial<AdminSettings>,
+  defaults: AdminSettings,
+): Pick<AdminSettings, 'subtitleLanguageLabel' | 'transcriptLanguageLabel'> {
+  const savedSubtitle = typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel
+    ? raw.subtitleLanguageLabel
+    : undefined
+  const savedTranscript = typeof raw.transcriptLanguageLabel === 'string' && raw.transcriptLanguageLabel
+    ? raw.transcriptLanguageLabel
+    : undefined
+
+  const code = typeof raw.transcribeLanguageCode === 'string' && isSupportedWhisperxLanguage(raw.transcribeLanguageCode)
+    ? raw.transcribeLanguageCode
+    : defaults.transcribeLanguageCode
+  const expected = resolveTranscribeLanguageLabels(code)
+
+  // 書きおこし言語に対応する既定の組み合わせが無い言語（フランス語など）は
+  // 推測せず保存値をそのまま使う。
+  if (!expected) {
+    return {
+      subtitleLanguageLabel: savedSubtitle ?? defaults.subtitleLanguageLabel,
+      transcriptLanguageLabel: savedTranscript ?? defaults.transcriptLanguageLabel,
+    }
+  }
+
+  // 保存値が既定の組み合わせのいずれか（＝利用者が明示的に選んだとは限らない値）なら、
+  // 書きおこし言語に合わせて補正する。それ以外の値は利用者の意図とみなし尊重する。
+  const isDefaultish = (label: string | undefined, role: 'transcript' | 'subtitle'): boolean => {
+    if (!label) return true
+    return Object.values(LANGUAGE_LABEL_PAIRS).some(pair => pair[role] === label)
+  }
+
+  return {
+    subtitleLanguageLabel: isDefaultish(savedSubtitle, 'subtitle') ? expected.subtitle : savedSubtitle!,
+    transcriptLanguageLabel: isDefaultish(savedTranscript, 'transcript') ? expected.transcript : savedTranscript!,
+  }
+}
+
 export function normalizeAdminSettings(value: unknown): AdminSettings {
   const raw = typeof value === 'object' && value !== null ? value as Partial<AdminSettings> & { pipelineApiUrl?: string } : {}
   const defaults = getDefaultAdminSettings()
@@ -310,8 +370,7 @@ export function normalizeAdminSettings(value: unknown): AdminSettings {
     transcribeLanguageCode: typeof raw.transcribeLanguageCode === 'string' && isSupportedWhisperxLanguage(raw.transcribeLanguageCode)
       ? raw.transcribeLanguageCode
       : defaults.transcribeLanguageCode,
-    subtitleLanguageLabel: typeof raw.subtitleLanguageLabel === 'string' && raw.subtitleLanguageLabel ? raw.subtitleLanguageLabel : defaults.subtitleLanguageLabel,
-    transcriptLanguageLabel: typeof raw.transcriptLanguageLabel === 'string' && raw.transcriptLanguageLabel ? raw.transcriptLanguageLabel : defaults.transcriptLanguageLabel,
+    ...resolveLanguageLabels(raw, defaults),
     whisperxDevice: raw.whisperxDevice === 'cpu' ? 'cpu' : defaults.whisperxDevice,
     whisperxModel: normalizeWhisperxModel(raw.whisperxModel, defaults.whisperxModel),
     languageProfileConfigJson: typeof raw.languageProfileConfigJson === 'string' && raw.languageProfileConfigJson ? raw.languageProfileConfigJson : defaults.languageProfileConfigJson,
