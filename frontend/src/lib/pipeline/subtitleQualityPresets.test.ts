@@ -83,6 +83,16 @@ describe('英→日 プリセットの整合性', () => {
       expect(preset[key], `${key} が正でない`).toBeGreaterThan(0)
     }
   })
+
+  it('表示系は Netflix 日本語ガイドの規定値と一致する', () => {
+    // poc/translate_demo.py Step 7 の JA_MAX_* と同じ値。
+    // 過去に CPS を 8.0 へ引き上げた経緯があるため（commit 5ba94b7）、
+    // ガイド準拠へ戻した意図が黙って失われないよう固定する。
+    expect(preset.enMaxCps).toBe(4.0)
+    expect(preset.enMaxCharsPerLine).toBe(13)
+    expect(preset.enMaxLines).toBe(2)
+    expect(preset.subtitleMinDurationSec).toBe(0.5)
+  })
 })
 
 describe('diffSubtitleQualityPreset', () => {
@@ -98,8 +108,10 @@ describe('diffSubtitleQualityPreset', () => {
     expect(keys).toContain('enMaxCps')
     expect(keys).toContain('enMaxCharsPerLine')
     expect(keys).toContain('pipelineVerboseEnRatio')
-    // 行数と最小表示時間は言語によらず同じなので差分に出ない
+    // 最小表示時間は Netflix 日本語ガイドの 500ms を採用しており、
+    // 英語字幕の既定（833ms）とは異なるため差分に出る
+    expect(keys).toContain('subtitleMinDurationSec')
+    // 行数は言語によらず 2 行なので差分に出ない
     expect(keys).not.toContain('enMaxLines')
-    expect(keys).not.toContain('subtitleMinDurationSec')
   })
 })

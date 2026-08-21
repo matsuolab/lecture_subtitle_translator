@@ -46,32 +46,17 @@ const JA_TO_EN_PRESET: SubtitleQualityPreset = {
 /**
  * 英語書きおこし → 日本語字幕。
  *
- * 公開ガイドラインの英日比から導出したうえで、実際の技術講義 1 本
- * （英語音声 → 日本語字幕、2 cue）で検証して調整した暫定値である。
- * **検証は小規模なので、運用データでの再確認が必要**（Wiki の「字幕ベストプラクティス」を正本とする）。
- * 導出の根拠:
+ * 表示系（行長・CPS・最小表示時間）は Netflix Japanese Timed Text Style Guide の
+ * 一般字幕（horizontal, non-SDH）基準に合わせる。PoC ノートブック
+ * （`poc/translate_demo.py` Step 7）が採用しているのと同じ数値である。
+ *   https://partnerhelp.netflixstudios.com/hc/en-us/articles/215767517-Japanese-Timed-Text-Style-Guide
  *
- * - `enMaxCps` = 8.0
- *   **実測に基づき 4.0 から引き上げた値。**
- *   当初は一般的な日本語字幕の目安（全角約4文字/秒）を採用したが、実際の技術講義
- *   （英語音声 → 日本語字幕）で検証したところ、自然な訳文は 9.0〜9.4 CPS になり、
- *   4.0 では次のとおり原理的に到達不能だった:
- *     5.23秒の cue の予算 = 20文字。しかし「バックプロパゲーション」(11文字) と
- *     「ニューラルネットワーク」(11文字) だけで 22文字あり、専門用語を落とさない限り収まらない。
- *   一般向け映像の目安はカタカナ専門用語が連続する技術講義には合わない。
- *   本アプリの latin 既定 16.9 に対し「同じ読み負荷」を与える値として、日本語の
- *   1文字あたり情報量を英語の約2倍と見て 16.9 / 2 ≈ 8.5 → 8.0 とした。
- *   自然な訳文（約9 CPS）から軽い圧縮で到達できる水準になる。
+ * - `enMaxCps` = 4.0 / `enMaxCharsPerLine` = 13 / `subtitleMinDurationSec` = 0.5
+ *   いずれもガイドの規定値そのまま。
  *
- * - `enMaxCharsPerLine` = 25
- *   英語 42文字/行 に対し日本語は全角13文字/行 が一般的な目安（比率 ≈ 0.31）。
- *   本アプリの latin 既定は 80（標準より広いレイアウトを想定した独自値）なので、
- *   その値に同じ比率を適用して 80 × 0.31 ≈ 25 とした。
- *   実測では CPS 側が先に効くため、この値が律速になることは少ない。
- *
- * - `pipelineSlowCps` = 1.4
+ * - `pipelineSlowCps` = 0.7
  *   latin では上限 16.9 に対し 3.0（≈ 0.18 倍）を「間延び」の下限としている。
- *   同じ比率を日本語の上限 8.0 に適用した。
+ *   同じ比率を日本語の上限 4.0 に適用した（4.0 × 0.18 ≈ 0.7）。
  *
  * - 比率系（`pipelineVerboseEnRatio` / `pipelineOverCompressedRatio`）
  *   これらは `字幕文字数 / 書きおこし文字数` に対する閾値。日→英では概ね 1.0 前後が
@@ -82,13 +67,30 @@ const JA_TO_EN_PRESET: SubtitleQualityPreset = {
  * - `pipelineOverCompressedJaChars` = 25
  *   過圧縮判定を始める書きおこし側の最小文字数。書きおこしが英語になるため、
  *   日本語 15文字 相当の情報量にあたる英語の文字数（≈ 1.7 倍）へ読み替えた。
+ *
+ * ## 既知のトレードオフ（CPS 4.0 の採用について）
+ *
+ * この 4.0 は、過去に一度 8.0 へ引き上げられたものを差し戻した値である（commit 5ba94b7）。
+ * 引き上げ時の根拠は、実際の技術講義（英語音声 → 日本語字幕）で自然な訳文が
+ * 9.0〜9.4 CPS になり、4.0 では次のとおり収まらないケースが出たというもの:
+ *   5.23秒の cue の予算 = 20文字。しかし「バックプロパゲーション」(11文字) と
+ *   「ニューラルネットワーク」(11文字) だけで 22文字あり、専門用語を落とさない限り収まらない。
+ *
+ * それでもガイド準拠を優先する判断のため、**カタカナ専門用語が連続する講義では
+ * CPS 違反として要確認に回る cue が増えることが想定される**。要確認が多すぎる場合は、
+ * 設定画面の「字幕品質・修復」で CPS を引き上げて運用する（プリセットは出発点であり、
+ * 適用後は利用者が自由に編集できる）。
+ *
+ * なお CPS の分母となる文字数は `countCpsChars`（空白を除いた素の文字数）で数えており、
+ * ガイドが前提とする全角=1・半角=0.5 の重み付けは行っていない。半角英数を含む字幕では
+ * ガイドより厳しめに判定される点に注意。
  */
 const EN_TO_JA_PRESET: SubtitleQualityPreset = {
-  enMaxCharsPerLine: 25,
+  enMaxCharsPerLine: 13,
   enMaxLines: 2,
-  enMaxCps: 8.0,
-  subtitleMinDurationSec: 0.833,
-  pipelineSlowCps: 1.4,
+  enMaxCps: 4.0,
+  subtitleMinDurationSec: 0.5,
+  pipelineSlowCps: 0.7,
   pipelineVerboseEnRatio: 0.75,
   pipelineOverCompressedRatio: 0.125,
   pipelineOverCompressedJaChars: 25,
