@@ -70,6 +70,7 @@ class CreateJobRequest(BaseModel):
     workflow: str = Field(default="managed_transcript_v1")
     execution_mode: str = Field(default="production")
     schema_version: str = Field(default="1.0")
+    language: str | None = Field(default=None)
 
 
 @app.get("/health")
@@ -123,6 +124,7 @@ def create_job(req: CreateJobRequest, request: Request) -> dict[str, Any]:
             workflow=req.workflow,
             execution_mode=req.execution_mode,
             schema_version=req.schema_version,
+            language=req.language,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
