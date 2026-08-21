@@ -654,6 +654,7 @@ async function runManagedPipeline(
         source_name: sourceName,
         input_key: inputKey,
         execution_mode: 'production',
+        language: settings.transcribeLanguageCode,
       }),
     })
   } catch (error) {
