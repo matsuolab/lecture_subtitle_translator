@@ -15,7 +15,44 @@ from ..contracts import RunState
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 _JA_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+_LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
 _MAX_SEGMENTS_PER_REQUEST = 40
+_UNTRANSLATED_RATIO_THRESHOLD = 0.35
+
+
+@dataclass(frozen=True)
+class _TranslationDirection:
+    """\u66f8\u304d\u304a\u3053\u3057\u8a00\u8a9e\u2192\u5b57\u5e55\u8a00\u8a9e\u306e\u5bfe\u5fdc\u3002\u30d7\u30ed\u30f3\u30d7\u30c8\u306e\u6587\u8a00\u3068\u672a\u7ffb\u8a33\u5224\u5b9a\u306e\u5b57\u7a2e\u3092\u6c7a\u3081\u308b\u3002"""
+
+    source_label: str
+    target_label: str
+    # \u8a33\u6587\u304c\u3053\u306e\u5b57\u7a2e\u3067\u5360\u3081\u3089\u308c\u3066\u3044\u305f\u3089\u300c\u7ffb\u8a33\u3055\u308c\u3066\u3044\u306a\u3044\u300d\u3068\u898b\u306a\u3059\uff08\uff1d\u30bd\u30fc\u30b9\u8a00\u8a9e\u306e\u5b57\u7a2e\uff09\u3002
+    untranslated_char_re: re.Pattern[str]
+
+
+_JA_TO_EN = _TranslationDirection(
+    source_label="Japanese",
+    target_label="English",
+    untranslated_char_re=_JA_CHAR_RE,
+)
+_EN_TO_JA = _TranslationDirection(
+    source_label="English",
+    target_label="Japanese",
+    untranslated_char_re=_LATIN_CHAR_RE,
+)
+
+
+def _resolve_direction(runtime_settings: dict[str, Any]) -> _TranslationDirection:
+    """\u66f8\u304d\u304a\u3053\u3057\u8a00\u8a9e\u304b\u3089\u7ffb\u8a33\u65b9\u5411\u3092\u6c7a\u3081\u308b\u3002transcribe.py \u3068\u540c\u3058\u89e3\u6c7a\u9806\uff08runtime_settings \u2192 env\uff09\u3002
+
+    \u82f1\u8a9e\u4ee5\u5916\u306e\u66f8\u304d\u304a\u3053\u3057\u306f\u65e2\u5b58\u306e\u65e5\u672c\u8a9e\u2192\u82f1\u8a9e\u306e\u6271\u3044\u306b\u5012\u3059\uff08\u3053\u306e\u30ce\u30fc\u30c9\u304c\u5bfe\u5fdc\u3059\u308b\u8a00\u8a9e\u30da\u30a2\u306f
+    \u65e5\u2192\u82f1\u30fb\u82f1\u2192\u65e5\u306e2\u3064\u3067\u3001\u305d\u308c\u4ee5\u5916\u306b\u5f53\u3066\u305a\u3063\u307d\u3046\u306e\u30d7\u30ed\u30f3\u30d7\u30c8\u3092\u51fa\u3055\u306a\u3044\u305f\u3081\uff09\u3002
+    """
+    language = str(
+        runtime_settings.get("whisperx_language")
+        or os.getenv("WHISPERX_LANGUAGE", "ja")
+    ).strip().lower()
+    return _EN_TO_JA if language.split("-")[0] == "en" else _JA_TO_EN
 
 
 @dataclass(frozen=True)
@@ -124,7 +161,7 @@ def _parse_translation_payload(content: str) -> list[str]:
     raise RuntimeError("translation response was not valid JSON with a translations array")
 
 
-def _looks_untranslated(source: str, translated: str) -> bool:
+def _looks_untranslated(source: str, translated: str, direction: _TranslationDirection) -> bool:
     source_text = normalize_spaces(source)
     translated_text = normalize_spaces(translated)
     if not translated_text:
@@ -135,14 +172,15 @@ def _looks_untranslated(source: str, translated: str) -> bool:
     non_space_chars = [char for char in translated_text if not char.isspace()]
     if not non_space_chars:
         return True
-    ja_ratio = len(_JA_CHAR_RE.findall(translated_text)) / len(non_space_chars)
-    return ja_ratio >= 0.35
+    source_char_ratio = len(direction.untranslated_char_re.findall(translated_text)) / len(non_space_chars)
+    return source_char_ratio >= _UNTRANSLATED_RATIO_THRESHOLD
 
 
 def _translate_segments_with_openai_compatible(
     texts: list[str],
     runtime_settings: dict[str, Any],
     runtime: _RuntimeTranslationConfig,
+    direction: _TranslationDirection,
 ) -> list[str]:
     if not texts:
         return []
@@ -164,8 +202,10 @@ def _translate_segments_with_openai_compatible(
                 {
                     "role": "system",
                     "content": (
-                        "Translate Japanese meeting transcript segments into natural English subtitles. "
-                        "Return a strict JSON object with one key, `translations`, whose value is an array of English strings. "
+                        f"Translate {direction.source_label} meeting transcript segments "
+                        f"into natural {direction.target_label} subtitles. "
+                        "Return a strict JSON object with one key, `translations`, "
+                        f"whose value is an array of {direction.target_label} strings. "
                         "Preserve order and array length exactly."
                     ),
                 },
@@ -213,6 +253,7 @@ class TranslateNode(BaseStubNode):
         corrected = state.data.get("corrected_segments", [])
         runtime_settings = state.data.get("runtime_settings") or {}
         runtime = _resolve_runtime_config(runtime_settings)
+        direction = _resolve_direction(runtime_settings)
         self.provider = runtime.provider
         self.model = runtime.model
 
@@ -239,7 +280,9 @@ class TranslateNode(BaseStubNode):
 
         source_texts = [str(seg.get("ja_corrected") or seg.get("text") or "") for seg in corrected]
         try:
-            translated_texts = _translate_segments_with_openai_compatible(source_texts, runtime_settings, runtime)
+            translated_texts = _translate_segments_with_openai_compatible(
+                source_texts, runtime_settings, runtime, direction
+            )
         except Exception as exc:
             return self.failure(
                 [str(exc)],
@@ -252,9 +295,9 @@ class TranslateNode(BaseStubNode):
 
         untranslated_ids: list[int] = []
         translated_rows = []
-        for index, (seg, ja_text, en_text) in enumerate(zip(corrected, source_texts, translated_texts), start=1):
-            normalized_en = normalize_spaces(en_text)
-            if _looks_untranslated(ja_text, normalized_en):
+        for index, (seg, source_text, translated_text) in enumerate(zip(corrected, source_texts, translated_texts), start=1):
+            normalized_en = normalize_spaces(translated_text)
+            if _looks_untranslated(source_text, normalized_en, direction):
                 untranslated_ids.append(index)
             translated_rows.append(
                 {
