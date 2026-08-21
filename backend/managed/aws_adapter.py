@@ -122,6 +122,7 @@ class AwsManagedAdapter(ManagedAdapter):
         workflow: str,
         execution_mode: str,
         schema_version: str,
+        language: str | None = None,
     ) -> ManagedJobHandle:
         job_id = str(uuid.uuid4())
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -154,15 +155,17 @@ class AwsManagedAdapter(ManagedAdapter):
             },
             ensure_ascii=True,
         )
+        environment = [{"name": self.settings.aws_job_payload_env, "value": payload}]
+        if language:
+            # Job Definition の WHISPERX_LANGUAGE はデプロイ時固定値。ここで containerOverrides
+            # により実行時に上書きすることで、Job Definitionを言語ごとに複製せずに
+            # UIで選んだ書きおこし言語（ja/en等）をAWS Batch経由でも反映する。
+            environment.append({"name": "WHISPERX_LANGUAGE", "value": language})
         batch_response = self.batch.submit_job(
             jobName=f"subtitle-managed-{job_id}",
             jobQueue=self.settings.aws_batch_job_queue,
             jobDefinition=self.settings.aws_batch_job_definition,
-            containerOverrides={
-                "environment": [
-                    {"name": self.settings.aws_job_payload_env, "value": payload},
-                ]
-            },
+            containerOverrides={"environment": environment},
         )
         self.ddb.update_item(
             TableName=self.settings.aws_jobs_table,
