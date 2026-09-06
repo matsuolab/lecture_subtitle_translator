@@ -200,6 +200,24 @@ function resolveGlossaryConcurrency(settings: AdminSettings): number {
   return normalizeConcurrency(settings.apiRequestConcurrency, 1)
 }
 
+/**
+ * ja/en フィールド自体は内部互換の source/target ペアとして維持し、プロンプト文言側だけ
+ * 書きおこし言語 (transcribeLanguageCode) に応じて source/target ラベルを差し替える。
+ * backend/pipeline/nodes/translate.py の _resolve_direction と同じ方針
+ * （英語書きおこし以外は既存の日本語→英語運用に倒す）。
+ */
+interface GlossaryLanguageDirection {
+  sourceLabel: string
+  targetLabel: string
+}
+
+function resolveGlossaryLanguageDirection(settings: AdminSettings): GlossaryLanguageDirection {
+  const language = (settings.transcribeLanguageCode || 'ja').trim().toLowerCase()
+  return language.split('-')[0] === 'en'
+    ? { sourceLabel: '英語', targetLabel: '日本語' }
+    : { sourceLabel: '日本語', targetLabel: '英語' }
+}
+
 export type GlossaryGenerationProgressEvent = {
   step: 'chunk_start' | 'api_response' | 'chunk_done' | 'theme_done'
   chunkIndex: number
@@ -639,16 +657,18 @@ recall を precision より優先してください。判定に迷ったら抽�
 
 判定に迷ったら抽出する。一般語かどうかの判定はしない。`
 
-const ABSOLUTE_RULES = `絶対に守ること:
+function buildAbsoluteRules(direction: GlossaryLanguageDirection): string {
+  return `絶対に守ること:
 - 翻訳はしない。PDF に存在しない訳語を補わない
 - 推測で値を作らない。PDF に書かれていない情報は空欄にする
 - ja は source 側表記、en は target 側表記を格納する内部互換フィールド
-- 現行運用では source=日本語、target=英語。PDF に実在する source/target 表記のみ入れる
+- 今回の運用では source=${direction.sourceLabel}、target=${direction.targetLabel}。PDF に実在する source/target 表記のみ入れる
 - どちらか一方が PDF に書かれていない場合、そのフィールドは空文字、対応 Source は "missing"
 - jaSource / enSource は "document" | "vision" | "llm_inferred" | "missing" のいずれかにする
 - llmClaimedSource は監査用メタデータです。本文だけで確認したなら "document_text"、ページ画像で補ったなら "page_image"、不明なら "unknown"
 - llmClaimedSource の判定のために候補品質を落とさない。本文と画像の両方を見て、正しい候補を優先する
 - JSON のみを返す`
+}
 
 const FORMULA_NOTATION_RULES = `数式・記号 (category="formula") の表記ルール:
 - displayText: 人間が見て分かる Unicode + ^/_ 記法
@@ -673,8 +693,9 @@ function buildCandidatePrompt(
   useVision: boolean,
   maxChars: number,
   themeContext: string,
+  direction: GlossaryLanguageDirection,
 ): string {
-  return `以下の PDF 資料から、字幕の書き起こし修正・英訳修正に役立つ「専門用語候補」を抽出してください。
+  return `以下の PDF 資料から、字幕の書き起こし修正・訳文修正に役立つ「専門用語候補」を抽出してください。
 完成した辞書 entry を作るタスクではありません。recall 重視で、迷ったら抽出してください。
 
 文書名: ${document.source.name}
@@ -684,7 +705,7 @@ ${CATEGORY_GUIDE}
 
 ${EXTRACTION_RULES}
 
-${ABSOLUTE_RULES}
+${buildAbsoluteRules(direction)}
 
 ${FORMULA_NOTATION_RULES}
 
@@ -692,7 +713,7 @@ ${FORMULA_NOTATION_RULES}
 - 1 候補は text/category/page/snippet を基本とする
 - ja/en/formula/displayText は PDF 上で明確に分かる場合のみ短く入れる。片方が無くてもよい
 - abbreviation は SGD / GPU / TPU のような略語そのものだけに使う。Optimizer / Deep Learning / Regularization のような英語用語を abbreviation にしない
-- 「日本語のみ候補」と「英語のみ候補」が同じ箇所で同一概念を指す場合、別候補にせず 1 候補にまとめる
+- 「${direction.sourceLabel}のみ候補」と「${direction.targetLabel}のみ候補」が同じ箇所で同一概念を指す場合、別候補にせず 1 候補にまとめる
 - 章題・節題そのもの (例: 「Transformer基礎」「深層学習と画像認識」) は候補に入れてよいが、できれば含まれる単独の専門語 (例: 「Transformer」「深層学習」) を別候補として出すこと
 - llmClaimedSource は監査メタデータ。本文だけで確認したなら "document_text"、ページ画像で補ったなら "page_image"、不明なら "unknown"
 - desc, note, reviewReason, spokenJa, spokenEn, domain, references はこの段でも次段でも出さない
@@ -726,8 +747,9 @@ function buildCandidateUserContent(
   useVision: boolean,
   maxChars: number,
   themeContext: string,
+  direction: GlossaryLanguageDirection,
 ): ChatMessageContent {
-  const prompt = buildCandidatePrompt(document, pages, useVision, maxChars, themeContext)
+  const prompt = buildCandidatePrompt(document, pages, useVision, maxChars, themeContext, direction)
   if (!useVision) return prompt
 
   const content: Exclude<ChatMessageContent, string> = [{ type: 'text', text: prompt }]
@@ -742,6 +764,7 @@ function buildDetailPrompt(
   document: ExtractedPdfDocument,
   candidates: NormalizedGlossaryCandidate[],
   themeContext: string,
+  direction: GlossaryLanguageDirection,
 ): string {
   return `以下の候補を、字幕補正用の専門用語候補 JSON に展開してください。
 完成した辞書 entry ではなく、補正prompt に渡すための候補一覧です。
@@ -751,7 +774,7 @@ function buildDetailPrompt(
 ${themeContext ? `${themeContext}\n` : ''}
 ${CATEGORY_GUIDE}
 
-${ABSOLUTE_RULES}
+${buildAbsoluteRules(direction)}
 
 ${FORMULA_NOTATION_RULES}
 
@@ -1890,7 +1913,7 @@ async function runCandidateExtractionAttempt(
       },
       {
         role: 'user',
-        content: buildCandidateUserContent(document, pages, useVision, maxChars, themeContext),
+        content: buildCandidateUserContent(document, pages, useVision, maxChars, themeContext, resolveGlossaryLanguageDirection(settings)),
       },
     ],
   })
@@ -2080,7 +2103,7 @@ async function requestDetailBatch(
       },
       {
         role: 'user',
-        content: buildDetailPrompt(document, candidates, themeContext),
+        content: buildDetailPrompt(document, candidates, themeContext, resolveGlossaryLanguageDirection(settings)),
       },
     ],
   })
