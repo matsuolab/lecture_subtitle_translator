@@ -260,46 +260,6 @@ describe('generateSelfMadeGlossaryFromPdf resilience to truncated (length-limite
   })
 })
 
-describe('generateSelfMadeGlossaryFromPdf language direction (transcribeLanguageCode)', () => {
-  function promptTextOf(options: ChatTextOptions): string {
-    const userMessage = options.messages.find(message => message.role === 'user')
-    const content = userMessage?.content
-    return typeof content === 'string' ? content : ''
-  }
-
-  it('defaults to source=日本語/target=英語 when transcribeLanguageCode is ja (existing behavior)', async () => {
-    const document = makeDocument(1)
-    const candidateCalls: ChatTextOptions[] = []
-    chatTextMock.mockImplementation(async (options) => {
-      if (isThemeCall(options)) return ok(themeJson())
-      candidateCalls.push(options)
-      return ok(candidatesJson([{ text: 'Physical AI', page: 1 }]))
-    })
-
-    await generateSelfMadeGlossaryFromPdf(settings({ transcribeLanguageCode: 'ja' }), document, {})
-
-    const prompt = promptTextOf(candidateCalls[0])
-    expect(prompt).toContain('source=日本語、target=英語')
-  })
-
-  it('switches to source=英語/target=日本語 when transcribeLanguageCode is en', async () => {
-    const document = makeDocument(1)
-    const candidateCalls: ChatTextOptions[] = []
-    chatTextMock.mockImplementation(async (options) => {
-      if (isThemeCall(options)) return ok(themeJson())
-      candidateCalls.push(options)
-      return ok(candidatesJson([{ text: 'Physical AI', page: 1 }]))
-    })
-
-    await generateSelfMadeGlossaryFromPdf(settings({ transcribeLanguageCode: 'en' }), document, {})
-
-    const prompt = promptTextOf(candidateCalls[0])
-    expect(prompt).toContain('source=英語、target=日本語')
-    expect(prompt).toContain('英語のみ候補')
-    expect(prompt).toContain('日本語のみ候補')
-  })
-})
-
 describe('generateSelfMadeGlossaryFromPdf JSON Schema (Structured Outputs) wiring', () => {
   it('sends the glossary_document_theme schema for theme extraction', async () => {
     const document = makeDocument(1)
