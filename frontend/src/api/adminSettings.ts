@@ -408,7 +408,11 @@ export function loadAdminSettings(): AdminSettings {
 }
 
 export function saveAdminSettings(settings: AdminSettings): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeAdminSettings(settings)))
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeAdminSettings(settings)))
+  } catch {
+    // localStorage が使えない環境では無視（設定はメモリ上のstateのみ反映）
+  }
 }
 
 function resolveSharedSettingsExcludedFields(options: SharedAdminSettingsExportOptions = {}): Array<keyof AdminSettings> {

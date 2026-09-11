@@ -170,7 +170,11 @@ export function SettingsTab({
         .map((m) => m.id)
         .sort()
       setAvailableModels(ids)
-      localStorage.setItem('subtitle-editor.available-models', JSON.stringify(ids))
+      try {
+        localStorage.setItem('subtitle-editor.available-models', JSON.stringify(ids))
+      } catch {
+        // localStorage が使えない環境では無視（一覧はメモリ上のstateのみ反映）
+      }
       if (isLocalOpenAiProvider && ids.length === 1) {
         const modelId = ids[0]
         onAdminSettingsChange({
