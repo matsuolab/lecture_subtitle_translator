@@ -16,13 +16,21 @@ const ThemeContext = createContext<ThemeContextValue>({
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setTheme] = useState<Theme>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY) as ThemeId | null
-    return themes.find(t => t.id === saved) ?? defaultTheme
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY) as ThemeId | null
+      return themes.find(t => t.id === saved) ?? defaultTheme
+    } catch {
+      return defaultTheme
+    }
   })
 
   const setThemeId = (id: ThemeId) => {
     const t = themes.find(t => t.id === id) ?? defaultTheme
-    localStorage.setItem(STORAGE_KEY, id)
+    try {
+      localStorage.setItem(STORAGE_KEY, id)
+    } catch {
+      // localStorage が使えない環境では無視（設定はメモリ上のstateのみ反映）
+    }
     setTheme(t)
   }
 

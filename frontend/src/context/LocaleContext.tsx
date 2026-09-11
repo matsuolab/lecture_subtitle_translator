@@ -16,14 +16,22 @@ const LocaleContext = createContext<LocaleContextValue>({
 
 export function LocaleProvider({ children }: { children: React.ReactNode }) {
   const [strings, setStrings] = useState<LocaleStrings>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    return locales.find(l => l.id === saved) ?? defaultLocale
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY)
+      return locales.find(l => l.id === saved) ?? defaultLocale
+    } catch {
+      return defaultLocale
+    }
   })
 
   const setLocaleId = (id: string) => {
     const locale = locales.find(l => l.id === id)
     if (!locale) return
-    localStorage.setItem(STORAGE_KEY, id)
+    try {
+      localStorage.setItem(STORAGE_KEY, id)
+    } catch {
+      // localStorage が使えない環境では無視（設定はメモリ上のstateのみ反映）
+    }
     setStrings(locale)
   }
 
