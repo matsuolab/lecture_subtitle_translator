@@ -630,12 +630,15 @@ export default function App() {
   // OSのリサイズハンドルはmouseupが取れないためデバウンスで対応
   //
   // 従来はDOMの window 'resize' イベントのみを監視していたが、診断ログでの
-  // 実機検証（Windows/WebView2）で、OSのウィンドウ最大化解除操作に対して
-  // DOM resizeイベントが一度も発火せず、Tauriネイティブの
-  // getCurrentWindow().onResized（Rust側WindowEvent::Resized由来）のみが
-  // 発火するケースが実際に確認された。この環境ではDOM resize依存の実装は
-  // 「ウィンドウの最大化解除では重い描画の一時停止が一切機能しない」という
-  // 実害のあるバグになっていたため、両方を監視するよう修正する。
+  // 実機検証（Windows/WebView2）で、あるユーザー操作に対しDOM resizeイベントが
+  // 一度も発火せず、Tauriネイティブの getCurrentWindow().onResized（Rust側
+  // WindowEvent::Resized由来）のみが発火するケースが確認された
+  // （そのログ自体はウィンドウの実サイズを記録しておらず、実際にリサイズを
+  // 伴う操作だったかは未確定 — useVideoSync.ts の video_state_snapshot に
+  // windowSize記録を追加済みなので、次回ログで裏付けを確認する）。
+  // 少なくとも「DOM resizeに一切頼らずTauriネイティブイベントも拾う」こと
+  // 自体はWebView実装依存のリスクに対する保険として妥当なため、この修正は
+  // 先に入れておく。
   const [isResizing, setIsResizing] = useState(false)
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 

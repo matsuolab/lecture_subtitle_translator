@@ -133,8 +133,11 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
   // 監視する。WebView2/WKWebView/WebKitGTKがOSのウィンドウ最大化解除を
   // DOM resizeとして伝播するタイミング・確実性はランタイム実装依存であり
   // 保証されていないため、片方しか発火しない場合にそれ自体が重要な手がかりに
-  // なる（例: nativeのみ発火・domが来ない、なら「WebViewのビューポート更新が
-  // 遅延/欠落している」ことの直接証拠になる）。
+  // なりうる。ただし onResized はウィンドウ移動等サイズ変化を伴わない場合にも
+  // 発火することがあるため、「発火の有無」だけでは実際にリサイズされたかを
+  // 断定できない。windowSize（onResizedのPhysicalSizeペイロード）を
+  // start/settledそれぞれに記録し、実サイズが変化したかを直接確認できる
+  // ようにしている。
   useEffect(() => {
     if (!videoUrl) return
     // dom/tauri_native はほぼ同時に発火しうるため、settledのデバウンスタイマーを
