@@ -15,8 +15,9 @@ export function isDiagnosticLogPersistent(): boolean {
   return isTauri()
 }
 
-/** 既定の保管場所: <appLocalDataDir>/diagnostics */
+/** 既定の保管場所: <appLocalDataDir>/diagnostics（非Tauri実行時はプレースホルダ、実ファイルには使わない） */
 export async function resolveDiagnosticLogDir(): Promise<string> {
+  if (!isTauri()) return DIAGNOSTICS_SUBDIR
   const { appLocalDataDir, join } = await import('@tauri-apps/api/path')
   return join(await appLocalDataDir(), DIAGNOSTICS_SUBDIR)
 }
