@@ -6,6 +6,11 @@ import { ThemeProvider } from '@/context/ThemeContext'
 import { LocaleProvider } from '@/context/LocaleContext'
 import { GlossaryProvider } from '@/context/GlossaryContext'
 import { ToastProvider } from '@/context/ToastContext'
+import { installDiagnosticLogging } from '@/lib/diagnostics/logger'
+
+// console.error/warn をラップするため、他の初期化より前に呼ぶ。
+// 以降の全ての console.error/warn 呼び出し（このファイル自身の呼び出しも含む）が対象になる。
+installDiagnosticLogging()
 
 type StartupErrorState = {
   error: Error | null

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PipelineRunResult } from '@/types/pipeline'
+
+const { logDiagnosticEventMock } = vi.hoisted(() => ({ logDiagnosticEventMock: vi.fn() }))
+vi.mock('@/lib/diagnostics/logger', () => ({
+  logDiagnosticEvent: logDiagnosticEventMock,
+}))
+
 import {
   loadSessionSnapshotFromLocalStorage,
   reconcileRestoredPipelineRun,
@@ -174,5 +180,43 @@ describe('loadSessionSnapshotFromLocalStorage', () => {
     getItemSpy.mockClear()
     saveToLocalStorage([{ ...blocks[0], subtitle: 'b' }])
     expect(getItemSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('setItem失敗時にstorage_errorとしてerror.nameを診断ログへ記録する', () => {
+    installFakeLocalStorage()
+    logDiagnosticEventMock.mockClear()
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => { throw new DOMException('quota', 'QuotaExceededError') },
+      removeItem: () => {},
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    })
+
+    const blocks = [{
+      id: 1, startTime: 0, endTime: 1, subtitle: 'a', transcript: 'あ',
+      cps: 1, charCount: 1, status: 'pending' as const, glossaryTerms: [],
+    }]
+    const result = saveToLocalStorage(blocks)
+
+    expect(result.ok).toBe(false)
+    expect(logDiagnosticEventMock).toHaveBeenCalledWith(
+      'storage_error',
+      expect.stringContaining('QuotaExceededError'),
+      expect.objectContaining({ blockCount: 1 }),
+    )
+  })
+
+  it('setItem成功時は診断ログを記録しない（毎秒のオートセーブでノイズにしないため）', () => {
+    installFakeLocalStorage()
+    logDiagnosticEventMock.mockClear()
+
+    saveToLocalStorage([{
+      id: 1, startTime: 0, endTime: 1, subtitle: 'a', transcript: 'あ',
+      cps: 1, charCount: 1, status: 'pending' as const, glossaryTerms: [],
+    }])
+
+    expect(logDiagnosticEventMock).not.toHaveBeenCalled()
   })
 })
