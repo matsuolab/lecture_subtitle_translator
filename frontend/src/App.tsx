@@ -30,6 +30,8 @@ import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/
 import { abortCurrentPipeline, isPipelineAbortedError } from '@/lib/pipeline/pipelineAbort'
 import { describeError } from '@/lib/describeError'
 import { buildMacAssetUrl } from '@/lib/video/macAssetUrl'
+import { logDiagnosticEvent } from '@/lib/diagnostics/logger'
+import { collectEnvironmentSnapshot } from '@/lib/diagnostics/environment'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecord, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunResult } from '@/types/pipeline'
@@ -1719,17 +1721,52 @@ export default function App() {
       videoFileRef.current?.click()
       return
     }
+    // 「クリックしても数分待たないとダイアログが開かない」調査用。
+    // moduleLoadMs（動的importのコスト）とdialogOpenToSelectMs（open()呼び出しの
+    // 開始からPromiseが解決するまで）を分けて計測する。ただし dialogOpenToSelectMs
+    // は「ダイアログが実際に画面に表示されるまでの待ち時間」と「ユーザーがファイル
+    // を選ぶ/操作する時間」の合算であり、JS側からは両者を区別する手段がない
+    // （open()のPromiseはユーザーの選択完了まで解決しない）。そのため
+    // dialogOpenToSelectMs が大きいこと単体ではアプリ起因と断定できない。
+    // 一方 moduleLoadMs が大きい場合はクリック直後のバンドル読み込み側の問題と
+    // 断定できるため、まずはそこを切り分けの主軸にする。加えてダイアログ表示中に
+    // メインスレッドが固まっていないかは、この間に記録される long_task イベントと
+    // 突き合わせて確認する。PCスペック起因かの判断材料として環境情報も付与する。
+    //
+    // クリック直後に即 started を記録するのは、import() や open() 自体が長時間
+    // 応答しない（フリーズする）場合、完了イベントが一切記録されないため。
+    // started はあるのに対応する completed/failed が無いランは、
+    // 「開いたが固まって戻ってこない」ことの直接証拠になる。
+    const clickedAt = Date.now()
+    logDiagnosticEvent('dialog_open_timing', 'video file dialog started', {
+      env: collectEnvironmentSnapshot(),
+    })
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
+      const moduleLoadedAt = Date.now()
       const selected = await open({
         multiple: false,
         directory: false,
         filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi'] }],
       })
+      const dialogClosedAt = Date.now()
+      logDiagnosticEvent('dialog_open_timing', 'video file dialog completed', {
+        moduleLoadMs: moduleLoadedAt - clickedAt,
+        // ダイアログ表示待ち + ユーザーの選択操作時間の合算（分離不可、上記コメント参照）
+        dialogOpenToSelectMs: dialogClosedAt - moduleLoadedAt,
+        totalMs: dialogClosedAt - clickedAt,
+        selected: typeof selected === 'string' && selected.length > 0,
+        env: collectEnvironmentSnapshot(),
+      })
       if (typeof selected === 'string' && selected) {
         handleVideoPathInput(selected)
       }
     } catch (err) {
+      logDiagnosticEvent('dialog_open_timing', 'video file dialog failed', {
+        totalMs: Date.now() - clickedAt,
+        error: err instanceof Error ? err.message : String(err),
+        env: collectEnvironmentSnapshot(),
+      })
       console.error('failed to open video dialog', err)
       videoFileRef.current?.click()
     }
@@ -2254,6 +2291,51 @@ export default function App() {
         progress: ((currentTime - currentBlock.startTime) / Math.max(0.01, currentBlock.endTime - currentBlock.startTime)) * 100,
       }
     : null
+
+  // 「全画面から戻すと字幕が消える」調査用: 再生中のはずなのに字幕オーバーレイ
+  // （currentBlock）が見つからない状態を記録する。
+  //
+  // isResizing はDOMの window 'resize' イベントのみに依存する（既存機能、右
+  // パネルの重い描画停止用）。一方 useVideoSync.ts 側では、DOM resizeが
+  // 発火しない/遅延するケースを疑いTauriネイティブのonResizedも監視している。
+  // もし実際にDOM resizeが来ずnativeのみ発火するケースがあるなら、isResizing
+  // ベースのこの記録は「最も疑わしいケースでこそトリガーされない」という
+  // 矛盾を抱える。そのため、リサイズイベントへの直接フックではなく、
+  // 「再生中のはずなのに字幕オーバーレイが無い」状態を独立して定期監視する
+  // 方式にし、DOM/native どちらのリサイズ経路が原因でも検知できるようにする。
+  // 原因がリサイズであることの裏付けは、このイベントのタイムスタンプと
+  // useVideoSync側のvideo_state_snapshot（source: dom/tauri_native）の
+  // タイムスタンプ近接性から推測する。
+  //
+  // 動画の冒頭・末尾（もともと字幕ブロックが存在しない区間）でも currentBlock
+  // は undefined になり、これは正常な動作であって不具合ではない。誤検知として
+  // 除外することも考えたが、除外すると本当にノイズなのか実は境界ケースの
+  // 不具合なのかを後から判別する材料が失われる。そのため記録自体は絞り込まず、
+  // 「直前まで表示されていた字幕が消えたのか（wasShowingJustBefore: true）」
+  // を detail に含め、ログを読む側で正常区間と異常区間を区別できるようにする。
+  const missingOverlayLoggedRef = useRef(false)
+  const hadCurrentBlockRef = useRef(false)
+  useEffect(() => {
+    if (!isPlaying) {
+      missingOverlayLoggedRef.current = false
+      hadCurrentBlockRef.current = currentBlock !== undefined
+      return
+    }
+    if (currentBlock === undefined) {
+      if (!missingOverlayLoggedRef.current) {
+        missingOverlayLoggedRef.current = true
+        logDiagnosticEvent('video_state_snapshot', 'subtitle overlay missing while playing', {
+          hasVideoElement: videoRef.current != null,
+          paused: videoRef.current?.paused ?? null,
+          currentTime,
+          wasShowingJustBefore: hadCurrentBlockRef.current,
+        })
+      }
+    } else {
+      missingOverlayLoggedRef.current = false
+    }
+    hadCurrentBlockRef.current = currentBlock !== undefined
+  }, [isPlaying, currentBlock, currentTime, videoRef])
 
   const approvedCount = blocks.filter(b => b.status === 'approved').length
 
