@@ -57,9 +57,9 @@ export function saveToLocalStorage(blocks: SubtitleBlock[]): RecoverySaveResult 
       savedAt: new Date().toISOString(),
       blocks,
       session: loaded.snapshot.session,
-    })
+    }, loaded)
   }
-  return store.save({ savedAt: new Date().toISOString(), blocks })
+  return store.save({ savedAt: new Date().toISOString(), blocks }, loaded)
 }
 
 export function saveSessionSnapshotToLocalStorage(data: SessionExportData): RecoverySaveResult {
