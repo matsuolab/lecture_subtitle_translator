@@ -30,6 +30,8 @@ import { hasPipelineApi, runPipelineViaApi, testServiceConnection } from '@/api/
 import { abortCurrentPipeline, isPipelineAbortedError } from '@/lib/pipeline/pipelineAbort'
 import { describeError } from '@/lib/describeError'
 import { buildMacAssetUrl } from '@/lib/video/macAssetUrl'
+import { logDiagnosticEvent } from '@/lib/diagnostics/logger'
+import { collectEnvironmentSnapshot } from '@/lib/diagnostics/environment'
 import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineLlmErrorRecord, PipelineLlmUsageRecord, PipelineNodeTrace, PipelineProgressEvent, PipelineReviewItem, PipelineRunDebug, PipelineRunResult } from '@/types/pipeline'
@@ -1719,17 +1721,44 @@ export default function App() {
       videoFileRef.current?.click()
       return
     }
+    // 「クリックしても数分待たないとダイアログが開かない」調査用。
+    // moduleLoadMs（動的importのコスト）とdialogOpenToSelectMs（open()呼び出しの
+    // 開始からPromiseが解決するまで）を分けて計測する。ただし dialogOpenToSelectMs
+    // は「ダイアログが実際に画面に表示されるまでの待ち時間」と「ユーザーがファイル
+    // を選ぶ/操作する時間」の合算であり、JS側からは両者を区別する手段がない
+    // （open()のPromiseはユーザーの選択完了まで解決しない）。そのため
+    // dialogOpenToSelectMs が大きいこと単体ではアプリ起因と断定できない。
+    // 一方 moduleLoadMs が大きい場合はクリック直後のバンドル読み込み側の問題と
+    // 断定できるため、まずはそこを切り分けの主軸にする。加えてダイアログ表示中に
+    // メインスレッドが固まっていないかは、この間に記録される long_task イベントと
+    // 突き合わせて確認する。PCスペック起因かの判断材料として環境情報も付与する。
+    const clickedAt = Date.now()
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
+      const moduleLoadedAt = Date.now()
       const selected = await open({
         multiple: false,
         directory: false,
         filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi'] }],
       })
+      const dialogClosedAt = Date.now()
+      logDiagnosticEvent('dialog_open_timing', 'video file dialog', {
+        moduleLoadMs: moduleLoadedAt - clickedAt,
+        // ダイアログ表示待ち + ユーザーの選択操作時間の合算（分離不可、上記コメント参照）
+        dialogOpenToSelectMs: dialogClosedAt - moduleLoadedAt,
+        totalMs: dialogClosedAt - clickedAt,
+        selected: typeof selected === 'string' && selected.length > 0,
+        env: collectEnvironmentSnapshot(),
+      })
       if (typeof selected === 'string' && selected) {
         handleVideoPathInput(selected)
       }
     } catch (err) {
+      logDiagnosticEvent('dialog_open_timing', 'video file dialog failed', {
+        totalMs: Date.now() - clickedAt,
+        error: err instanceof Error ? err.message : String(err),
+        env: collectEnvironmentSnapshot(),
+      })
       console.error('failed to open video dialog', err)
       videoFileRef.current?.click()
     }
@@ -2254,6 +2283,26 @@ export default function App() {
         progress: ((currentTime - currentBlock.startTime) / Math.max(0.01, currentBlock.endTime - currentBlock.startTime)) * 100,
       }
     : null
+
+  // 「全画面から戻すと字幕が消える」調査用: リサイズが確定した瞬間（isResizingが
+  // true→falseに変わった直後）に、字幕オーバーレイが実際に表示可能な状態か
+  // （subtitleOverlayの有無そのもの）を記録する。useVideoSyncのtimeupdate_stalled
+  // は「currentTimeの更新が止まったか」を見るが、これはその結果として実際に
+  // 字幕が消えたかどうかを直接裏付ける。
+  const prevIsResizingRef = useRef(isResizing)
+  useEffect(() => {
+    if (prevIsResizingRef.current && !isResizing) {
+      // subtitleOverlay はオブジェクトで毎レンダー再生成されるため依存に使わず、
+      // currentBlock の有無（= subtitleOverlay が非nullになる条件と同一）で代用する。
+      logDiagnosticEvent('video_state_snapshot', 'resize settled (subtitle overlay check)', {
+        hasVideoElement: videoRef.current != null,
+        paused: videoRef.current?.paused ?? null,
+        currentTime,
+        hasCurrentBlock: currentBlock !== undefined,
+      })
+    }
+    prevIsResizingRef.current = isResizing
+  }, [isResizing, currentBlock, currentTime, videoRef])
 
   const approvedCount = blocks.filter(b => b.status === 'approved').length
 

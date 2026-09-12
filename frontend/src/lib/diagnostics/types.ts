@@ -19,6 +19,9 @@ export type DiagnosticEventType =
   | 'pipeline_node_completed'
   | 'pipeline_run_completed'
   | 'pipeline_run_failed'
+  | 'video_state_snapshot'
+  | 'timeupdate_stalled'
+  | 'dialog_open_timing'
 
 export interface DiagnosticHeader {
   kind: 'header'
