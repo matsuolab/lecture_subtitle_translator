@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { isTauri } from '@tauri-apps/api/core'
 import type { SubtitleBlock } from '@/types/subtitle'
 import { logDiagnosticEvent } from '@/lib/diagnostics/logger'
 import { collectEnvironmentSnapshot } from '@/lib/diagnostics/environment'
@@ -114,26 +115,67 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
   // 引き起こしているかを、リサイズ直前直後のスナップショット差分から追える
   // ようにする。deviceの性能限界かアプリ側ロジックかの切り分けが目的なので、
   // detailに実行環境スナップショットも付与する。
+  //
+  // DOM の window 'resize' イベントに加え、Tauriネイティブの
+  // getCurrentWindow().onResized（Rust側 WindowEvent::Resized 由来）も併せて
+  // 監視する。WebView2/WKWebView/WebKitGTKがOSのウィンドウ最大化解除を
+  // DOM resizeとして伝播するタイミング・確実性はランタイム実装依存であり
+  // 保証されていないため、片方しか発火しない場合にそれ自体が重要な手がかりに
+  // なる（例: nativeのみ発火・domが来ない、なら「WebViewのビューポート更新が
+  // 遅延/欠落している」ことの直接証拠になる）。
   useEffect(() => {
     if (!videoUrl) return
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null
-    const handleResize = () => {
-      logDiagnosticEvent('video_state_snapshot', 'resize start', {
+    // dom/tauri_native はほぼ同時に発火しうるため、settledのデバウンスタイマーを
+    // sourceごとに独立させる。共有タイマーだと後発イベントが先発イベントの
+    // settled記録を握りつぶし、実際は両方発火していても片方しか記録されない
+    // （＝「片方しか発火しない」という誤った手がかりを残す）ことになる。
+    const debounceTimers: Record<'dom' | 'tauri_native', ReturnType<typeof setTimeout> | null> = {
+      dom: null,
+      tauri_native: null,
+    }
+    const handleResize = (source: 'dom' | 'tauri_native') => {
+      logDiagnosticEvent('video_state_snapshot', `resize start (${source})`, {
+        source,
         ...snapshotVideoState(videoRef.current, isPlayingRef.current),
         env: collectEnvironmentSnapshot(),
       })
-      if (debounceTimer) clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(() => {
-        logDiagnosticEvent('video_state_snapshot', 'resize settled', {
+      if (debounceTimers[source]) clearTimeout(debounceTimers[source])
+      debounceTimers[source] = setTimeout(() => {
+        logDiagnosticEvent('video_state_snapshot', `resize settled (${source})`, {
+          source,
           ...snapshotVideoState(videoRef.current, isPlayingRef.current),
           env: collectEnvironmentSnapshot(),
         })
       }, 500)
     }
-    window.addEventListener('resize', handleResize)
+    const handleDomResize = () => handleResize('dom')
+    window.addEventListener('resize', handleDomResize)
+
+    // onResizedの購読はPromiseベースで非同期に確立するため、確立前に
+    // effectがクリーンアップされる（videoUrlの連続変更等）競合がありうる。
+    // その場合、確立後に登録してもすぐ解除できるよう cancelled で判定する。
+    let unlistenNative: (() => void) | null = null
+    let cancelled = false
+    if (isTauri()) {
+      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+        return getCurrentWindow().onResized(() => handleResize('tauri_native'))
+      }).then((unlisten) => {
+        if (cancelled) {
+          unlisten()
+        } else {
+          unlistenNative = unlisten
+        }
+      }).catch(() => {
+        // Tauriネイティブのイベント購読に失敗してもDOM resize側の監視は継続する
+      })
+    }
+
     return () => {
-      window.removeEventListener('resize', handleResize)
-      if (debounceTimer) clearTimeout(debounceTimer)
+      cancelled = true
+      window.removeEventListener('resize', handleDomResize)
+      if (debounceTimers.dom) clearTimeout(debounceTimers.dom)
+      if (debounceTimers.tauri_native) clearTimeout(debounceTimers.tauri_native)
+      unlistenNative?.()
     }
   }, [videoUrl])
 

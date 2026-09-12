@@ -1732,7 +1732,15 @@ export default function App() {
     // 断定できるため、まずはそこを切り分けの主軸にする。加えてダイアログ表示中に
     // メインスレッドが固まっていないかは、この間に記録される long_task イベントと
     // 突き合わせて確認する。PCスペック起因かの判断材料として環境情報も付与する。
+    //
+    // クリック直後に即 started を記録するのは、import() や open() 自体が長時間
+    // 応答しない（フリーズする）場合、完了イベントが一切記録されないため。
+    // started はあるのに対応する completed/failed が無いランは、
+    // 「開いたが固まって戻ってこない」ことの直接証拠になる。
     const clickedAt = Date.now()
+    logDiagnosticEvent('dialog_open_timing', 'video file dialog started', {
+      env: collectEnvironmentSnapshot(),
+    })
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
       const moduleLoadedAt = Date.now()
@@ -1742,7 +1750,7 @@ export default function App() {
         filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi'] }],
       })
       const dialogClosedAt = Date.now()
-      logDiagnosticEvent('dialog_open_timing', 'video file dialog', {
+      logDiagnosticEvent('dialog_open_timing', 'video file dialog completed', {
         moduleLoadMs: moduleLoadedAt - clickedAt,
         // ダイアログ表示待ち + ユーザーの選択操作時間の合算（分離不可、上記コメント参照）
         dialogOpenToSelectMs: dialogClosedAt - moduleLoadedAt,
