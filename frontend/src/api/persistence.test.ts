@@ -151,4 +151,28 @@ describe('loadSessionSnapshotFromLocalStorage', () => {
     expect(restored?.session?.pipelineHistory?.[0]?.runId).toBe('run-0')
     expect(restored?.session?.activeWorkLogSessionId).toBe('work-1')
   })
+
+  it('saveToLocalStorageは1回のオートセーブでgetItemを1回しか呼ばない', () => {
+    const store = installFakeLocalStorage()
+    const getItemSpy = vi.fn((key: string) => store.get(key) ?? null)
+    vi.stubGlobal('localStorage', {
+      getItem: getItemSpy,
+      setItem: (key: string, value: string) => { store.set(key, value) },
+      removeItem: (key: string) => { store.delete(key) },
+      clear: () => { store.clear() },
+      key: () => null,
+      length: 0,
+    })
+
+    const blocks = [{
+      id: 1, startTime: 0, endTime: 1, subtitle: 'a', transcript: 'あ',
+      cps: 1, charCount: 1, status: 'pending' as const, glossaryTerms: [],
+    }]
+    saveToLocalStorage(blocks)
+    expect(getItemSpy).toHaveBeenCalledTimes(1)
+
+    getItemSpy.mockClear()
+    saveToLocalStorage([{ ...blocks[0], subtitle: 'b' }])
+    expect(getItemSpy).toHaveBeenCalledTimes(1)
+  })
 })

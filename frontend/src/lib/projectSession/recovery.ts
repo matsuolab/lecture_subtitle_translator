@@ -177,8 +177,13 @@ export class LocalStorageRecoveryStore {
     return raw === null ? { status: 'empty' } : decodeRecoverySnapshot(raw)
   }
 
-  save(input: RecoverySnapshotInput): RecoverySaveResult {
-    const loaded = this.load()
+  /**
+   * preloaded を渡すと自前の load() を省略できる。呼び出し側が直前に load() 済みの
+   * 場合（例: saveToLocalStorage が既存 session を引き継ぐために読んでいる場合）に、
+   * 同じ内容を getItem/JSON.parse し直す無駄をなくすためのもの。
+   */
+  save(input: RecoverySnapshotInput, preloaded?: RecoveryLoadResult): RecoverySaveResult {
+    const loaded = preloaded ?? this.load()
     if (loaded.status === 'unsupported_newer') {
       return {
         ok: false,
