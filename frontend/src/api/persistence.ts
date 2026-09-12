@@ -4,6 +4,7 @@ import type { PipelineRunResult } from '@/types/pipeline'
 import type { WorkLogExport } from '@/lib/worklog/types'
 import { normalizeSubtitleText, parseTextNormalizationConfig } from '@/lib/pipeline/textNormalization'
 import { calculateRoundedCps, countCpsChars } from '@/lib/subtitleMetrics'
+import { logDiagnosticEvent } from '@/lib/diagnostics/logger'
 import {
   LocalStorageRecoveryStore,
   createRecoverySnapshotInput,
@@ -48,22 +49,37 @@ function recoveryStore(): LocalStorageRecoveryStore {
   return new LocalStorageRecoveryStore(localStorage)
 }
 
+/**
+ * 失敗時にだけ診断ログへ記録する。成功時は毎秒走るオートセーブのノイズになるため記録しない。
+ * error.name（QuotaExceededError等）を残すのが目的 —
+ * 従来は saveStatus='error' 表示のみで、失敗の種類はどこにも残らなかった。
+ */
+function logIfSaveFailed(result: RecoverySaveResult, blocks: SubtitleBlock[]): RecoverySaveResult {
+  if (!result.ok) {
+    logDiagnosticEvent('storage_error', `recovery save failed: ${result.error.name}`, {
+      errorMessage: result.error.message,
+      blockCount: blocks.length,
+    })
+  }
+  return result
+}
+
 /** blocks-only autosaveでも、直前の軽量sessionを必ず維持する。 */
 export function saveToLocalStorage(blocks: SubtitleBlock[]): RecoverySaveResult {
   const store = recoveryStore()
   const loaded = store.load()
   if (loaded.status === 'ok') {
-    return store.save({
+    return logIfSaveFailed(store.save({
       savedAt: new Date().toISOString(),
       blocks,
       session: loaded.snapshot.session,
-    }, loaded)
+    }, loaded), blocks)
   }
-  return store.save({ savedAt: new Date().toISOString(), blocks }, loaded)
+  return logIfSaveFailed(store.save({ savedAt: new Date().toISOString(), blocks }, loaded), blocks)
 }
 
 export function saveSessionSnapshotToLocalStorage(data: SessionExportData): RecoverySaveResult {
-  return recoveryStore().save(createRecoverySnapshotInput({
+  return logIfSaveFailed(recoveryStore().save(createRecoverySnapshotInput({
     savedAt: data.savedAt,
     blocks: data.blocks,
     videoSource: data.session?.videoSource,
@@ -72,7 +88,7 @@ export function saveSessionSnapshotToLocalStorage(data: SessionExportData): Reco
     pipelineHistory: data.session?.pipelineHistory,
     activeWorkLogSessionId: data.session?.activeWorkLogSessionId
       ?? data.session?.workLog?.header.sessionId,
-  }))
+  })), data.blocks)
 }
 
 export function loadFromLocalStorage(): SubtitleBlock[] | null {

@@ -35,6 +35,7 @@ import {
 } from '@/lib/pipeline/subtitleQualityPresets'
 import { tauriFetch } from '@/lib/tauriFetch'
 import { getWorkLogDir, isWorkLogPersistent, openWorkLogDir } from '@/lib/worklog/repository'
+import { isDiagnosticLogPersistent, openDiagnosticLogDir, resolveDiagnosticLogDir } from '@/lib/diagnostics/repository'
 import { isSupportedWhisperxLanguage, resolveTranscribeLanguageLabels, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
 
 
@@ -312,6 +313,15 @@ export function SettingsTab({
     try {
       const dir = await getWorkLogDir(adminSettings.workLogDir)
       await openWorkLogDir(dir)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'フォルダを開けませんでした。')
+    }
+  }
+
+  async function handleOpenDiagnosticLogDir() {
+    try {
+      const dir = await resolveDiagnosticLogDir()
+      await openDiagnosticLogDir(dir)
     } catch (err) {
       alert(err instanceof Error ? err.message : 'フォルダを開けませんでした。')
     }
@@ -1012,6 +1022,24 @@ export function SettingsTab({
             保管場所を変更すると、変更後の新しいセッションから新フォルダに保存されます（過去のログは移動しません）。
             {!isWorkLogPersistent() && ' ※ブラウザ実行のため、ワークログはメモリ保持のみ（リロードで消えます）。'}
           </div>
+        </FieldCard>
+
+        <FieldCard theme={theme}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: theme.textPrimary }}>診断ログ（動作不具合の調査用）</div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+            動作が重い・固まる等の不具合報告の際に、サポートへ送るためのログです。
+            起動から終了までのエラー・警告・処理遅延を記録します。通常は見る必要はありません。
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={handleOpenDiagnosticLogDir} style={smallButtonStyle(theme)}>
+              フォルダを開く
+            </button>
+          </div>
+          {!isDiagnosticLogPersistent() && (
+            <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
+              ※ブラウザ実行のため、診断ログはメモリ保持のみ（リロードで消えます）。
+            </div>
+          )}
         </FieldCard>
       </Section>
 
