@@ -45,6 +45,11 @@ function enqueue(line: DiagnosticLogLine): void {
   })
 }
 
+/** 現在実行中のランID（起動後、初回ログ前は null） */
+export function getCurrentDiagnosticRunId(): string | null {
+  return runId
+}
+
 /** 診断イベントを1行追記する。書き込みは直列化され、失敗してもアプリ本体を止めない。 */
 export function logDiagnosticEvent(
   type: DiagnosticEventType,

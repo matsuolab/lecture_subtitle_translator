@@ -15,6 +15,10 @@ export type DiagnosticEventType =
   | 'unhandled_rejection'
   | 'storage_error'
   | 'long_task'
+  | 'pipeline_run_started'
+  | 'pipeline_node_completed'
+  | 'pipeline_run_completed'
+  | 'pipeline_run_failed'
 
 export interface DiagnosticHeader {
   kind: 'header'

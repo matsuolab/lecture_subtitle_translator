@@ -3,6 +3,7 @@ import type { SubtitleBlock } from '@/types/subtitle'
 import type { AdminSettings } from '@/types/adminSettings'
 import type { PipelineAuditReport, PipelineNodeTrace, PipelineStageSnapshot } from '@/types/pipeline'
 import { resetLlmActivity } from '@/lib/aiGateway/llmActivity'
+import { logDiagnosticEvent } from '@/lib/diagnostics/logger'
 
 import type { PipelineThresholds } from './blockTypes'
 import { loadLanguageProfileConfig } from './languageProfileConfig'
@@ -193,6 +194,14 @@ export async function runLocalPostPipeline(
   // 前回実行のカウントが残らないよう、パイプライン開始時に必ずリセットする。
   resetLlmActivity()
 
+  // 診断ログはエラー発生時（console.error経由）にしか記録されず、正常終了した実行の
+  // 痕跡が一切残らなかった。成功/失敗に関わらずパイプラインの実行区間が分かるよう、
+  // 開始・各ノード完了・終了を記録する。
+  const runStartedAt = Date.now()
+  logDiagnosticEvent('pipeline_run_started', 'local pipeline started', {
+    segmentCount: transcriptSegments.length,
+  })
+
   const traces: PipelineNodeTrace[] = []
   const stageSnapshots: PipelineStageSnapshot[] = []
   const thresholds = buildPipelineThresholds(settings)
@@ -215,6 +224,7 @@ export async function runLocalPostPipeline(
     summary?: string,
   ): void => {
     traces.push({ nodeId, status, attempt: 1, durationMs, provider: 'local-ts', model: 'local', summary })
+    logDiagnosticEvent('pipeline_node_completed', nodeId, { status, durationMs, summary })
   }
 
   // summarize は任意。ノードの実行結果から「成功時のtrace summary」を取り出すための
@@ -287,6 +297,14 @@ export async function runLocalPostPipeline(
       .filter((block) => block.reviewPriority === 'auto_pass')
       .length
 
+    logDiagnosticEvent('pipeline_run_completed', 'local pipeline completed', {
+      durationMs: Date.now() - runStartedAt,
+      blockCount: phase3.blocks.length,
+      mustReviewCount,
+      shouldReviewCount,
+      autoPassCount,
+    })
+
     return {
       blocks: phase3.blocks,
       traces,
@@ -301,6 +319,9 @@ export async function runLocalPostPipeline(
       },
     }
   } catch (error) {
+    logDiagnosticEvent('pipeline_run_failed', error instanceof Error ? error.message : String(error), {
+      durationMs: Date.now() - runStartedAt,
+    })
     throw attachLocalPipelineDebugFailure(error, traces, stageSnapshots, sourceEvidence)
   }
 }
