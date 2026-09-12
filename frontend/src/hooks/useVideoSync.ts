@@ -145,9 +145,16 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
       dom: null,
       tauri_native: null,
     }
-    const handleResize = (source: 'dom' | 'tauri_native') => {
+    // 実際にサイズが変わったのか（ウィンドウ移動等サイズ変化を伴わない発火では
+    // ないか）を確認できるよう、イベントが運んできたウィンドウ実サイズも記録する。
+    // これが無いと、onResizedが発火した事実だけでは「本当にリサイズされたのか」
+    // 「サイズは変わらずイベントだけ発火したのか」を区別できない。
+    const handleResize = (source: 'dom' | 'tauri_native', windowSize?: { width: number; height: number }) => {
       logDiagnosticEvent('video_state_snapshot', `resize start (${source})`, {
         source,
+        windowSize,
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
         ...snapshotVideoState(videoRef.current, isPlayingRef.current),
         env: collectEnvironmentSnapshot(),
       })
@@ -155,6 +162,9 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
       debounceTimers[source] = setTimeout(() => {
         logDiagnosticEvent('video_state_snapshot', `resize settled (${source})`, {
           source,
+          windowSize,
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
           ...snapshotVideoState(videoRef.current, isPlayingRef.current),
           env: collectEnvironmentSnapshot(),
         })
@@ -170,7 +180,9 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
     let cancelled = false
     if (isTauri()) {
       import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-        return getCurrentWindow().onResized(() => handleResize('tauri_native'))
+        return getCurrentWindow().onResized((event) => {
+          handleResize('tauri_native', { width: event.payload.width, height: event.payload.height })
+        })
       }).then((unlisten) => {
         if (cancelled) {
           unlisten()
