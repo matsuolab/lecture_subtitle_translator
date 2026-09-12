@@ -22,6 +22,7 @@ export type DiagnosticEventType =
   | 'video_state_snapshot'
   | 'timeupdate_stalled'
   | 'dialog_open_timing'
+  | 'video_load_timing'
 
 export interface DiagnosticHeader {
   kind: 'header'

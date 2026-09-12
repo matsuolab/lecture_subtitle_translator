@@ -628,6 +628,14 @@ export default function App() {
 
   // ウィンドウリサイズ中は重いコンポーネントの描画を中断する
   // OSのリサイズハンドルはmouseupが取れないためデバウンスで対応
+  //
+  // 従来はDOMの window 'resize' イベントのみを監視していたが、診断ログでの
+  // 実機検証（Windows/WebView2）で、OSのウィンドウ最大化解除操作に対して
+  // DOM resizeイベントが一度も発火せず、Tauriネイティブの
+  // getCurrentWindow().onResized（Rust側WindowEvent::Resized由来）のみが
+  // 発火するケースが実際に確認された。この環境ではDOM resize依存の実装は
+  // 「ウィンドウの最大化解除では重い描画の一時停止が一切機能しない」という
+  // 実害のあるバグになっていたため、両方を監視するよう修正する。
   const [isResizing, setIsResizing] = useState(false)
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -638,9 +646,28 @@ export default function App() {
       resizeTimerRef.current = setTimeout(() => setIsResizing(false), 500)
     }
     window.addEventListener('resize', handleResize)
+
+    let unlistenNative: (() => void) | null = null
+    let cancelled = false
+    if (isTauri()) {
+      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+        return getCurrentWindow().onResized(handleResize)
+      }).then((unlisten) => {
+        if (cancelled) {
+          unlisten()
+        } else {
+          unlistenNative = unlisten
+        }
+      }).catch(() => {
+        // Tauriネイティブのイベント購読に失敗してもDOM resize側の監視は継続する
+      })
+    }
+
     return () => {
+      cancelled = true
       window.removeEventListener('resize', handleResize)
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+      unlistenNative?.()
     }
   }, [])
 
@@ -742,6 +769,27 @@ export default function App() {
   const loadVideoPath = useCallback(async (path: string) => {
     const name = path.split(/[\\/]/).pop() ?? path
     setVideoSource({ name, path })
+    // 「動画読込に数分かかる」調査用。ダイアログ操作自体(dialog_open_timing)は
+    // 計測済みだが、選択後に実際にURL解決を行うこの関数（register_video/
+    // inspect_video_file invoke、asset HEADプローブ等）は未計測だった。
+    // クリック直後に started を即記録するのは、途中の invoke や fetch が
+    // 長時間応答しない場合に completed が一切記録されないため（started はある
+    // のに completed/failed が無いランは、その工程でフリーズしたことの証拠になる）。
+    // 各ステップの所要時間を stepMs に集めて最後に一括記録し、どのステップが
+    // 重いかを直接切り分けられるようにする。
+    const loadStartedAt = Date.now()
+    const stepMs: Record<string, number> = {}
+    const timeStep = async <T,>(stepName: string, fn: () => Promise<T>): Promise<T> => {
+      const t0 = Date.now()
+      try {
+        return await fn()
+      } finally {
+        stepMs[stepName] = Date.now() - t0
+      }
+    }
+    logDiagnosticEvent('video_load_timing', 'video path load started', {
+      env: collectEnvironmentSnapshot(),
+    })
     // 各OSのWebView動作:
     //   Windows (WebView2/Chromium): convertFileSrc → http://asset.localhost/... で動作
     //   macOS (WKWebView): slash を "%2F" に潰すと asset protocol が実パスを解決できないため、
@@ -778,9 +826,9 @@ export default function App() {
       url = macAsset.url
       assetSegments = macAsset.segments
       try {
-        fallbackUrl = await invoke<string>('register_video', { path })
+        fallbackUrl = await timeStep('register_video', () => invoke<string>('register_video', { path }))
         fallbackRegistered = true
-        const fallbackProbe = await probeHttpVideoUrl(fallbackUrl)
+        const fallbackProbe = await timeStep('probeHttpVideoUrl', () => probeHttpVideoUrl(fallbackUrl!))
         applyFallbackProbe(fallbackProbe)
         console.info('[video][diag] mac fallback registered', {
           primaryUrl: url,
@@ -802,13 +850,19 @@ export default function App() {
       url = convertedUrl
     } else {
       try {
-        url = await invoke<string>('register_video', { path })
+        url = await timeStep('register_video', () => invoke<string>('register_video', { path }))
         console.info('[video] using local HTTP server URL:', url)
-        const httpProbe = await probeHttpVideoUrl(url)
+        const httpProbe = await timeStep('probeHttpVideoUrl', () => probeHttpVideoUrl(url))
         applyFallbackProbe(httpProbe)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error('[video] register_video failed:', msg)
+        logDiagnosticEvent('video_load_timing', 'video path load failed', {
+          totalMs: Date.now() - loadStartedAt,
+          stepMs,
+          error: msg,
+          env: collectEnvironmentSnapshot(),
+        })
         alert(`動画読込失敗: register_video → ${msg}`)
         return
       }
@@ -816,7 +870,7 @@ export default function App() {
 
     let fileDiagnostic: VideoFileDiagnostic | null = null
     try {
-      fileDiagnostic = await invoke<VideoFileDiagnostic>('inspect_video_file', { path })
+      fileDiagnostic = await timeStep('inspect_video_file', () => invoke<VideoFileDiagnostic>('inspect_video_file', { path }))
     } catch (err) {
       fileDiagnostic = {
         exists: false,
@@ -826,7 +880,7 @@ export default function App() {
         openError: describeError(err),
       }
     }
-    const assetProbe = await probeAssetHead(url)
+    const assetProbe = await timeStep('probeAssetHead', () => probeAssetHead(url))
     const isLargeMacVideo = isMac && (fileDiagnostic?.sizeBytes ?? 0) >= 2 * 1024 * 1024 * 1024
     if (isMac && fallbackUrl && (assetProbe.assetReachable !== 'ok' || isLargeMacVideo)) {
       console.warn('[video][diag] using localhost fallback immediately', {
@@ -868,6 +922,12 @@ export default function App() {
     }
     setVideoDiagnostic(diagnostic)
     console.info('[video][diag] load path', diagnostic)
+    logDiagnosticEvent('video_load_timing', 'video path load completed', {
+      totalMs: Date.now() - loadStartedAt,
+      stepMs,
+      assetReachable: assetProbe.assetReachable,
+      env: collectEnvironmentSnapshot(),
+    })
     setVideoUrl(prev => {
       if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
       return url
