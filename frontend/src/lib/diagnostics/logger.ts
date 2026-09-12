@@ -6,9 +6,14 @@ let runId: string | null = null
 let dirPromise: Promise<string> | null = null
 
 function ensureRun(): { runId: string; dir: Promise<string> } {
+  const isFirstRun = !runId
   if (!runId) {
     runId = new Date().toISOString().replace(/[:.]/g, '-')
+  }
+  if (!dirPromise) {
     dirPromise = resolveDiagnosticLogDir()
+  }
+  if (isFirstRun) {
     const header: DiagnosticLogLine = {
       kind: 'header',
       schemaVersion: DIAGNOSTIC_LOG_SCHEMA_VERSION,
@@ -19,14 +24,24 @@ function ensureRun(): { runId: string; dir: Promise<string> } {
     }
     enqueue(header)
   }
-  return { runId, dir: dirPromise! }
+  return { runId, dir: dirPromise }
 }
 
 function enqueue(line: DiagnosticLogLine): void {
-  const { runId: id, dir } = runId ? { runId, dir: dirPromise! } : ensureRun()
+  const { runId: id, dir } = ensureRun()
   queue = queue.then(async () => {
-    const resolvedDir = await dir
-    await appendDiagnosticLine(resolvedDir, id, line)
+    try {
+      const resolvedDir = await dir
+      await appendDiagnosticLine(resolvedDir, id, line)
+    } catch {
+      // 起動直後は Tauri の IPC ブリッジ初期化と競合し resolveDiagnosticLogDir が
+      // 失敗しうる（invoke がまだ生えていない等）。ここで dirPromise を破棄し、
+      // 次回の enqueue で再解決を試みる（失敗したまま固定して以降の記録が
+      // 恒久的に止まるのを防ぐ）。診断ログ自身の失敗でアプリ本体は止めない。
+      if (dir === dirPromise) {
+        dirPromise = null
+      }
+    }
   })
 }
 

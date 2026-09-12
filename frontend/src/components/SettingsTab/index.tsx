@@ -323,7 +323,11 @@ export function SettingsTab({
       const dir = await resolveDiagnosticLogDir()
       await openDiagnosticLogDir(dir)
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'フォルダを開けませんでした。')
+      // Tauri の invoke が起動直後の IPC ブリッジ初期化と競合して例外が
+      // Error インスタンス以外（文字列等）で reject されることがあるため、
+      // フォールバック文言にも実際の内容を残し原因追跡できるようにする。
+      const detail = err instanceof Error ? err.message : String(err)
+      alert(`フォルダを開けませんでした。\n${detail}`)
     }
   }
 
