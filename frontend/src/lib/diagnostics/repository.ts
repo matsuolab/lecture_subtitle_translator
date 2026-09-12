@@ -50,12 +50,17 @@ export async function appendDiagnosticLine(dir: string, runId: string, line: Dia
   }
 }
 
-/** 保管場所フォルダを OS 既定のファイラーで開く */
-export async function openDiagnosticLogDir(dir: string): Promise<void> {
+/**
+ * 現在のランの診断ログ(JSONL)をテキストとして読み出す。
+ * OSのファイラーを開く手段はOS差異（特にmacOSでのパス許可設定）の影響を受けやすいため、
+ * ブラウザのダウンロード（Blob + <a download>）で直接ファイルを取り出せるようにする。
+ */
+export async function readDiagnosticLogText(dir: string, runId: string): Promise<string> {
   if (!isTauri()) {
-    throw new Error('フォルダを開く機能はデスクトップアプリでのみ利用できます')
+    return memoryStore.map((line) => JSON.stringify(line)).join('\n') + (memoryStore.length ? '\n' : '')
   }
-  await ensureDir(dir)
-  const { open } = await import('@tauri-apps/plugin-shell')
-  await open(dir)
+  const { exists, readTextFile } = await import('@tauri-apps/plugin-fs')
+  const path = await runFilePath(dir, runId)
+  if (!(await exists(path))) return ''
+  return readTextFile(path)
 }

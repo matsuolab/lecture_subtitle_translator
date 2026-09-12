@@ -34,8 +34,10 @@ import {
   type SubtitleQualityPreset,
 } from '@/lib/pipeline/subtitleQualityPresets'
 import { tauriFetch } from '@/lib/tauriFetch'
-import { getWorkLogDir, isWorkLogPersistent, openWorkLogDir } from '@/lib/worklog/repository'
-import { isDiagnosticLogPersistent, openDiagnosticLogDir, resolveDiagnosticLogDir } from '@/lib/diagnostics/repository'
+import { getWorkLogDir, isWorkLogPersistent, readWorkLogSessionText } from '@/lib/worklog/repository'
+import { readActiveSessionId } from '@/hooks/useWorkLog'
+import { isDiagnosticLogPersistent, readDiagnosticLogText, resolveDiagnosticLogDir } from '@/lib/diagnostics/repository'
+import { getCurrentDiagnosticRunId } from '@/lib/diagnostics/logger'
 import { isSupportedWhisperxLanguage, resolveTranscribeLanguageLabels, resolveWhisperxImage, WHISPERX_LANGUAGES } from '@/lib/pipeline/whisperxLanguages'
 
 
@@ -309,25 +311,43 @@ export function SettingsTab({
     }
   }
 
-  async function handleOpenWorkLogDir() {
+  function downloadTextFile(filename: string, text: string, mimeType = 'application/jsonl') {
+    const blob = new Blob([text], { type: mimeType })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function handleDownloadWorkLog() {
     try {
+      const sessionId = readActiveSessionId()
+      if (!sessionId) {
+        alert('ダウンロード対象のワークログがまだありません（編集セッション開始前です）。')
+        return
+      }
       const dir = await getWorkLogDir(adminSettings.workLogDir)
-      await openWorkLogDir(dir)
+      const text = await readWorkLogSessionText(dir, sessionId)
+      downloadTextFile(`worklog-${sessionId}.jsonl`, text)
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'フォルダを開けませんでした。')
+      alert(err instanceof Error ? err.message : 'ワークログのダウンロードに失敗しました。')
     }
   }
 
-  async function handleOpenDiagnosticLogDir() {
+  async function handleDownloadDiagnosticLog() {
     try {
+      const runId = getCurrentDiagnosticRunId()
+      if (!runId) {
+        alert('ダウンロード対象の診断ログがまだありません。')
+        return
+      }
       const dir = await resolveDiagnosticLogDir()
-      await openDiagnosticLogDir(dir)
+      const text = await readDiagnosticLogText(dir, runId)
+      downloadTextFile(`diagnostics-${runId}.jsonl`, text)
     } catch (err) {
-      // Tauri の invoke が起動直後の IPC ブリッジ初期化と競合して例外が
-      // Error インスタンス以外（文字列等）で reject されることがあるため、
-      // フォールバック文言にも実際の内容を残し原因追跡できるようにする。
-      const detail = err instanceof Error ? err.message : String(err)
-      alert(`フォルダを開けませんでした。\n${detail}`)
+      alert(err instanceof Error ? err.message : '診断ログのダウンロードに失敗しました。')
     }
   }
 
@@ -1017,8 +1037,8 @@ export function SettingsTab({
                 既定に戻す
               </button>
             )}
-            <button type="button" onClick={handleOpenWorkLogDir} style={smallButtonStyle(theme)}>
-              フォルダを開く
+            <button type="button" onClick={handleDownloadWorkLog} style={smallButtonStyle(theme)}>
+              現在のログをダウンロード
             </button>
           </div>
           <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.6 }}>
@@ -1035,8 +1055,8 @@ export function SettingsTab({
             起動から終了までのエラー・警告・処理遅延を記録します。通常は見る必要はありません。
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button type="button" onClick={handleOpenDiagnosticLogDir} style={smallButtonStyle(theme)}>
-              フォルダを開く
+            <button type="button" onClick={handleDownloadDiagnosticLog} style={smallButtonStyle(theme)}>
+              現在のログをダウンロード
             </button>
           </div>
           {!isDiagnosticLogPersistent() && (

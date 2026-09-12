@@ -109,7 +109,8 @@ function rememberActiveSessionId(sessionId: string): void {
   }
 }
 
-function readActiveSessionId(): string | null {
+/** 進行中のワークログセッションID（未開始なら null）。ダウンロード機能等、フック外から参照するために公開 */
+export function readActiveSessionId(): string | null {
   try {
     return localStorage.getItem(ACTIVE_SESSION_KEY)
   } catch {

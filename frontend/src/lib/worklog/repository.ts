@@ -83,12 +83,12 @@ export async function readWorkLogSession(
   return parseJsonl(await readTextFile(path))
 }
 
-/** 保管場所フォルダを OS 既定のファイラーで開く */
-export async function openWorkLogDir(dir: string): Promise<void> {
-  if (!isTauri()) {
-    throw new Error('フォルダを開く機能はデスクトップアプリでのみ利用できます')
-  }
-  await ensureDir(dir)
-  const { open } = await import('@tauri-apps/plugin-shell')
-  await open(dir)
+/**
+ * セッションのワークログをJSONLテキストとして読み出す。
+ * OSのファイラーを開く手段はOS差異（特にmacOSでのパス許可設定）の影響を受けやすいため、
+ * ブラウザのダウンロード（Blob + <a download>）で直接ファイルを取り出せるようにする。
+ */
+export async function readWorkLogSessionText(dir: string, sessionId: string): Promise<string> {
+  const lines = await readWorkLogSession(dir, sessionId)
+  return lines.map(serializeLine).join('\n') + (lines.length ? '\n' : '')
 }
