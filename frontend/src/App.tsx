@@ -2292,25 +2292,50 @@ export default function App() {
       }
     : null
 
-  // 「全画面から戻すと字幕が消える」調査用: リサイズが確定した瞬間（isResizingが
-  // true→falseに変わった直後）に、字幕オーバーレイが実際に表示可能な状態か
-  // （subtitleOverlayの有無そのもの）を記録する。useVideoSyncのtimeupdate_stalled
-  // は「currentTimeの更新が止まったか」を見るが、これはその結果として実際に
-  // 字幕が消えたかどうかを直接裏付ける。
-  const prevIsResizingRef = useRef(isResizing)
+  // 「全画面から戻すと字幕が消える」調査用: 再生中のはずなのに字幕オーバーレイ
+  // （currentBlock）が見つからない状態を記録する。
+  //
+  // isResizing はDOMの window 'resize' イベントのみに依存する（既存機能、右
+  // パネルの重い描画停止用）。一方 useVideoSync.ts 側では、DOM resizeが
+  // 発火しない/遅延するケースを疑いTauriネイティブのonResizedも監視している。
+  // もし実際にDOM resizeが来ずnativeのみ発火するケースがあるなら、isResizing
+  // ベースのこの記録は「最も疑わしいケースでこそトリガーされない」という
+  // 矛盾を抱える。そのため、リサイズイベントへの直接フックではなく、
+  // 「再生中のはずなのに字幕オーバーレイが無い」状態を独立して定期監視する
+  // 方式にし、DOM/native どちらのリサイズ経路が原因でも検知できるようにする。
+  // 原因がリサイズであることの裏付けは、このイベントのタイムスタンプと
+  // useVideoSync側のvideo_state_snapshot（source: dom/tauri_native）の
+  // タイムスタンプ近接性から推測する。
+  //
+  // 動画の冒頭・末尾（もともと字幕ブロックが存在しない区間）でも currentBlock
+  // は undefined になり、これは正常な動作であって不具合ではない。誤検知として
+  // 除外することも考えたが、除外すると本当にノイズなのか実は境界ケースの
+  // 不具合なのかを後から判別する材料が失われる。そのため記録自体は絞り込まず、
+  // 「直前まで表示されていた字幕が消えたのか（wasShowingJustBefore: true）」
+  // を detail に含め、ログを読む側で正常区間と異常区間を区別できるようにする。
+  const missingOverlayLoggedRef = useRef(false)
+  const hadCurrentBlockRef = useRef(false)
   useEffect(() => {
-    if (prevIsResizingRef.current && !isResizing) {
-      // subtitleOverlay はオブジェクトで毎レンダー再生成されるため依存に使わず、
-      // currentBlock の有無（= subtitleOverlay が非nullになる条件と同一）で代用する。
-      logDiagnosticEvent('video_state_snapshot', 'resize settled (subtitle overlay check)', {
-        hasVideoElement: videoRef.current != null,
-        paused: videoRef.current?.paused ?? null,
-        currentTime,
-        hasCurrentBlock: currentBlock !== undefined,
-      })
+    if (!isPlaying) {
+      missingOverlayLoggedRef.current = false
+      hadCurrentBlockRef.current = currentBlock !== undefined
+      return
     }
-    prevIsResizingRef.current = isResizing
-  }, [isResizing, currentBlock, currentTime, videoRef])
+    if (currentBlock === undefined) {
+      if (!missingOverlayLoggedRef.current) {
+        missingOverlayLoggedRef.current = true
+        logDiagnosticEvent('video_state_snapshot', 'subtitle overlay missing while playing', {
+          hasVideoElement: videoRef.current != null,
+          paused: videoRef.current?.paused ?? null,
+          currentTime,
+          wasShowingJustBefore: hadCurrentBlockRef.current,
+        })
+      }
+    } else {
+      missingOverlayLoggedRef.current = false
+    }
+    hadCurrentBlockRef.current = currentBlock !== undefined
+  }, [isPlaying, currentBlock, currentTime, videoRef])
 
   const approvedCount = blocks.filter(b => b.status === 'approved').length
 

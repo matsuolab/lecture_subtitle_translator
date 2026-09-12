@@ -74,6 +74,18 @@ export function useVideoSync(blocks: SubtitleBlock[], videoUrl: string | null): 
   // video.paused（DOMの実プロパティ）を基準にすることでズレの影響を受けない。
   const togglePlay = useCallback(() => {
     if (!videoRef.current) return
+    // isPlayingとvideo.pausedが実際にズレていたかを操作のたびに記録する。
+    // togglePlay自体はvideo.paused基準に修正済みで症状は改善するはずだが、
+    // 「ズレが本当に発生していたか」を裏付けるログが無いと、この対症療法が
+    // 的を射ていたかの検証も、再発時の切り分けもできない。
+    // isPlaying=trueならvideo.pausedはfalseのはず（逆も同様）。一致しない
+    // 場合のみ記録し、一致時はノイズになるため記録しない。
+    const expectedPaused = !isPlayingRef.current
+    if (videoRef.current.paused !== expectedPaused) {
+      logDiagnosticEvent('video_state_snapshot', 'togglePlay: isPlaying/paused mismatch', {
+        ...snapshotVideoState(videoRef.current, isPlayingRef.current),
+      })
+    }
     if (videoRef.current.paused) {
       videoRef.current.play()
     } else {
