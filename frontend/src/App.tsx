@@ -628,6 +628,14 @@ export default function App() {
 
   // ウィンドウリサイズ中は重いコンポーネントの描画を中断する
   // OSのリサイズハンドルはmouseupが取れないためデバウンスで対応
+  //
+  // 従来はDOMの window 'resize' イベントのみを監視していたが、診断ログでの
+  // 実機検証（Windows/WebView2）で、OSのウィンドウ最大化解除操作に対して
+  // DOM resizeイベントが一度も発火せず、Tauriネイティブの
+  // getCurrentWindow().onResized（Rust側WindowEvent::Resized由来）のみが
+  // 発火するケースが実際に確認された。この環境ではDOM resize依存の実装は
+  // 「ウィンドウの最大化解除では重い描画の一時停止が一切機能しない」という
+  // 実害のあるバグになっていたため、両方を監視するよう修正する。
   const [isResizing, setIsResizing] = useState(false)
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -638,9 +646,28 @@ export default function App() {
       resizeTimerRef.current = setTimeout(() => setIsResizing(false), 500)
     }
     window.addEventListener('resize', handleResize)
+
+    let unlistenNative: (() => void) | null = null
+    let cancelled = false
+    if (isTauri()) {
+      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+        return getCurrentWindow().onResized(handleResize)
+      }).then((unlisten) => {
+        if (cancelled) {
+          unlisten()
+        } else {
+          unlistenNative = unlisten
+        }
+      }).catch(() => {
+        // Tauriネイティブのイベント購読に失敗してもDOM resize側の監視は継続する
+      })
+    }
+
     return () => {
+      cancelled = true
       window.removeEventListener('resize', handleResize)
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+      unlistenNative?.()
     }
   }, [])
 
